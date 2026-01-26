@@ -2,12 +2,15 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle } from "lucide-react";
+import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard } from "lucide-react";
 import { PatientHeader } from "@/components/PatientHeader";
 import { DischargeScore } from "@/components/DischargeScore";
 import { RiskFactorCard } from "@/components/RiskFactorCard";
+import { EvaluationDashboard } from "@/components/EvaluationDashboard";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
+
+type TabType = "dashboard" | "evaluation";
 
 // Demo patients for quick selection
 const DEMO_PATIENTS = [
@@ -17,6 +20,7 @@ const DEMO_PATIENTS = [
 ];
 
 export default function DashboardPage() {
+  const [activeTab, setActiveTab] = useState<TabType>("dashboard");
   const [selectedPatientId, setSelectedPatientId] = useState<string>("");
   const [patient, setPatient] = useState<Patient | null>(null);
   const [analysis, setAnalysis] = useState<DischargeAnalysis | null>(null);
@@ -128,82 +132,118 @@ export default function DashboardPage() {
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center">
-                <Activity className="w-6 h-6 text-white" />
+            <div className="flex items-center gap-6">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center">
+                  <Activity className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <h1 className="text-xl font-bold text-gray-900">TransitionIQ</h1>
+                  <p className="text-xs text-gray-500">Discharge Readiness Assessment</p>
+                </div>
               </div>
-              <div>
-                <h1 className="text-xl font-bold text-gray-900">TransitionIQ</h1>
-                <p className="text-xs text-gray-500">Discharge Readiness Assessment</p>
-              </div>
+
+              {/* Tab Navigation */}
+              <nav className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+                <button
+                  onClick={() => setActiveTab("dashboard")}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                    activeTab === "dashboard"
+                      ? "bg-white text-gray-900 shadow-sm"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  <LayoutDashboard className="w-4 h-4" />
+                  Dashboard
+                </button>
+                <button
+                  onClick={() => setActiveTab("evaluation")}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                    activeTab === "evaluation"
+                      ? "bg-white text-gray-900 shadow-sm"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  <FlaskConical className="w-4 h-4" />
+                  Evaluation
+                </button>
+              </nav>
             </div>
 
-            {/* Patient Selector */}
-            <div className="relative">
-              <button
-                onClick={() => setShowPatientDropdown(!showPatientDropdown)}
-                className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-              >
-                <Users className="w-4 h-4 text-gray-600" />
-                <span className="text-sm font-medium text-gray-700">
-                  {patient ? patient.name : "Select Patient"}
-                </span>
-                <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showPatientDropdown ? "rotate-180" : ""}`} />
-              </button>
+            {/* Patient Selector - only show on dashboard tab */}
+            {activeTab === "dashboard" && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowPatientDropdown(!showPatientDropdown)}
+                  className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                >
+                  <Users className="w-4 h-4 text-gray-600" />
+                  <span className="text-sm font-medium text-gray-700">
+                    {patient ? patient.name : "Select Patient"}
+                  </span>
+                  <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showPatientDropdown ? "rotate-180" : ""}`} />
+                </button>
 
-              <AnimatePresence>
-                {showPatientDropdown && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -10 }}
-                    className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50"
-                  >
-                    <div className="p-2">
-                      <p className="text-xs font-medium text-gray-500 px-3 py-2">Demo Patients</p>
-                      {DEMO_PATIENTS.map((p) => (
-                        <button
-                          key={p.id}
-                          onClick={() => {
-                            setSelectedPatientId(p.id);
-                            setShowPatientDropdown(false);
-                          }}
-                          className={`w-full text-left px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors ${
-                            selectedPatientId === p.id ? "bg-blue-50" : ""
-                          }`}
-                        >
-                          <p className="font-medium text-gray-900">{p.name}</p>
-                          <p className="text-xs text-gray-500">{p.description}</p>
-                        </button>
-                      ))}
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
+                <AnimatePresence>
+                  {showPatientDropdown && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50"
+                    >
+                      <div className="p-2">
+                        <p className="text-xs font-medium text-gray-500 px-3 py-2">Demo Patients</p>
+                        {DEMO_PATIENTS.map((p) => (
+                          <button
+                            key={p.id}
+                            onClick={() => {
+                              setSelectedPatientId(p.id);
+                              setShowPatientDropdown(false);
+                            }}
+                            className={`w-full text-left px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors ${
+                              selectedPatientId === p.id ? "bg-blue-50" : ""
+                            }`}
+                          >
+                            <p className="font-medium text-gray-900">{p.name}</p>
+                            <p className="text-xs text-gray-500">{p.description}</p>
+                          </button>
+                        ))}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            )}
           </div>
         </div>
       </header>
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Error Banner */}
-        <AnimatePresence>
-          {error && (
-            <motion.div
-              initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700"
-            >
-              <p className="font-medium">Error</p>
-              <p className="text-sm">{error}</p>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* Evaluation Tab */}
+        {activeTab === "evaluation" && <EvaluationDashboard />}
 
-        {/* No Patient Selected */}
-        {!selectedPatientId && (
+        {/* Dashboard Tab */}
+        {activeTab === "dashboard" && (
+          <>
+            {/* Error Banner */}
+            <AnimatePresence>
+              {error && (
+                <motion.div
+                  initial={{ opacity: 0, y: -20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700"
+                >
+                  <p className="font-medium">Error</p>
+                  <p className="text-sm">{error}</p>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* No Patient Selected */}
+            {!selectedPatientId && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -384,6 +424,8 @@ export default function DashboardPage() {
               </motion.div>
             )}
           </div>
+        )}
+          </>
         )}
       </main>
 

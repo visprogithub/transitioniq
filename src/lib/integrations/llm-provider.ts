@@ -32,29 +32,31 @@ export interface LLMResponse {
 }
 
 // Default model configs
+// Note: Use correct model IDs from Google AI Studio
+// See: https://ai.google.dev/gemini-api/docs/models/gemini
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
-  "gemini-2.0-flash": {
+  "gemini-2.0-flash-exp": {
     provider: "gemini",
-    modelId: "gemini-2.0-flash",
+    modelId: "gemini-2.0-flash-exp",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
   },
-  "gemini-1.5-pro": {
+  "gemini-1.5-flash-latest": {
     provider: "gemini",
-    modelId: "gemini-1.5-pro",
+    modelId: "gemini-1.5-flash-latest",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
   },
-  "gemini-1.5-flash": {
+  "gemini-1.5-pro-latest": {
     provider: "gemini",
-    modelId: "gemini-1.5-flash",
+    modelId: "gemini-1.5-pro-latest",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
   },
 };
 
 // Active model (can be changed for A/B testing)
-let activeModelId = process.env.LLM_MODEL || "gemini-2.0-flash";
+let activeModelId = process.env.LLM_MODEL || "gemini-2.0-flash-exp";
 
 /**
  * Get the current active model ID
@@ -182,21 +184,31 @@ export class LLMProvider {
       };
     } catch (error) {
       const latencyMs = Date.now() - startTime;
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+
+      // Check for rate limit errors
+      const isRateLimited = errorMessage.includes("429") || errorMessage.includes("quota") || errorMessage.includes("Too Many Requests");
 
       // Log error to Opik
       if (trace) {
         trace.update({
           output: {
-            error: error instanceof Error ? error.message : "Unknown error",
+            error: errorMessage,
           },
           metadata: {
             success: false,
             error: true,
+            rate_limited: isRateLimited,
             latency_ms: latencyMs,
           },
         });
         trace.end();
         await this.opik?.flush();
+      }
+
+      // Provide more helpful error message for rate limits
+      if (isRateLimited) {
+        throw new Error(`Rate limit exceeded for ${this.config.modelId}. Please wait and try again, or use a paid API key.`);
       }
 
       throw error;
