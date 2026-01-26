@@ -1,36 +1,78 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TransitionIQ - AI Discharge Readiness Assessment
 
-## Getting Started
+**PROPRIETARY AND CONFIDENTIAL**
 
-First, run the development server:
+Copyright (c) 2026. All Rights Reserved.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+This software and its source code are proprietary and confidential. Unauthorized copying, modification, distribution, or use of this software, in whole or in part, is strictly prohibited. This project is NOT open source and is NOT licensed for public use.
+
+---
+
+## Overview
+
+TransitionIQ is an AI-powered discharge readiness assessment tool that helps healthcare providers evaluate whether patients are safe to leave the hospital. It fuses multiple data sources to provide a comprehensive risk assessment:
+
+- **FHIR Patient Data** - Medications, conditions, and lab results
+- **FDA Safety Signals** - Drug interaction checks via RxNorm
+- **Clinical Guidelines** - ACC/AHA, ADA, GOLD guideline compliance
+- **CMS Cost Estimates** - Out-of-pocket cost barriers
+
+## Tech Stack
+
+- **Frontend**: Next.js 15 with App Router, TypeScript, Tailwind CSS
+- **LLM**: Google Gemini 2.0 Flash
+- **Observability**: Opik (Comet) for tracing and evaluation
+- **Hosting**: Vercel
+
+## Features
+
+- Animated discharge readiness score (0-100)
+- Risk factor cards with severity levels (high/moderate/low)
+- Data source attribution (FDA, FHIR, Guidelines)
+- AI-generated discharge planning checklist
+- Real-time Opik tracing for all API calls
+
+## Environment Variables
+
+Create a `.env.local` file with:
+
+```env
+GEMINI_API_KEY=your_gemini_api_key
+OPIK_API_KEY=your_opik_api_key
+OPIK_PROJECT_NAME=transitioniq
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Development
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Open [http://localhost:3000](http://localhost:3000) to view the dashboard.
 
-## Learn More
+## API Endpoints
 
-To learn more about Next.js, take a look at the following resources:
+- `GET /api/patient/[id]` - Fetch patient data
+- `POST /api/analyze` - Run discharge readiness analysis
+- `POST /api/generate-plan` - Generate discharge checklist
+- `GET /api/evaluate` - View test cases
+- `POST /api/evaluate` - Run evaluation with Opik tracking
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Demo Patients
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| ID | Name | Scenario |
+|----|------|----------|
+| `demo-polypharmacy` | John Smith | 12 medications, high drug interaction risk |
+| `demo-heart-failure` | Mary Johnson | CHF + COPD, elevated BNP |
+| `demo-ready` | Robert Chen | Post-appendectomy, stable |
 
-## Deploy on Vercel
+## Hackathon
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Built for the Encode Club "Commit To Change" (Comet Resolution V2) Hackathon, targeting:
+- Health, Fitness & Wellness Prize
+- Best Use of Opik Prize
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+**NOTICE**: This software is proprietary. No license is granted for use, modification, or distribution.

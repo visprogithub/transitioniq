@@ -1,0 +1,259 @@
+"use client";
+
+import { useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  AlertTriangle,
+  AlertCircle,
+  CheckCircle,
+  ChevronDown,
+  ChevronUp,
+  Pill,
+  Heart,
+  Calendar,
+  DollarSign,
+  BookOpen,
+  Activity,
+} from "lucide-react";
+import type { RiskFactor } from "@/lib/types/analysis";
+
+interface RiskFactorCardProps {
+  riskFactor: RiskFactor;
+  isExpanded?: boolean;
+  onToggle?: () => void;
+  index?: number;
+}
+
+const categoryIcons: Record<string, React.ElementType> = {
+  drug_interaction: Pill,
+  care_gap: BookOpen,
+  follow_up: Calendar,
+  cost_barrier: DollarSign,
+  patient_education: BookOpen,
+  lab_abnormality: Activity,
+  vital_sign: Heart,
+  social_determinant: AlertCircle,
+};
+
+const sourceColors: Record<string, string> = {
+  FDA: "bg-purple-100 text-purple-700",
+  CMS: "bg-blue-100 text-blue-700",
+  Guidelines: "bg-green-100 text-green-700",
+  FHIR: "bg-orange-100 text-orange-700",
+  Internal: "bg-gray-100 text-gray-700",
+};
+
+export function RiskFactorCard({ riskFactor, isExpanded: controlledExpanded, onToggle, index = 0 }: RiskFactorCardProps) {
+  const [internalExpanded, setInternalExpanded] = useState(false);
+
+  // Use controlled state if provided, otherwise internal state
+  const isExpanded = controlledExpanded !== undefined ? controlledExpanded : internalExpanded;
+  const handleToggle = onToggle || (() => setInternalExpanded(!internalExpanded));
+
+  // Alias for easier reading
+  const factor = riskFactor;
+
+  const getSeverityStyles = () => {
+    switch (factor.severity) {
+      case "high":
+        return {
+          border: "border-l-red-500",
+          bg: "bg-red-50",
+          icon: AlertTriangle,
+          iconColor: "text-red-500",
+          badge: "bg-red-100 text-red-700",
+        };
+      case "moderate":
+        return {
+          border: "border-l-amber-500",
+          bg: "bg-amber-50",
+          icon: AlertCircle,
+          iconColor: "text-amber-500",
+          badge: "bg-amber-100 text-amber-700",
+        };
+      case "low":
+        return {
+          border: "border-l-emerald-500",
+          bg: "bg-emerald-50",
+          icon: CheckCircle,
+          iconColor: "text-emerald-500",
+          badge: "bg-emerald-100 text-emerald-700",
+        };
+      default:
+        return {
+          border: "border-l-gray-500",
+          bg: "bg-gray-50",
+          icon: AlertCircle,
+          iconColor: "text-gray-500",
+          badge: "bg-gray-100 text-gray-700",
+        };
+    }
+  };
+
+  const styles = getSeverityStyles();
+  const SeverityIcon = styles.icon;
+  const CategoryIcon = categoryIcons[factor.category] || AlertCircle;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -20 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ delay: index * 0.1 }}
+      className={`border-l-4 ${styles.border} rounded-lg shadow-sm overflow-hidden`}
+    >
+      {/* Header - Always visible */}
+      <button
+        onClick={handleToggle}
+        className={`w-full ${styles.bg} p-4 flex items-center justify-between hover:brightness-95 transition-all`}
+      >
+        <div className="flex items-center gap-4">
+          <SeverityIcon className={`w-6 h-6 ${styles.iconColor}`} />
+          <div className="text-left">
+            <h3 className="font-semibold text-gray-900">{factor.title}</h3>
+            <div className="flex items-center gap-2 mt-1">
+              <span className={`text-xs px-2 py-0.5 rounded-full ${styles.badge}`}>
+                {factor.severity.toUpperCase()}
+              </span>
+              <span className={`text-xs px-2 py-0.5 rounded-full ${sourceColors[factor.source] || sourceColors.Internal}`}>
+                {factor.source}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <CategoryIcon className="w-5 h-5 text-gray-400" />
+          {isExpanded ? (
+            <ChevronUp className="w-5 h-5 text-gray-400" />
+          ) : (
+            <ChevronDown className="w-5 h-5 text-gray-400" />
+          )}
+        </div>
+      </button>
+
+      {/* Expanded content */}
+      <AnimatePresence>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="bg-white border-t border-gray-100"
+          >
+            <div className="p-4 space-y-4">
+              {/* Description */}
+              <div>
+                <h4 className="text-sm font-medium text-gray-500 mb-1">Description</h4>
+                <p className="text-gray-700">{factor.description}</p>
+              </div>
+
+              {/* Resolution (if actionable) */}
+              {factor.actionable && factor.resolution && (
+                <div className="bg-blue-50 rounded-lg p-3">
+                  <h4 className="text-sm font-medium text-blue-700 mb-1">
+                    Recommended Action
+                  </h4>
+                  <p className="text-blue-600 text-sm">{factor.resolution}</p>
+                </div>
+              )}
+
+              {/* Category info */}
+              <div className="flex items-center gap-4 text-sm text-gray-500 pt-2 border-t border-gray-100">
+                <div className="flex items-center gap-1">
+                  <CategoryIcon className="w-4 h-4" />
+                  <span className="capitalize">{factor.category.replace(/_/g, " ")}</span>
+                </div>
+                {factor.actionable && (
+                  <span className="text-green-600">Actionable</span>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}
+
+interface RiskFactorListProps {
+  factors: RiskFactor[];
+  isLoading?: boolean;
+}
+
+export function RiskFactorList({ factors, isLoading = false }: RiskFactorListProps) {
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        {[1, 2, 3].map((i) => (
+          <div key={i} className="animate-pulse">
+            <div className="h-20 bg-gray-200 rounded-lg" />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  const highRisk = factors.filter((f) => f.severity === "high");
+  const moderateRisk = factors.filter((f) => f.severity === "moderate");
+  const lowRisk = factors.filter((f) => f.severity === "low");
+
+  return (
+    <div className="space-y-6">
+      {/* High Risk */}
+      {highRisk.length > 0 && (
+        <div>
+          <h3 className="text-lg font-semibold text-red-600 mb-3 flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5" />
+            High Risk ({highRisk.length})
+          </h3>
+          <div className="space-y-3">
+            {highRisk.map((factor, i) => (
+              <RiskFactorCard key={factor.id} factor={factor} index={i} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Moderate Risk */}
+      {moderateRisk.length > 0 && (
+        <div>
+          <h3 className="text-lg font-semibold text-amber-600 mb-3 flex items-center gap-2">
+            <AlertCircle className="w-5 h-5" />
+            Moderate Concerns ({moderateRisk.length})
+          </h3>
+          <div className="space-y-3">
+            {moderateRisk.map((factor, i) => (
+              <RiskFactorCard key={factor.id} factor={factor} index={i + highRisk.length} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Low Risk */}
+      {lowRisk.length > 0 && (
+        <div>
+          <h3 className="text-lg font-semibold text-emerald-600 mb-3 flex items-center gap-2">
+            <CheckCircle className="w-5 h-5" />
+            Low / Resolved ({lowRisk.length})
+          </h3>
+          <div className="space-y-3">
+            {lowRisk.map((factor, i) => (
+              <RiskFactorCard
+                key={factor.id}
+                factor={factor}
+                index={i + highRisk.length + moderateRisk.length}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {factors.length === 0 && (
+        <div className="text-center py-8 text-gray-500">
+          <CheckCircle className="w-12 h-12 mx-auto mb-2 text-emerald-500" />
+          <p>No risk factors identified</p>
+        </div>
+      )}
+    </div>
+  );
+}
