@@ -1,23 +1,45 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+/**
+ * Gemini LLM Integration - REQUIRED for all analysis
+ *
+ * This module provides real LLM-powered analysis using Gemini.
+ * NO FALLBACKS - if Gemini fails, the request fails.
+ *
+ * Uses the LLMProvider abstraction for model swapping and Opik evaluation.
+ */
+
 import type { Patient } from "../types/patient";
 import type { DischargeAnalysis, RiskFactor } from "../types/analysis";
+import {
+  getDischargeAnalysisPrompt,
+  formatDischargePrompt,
+  logPromptUsage,
+  initializeOpikPrompts,
+} from "./opik-prompts";
+import { createLLMProvider, getActiveModelId, type LLMProvider } from "./llm-provider";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-// Use gemini-2.0-flash - available in the API
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+// Validate API key at module load
+if (!process.env.GEMINI_API_KEY) {
+  console.error("GEMINI_API_KEY is required - no fallback available");
+}
 
-export async function analyzeDischargeReadiness(
-  patient: Patient,
-  drugInteractions: DrugInteraction[],
-  careGaps: CareGap[],
-  costEstimates: CostEstimate[]
-): Promise<DischargeAnalysis> {
-  const prompt = buildAnalysisPrompt(patient, drugInteractions, careGaps, costEstimates);
+// Initialize Opik prompts on first use
+let promptsInitialized = false;
 
-  const result = await model.generateContent(prompt);
-  const responseText = result.response.text();
+// LLM provider instance (created on first use)
+let llmProvider: LLMProvider | null = null;
 
-  return parseAnalysisResponse(patient.id, responseText);
+function getLLMProvider(): LLMProvider {
+  if (!llmProvider) {
+    llmProvider = createLLMProvider();
+  }
+  return llmProvider;
+}
+
+/**
+ * Reset the LLM provider (useful for model switching in evaluations)
+ */
+export function resetLLMProvider(): void {
+  llmProvider = null;
 }
 
 interface DrugInteraction {
@@ -41,153 +63,218 @@ interface CostEstimate {
   covered: boolean;
 }
 
-function buildAnalysisPrompt(
+/**
+ * Analyze discharge readiness using Gemini LLM
+ * NO FALLBACK - throws error if LLM unavailable
+ */
+export async function analyzeDischargeReadiness(
   patient: Patient,
   drugInteractions: DrugInteraction[],
   careGaps: CareGap[],
   costEstimates: CostEstimate[]
-): string {
-  return `You are a clinical decision support system analyzing discharge readiness.
+): Promise<DischargeAnalysis> {
+  // Validate API key
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is required. Configure it in environment variables.");
+  }
 
-## Patient Information
-- Name: ${patient.name}
-- Age: ${patient.age} years old, ${patient.gender === "M" ? "Male" : patient.gender === "F" ? "Female" : "Other"}
-- Admission Date: ${patient.admissionDate}
-- Diagnoses: ${patient.diagnoses.map((d) => d.display).join(", ")}
-- Current Medications (${patient.medications.length}):
-${patient.medications.map((m) => `  - ${m.name} ${m.dose} ${m.frequency}`).join("\n")}
-- Allergies: ${patient.allergies.length > 0 ? patient.allergies.join(", ") : "None documented"}
+  // Initialize Opik prompts if not done
+  if (!promptsInitialized) {
+    await initializeOpikPrompts();
+    promptsInitialized = true;
+  }
 
-## Drug Interaction Analysis (FDA)
-${
-  drugInteractions.length > 0
-    ? drugInteractions
-        .map(
-          (i) =>
-            `- ${i.drug1} + ${i.drug2}: ${i.severity.toUpperCase()} - ${i.description}${i.faersCount ? ` (${i.faersCount} FAERS reports)` : ""}`
-        )
-        .join("\n")
-    : "No significant interactions detected"
-}
+  const startTime = Date.now();
 
-## Care Gap Analysis (Clinical Guidelines)
-${
-  careGaps.filter((g) => g.status === "unmet").length > 0
-    ? careGaps
-        .filter((g) => g.status === "unmet")
-        .map((g) => `- ${g.guideline} (Grade ${g.grade}): ${g.recommendation}`)
-        .join("\n")
-    : "All applicable guidelines met"
-}
+  // Get prompt from Opik Prompt Library
+  const { template, commit, fromOpik } = await getDischargeAnalysisPrompt();
 
-## Cost Barrier Analysis (CMS)
-${
-  costEstimates.filter((c) => c.monthlyOOP > 50).length > 0
-    ? costEstimates
-        .filter((c) => c.monthlyOOP > 50)
-        .map((c) => `- ${c.medication}: $${c.monthlyOOP}/month OOP${!c.covered ? " (NOT COVERED)" : ""}`)
-        .join("\n")
-    : "No significant cost barriers identified"
-}
+  // Format prompt with patient data
+  const prompt = formatDischargePrompt(template, {
+    patient_name: patient.name,
+    patient_age: patient.age,
+    patient_gender: patient.gender === "M" ? "Male" : patient.gender === "F" ? "Female" : "Other",
+    admission_date: patient.admissionDate,
+    diagnoses: patient.diagnoses.map((d) => d.display).join(", "),
+    medication_count: patient.medications.length,
+    medications: patient.medications
+      .map((m) => `  - ${m.name} ${m.dose} ${m.frequency}`)
+      .join("\n"),
+    allergies: patient.allergies.length > 0 ? patient.allergies.join(", ") : "None documented",
+    drug_interactions:
+      drugInteractions.length > 0
+        ? drugInteractions
+            .map(
+              (i) =>
+                `- ${i.drug1} + ${i.drug2}: ${i.severity.toUpperCase()} - ${i.description}${
+                  i.faersCount ? ` (${i.faersCount} FAERS reports)` : ""
+                }`
+            )
+            .join("\n")
+        : "No significant interactions detected",
+    care_gaps:
+      careGaps.filter((g) => g.status === "unmet").length > 0
+        ? careGaps
+            .filter((g) => g.status === "unmet")
+            .map((g) => `- ${g.guideline} (Grade ${g.grade}): ${g.recommendation}`)
+            .join("\n")
+        : "All applicable guidelines met",
+    cost_barriers:
+      costEstimates.filter((c) => c.monthlyOOP > 50).length > 0
+        ? costEstimates
+            .filter((c) => c.monthlyOOP > 50)
+            .map(
+              (c) =>
+                `- ${c.medication}: $${c.monthlyOOP}/month OOP${!c.covered ? " (NOT COVERED)" : ""}`
+            )
+            .join("\n")
+        : "No significant cost barriers identified",
+    lab_results:
+      patient.recentLabs && patient.recentLabs.length > 0
+        ? patient.recentLabs
+            .map(
+              (l) =>
+                `- ${l.name}: ${l.value} ${l.unit} (ref: ${l.referenceRange})${
+                  l.abnormal ? " [ABNORMAL]" : ""
+                }`
+            )
+            .join("\n")
+        : "No recent labs available",
+  });
 
-## Task
-Analyze this patient's discharge readiness and provide:
+  // Call LLM via provider - NO TRY/CATCH - let errors propagate
+  const provider = getLLMProvider();
+  const llmResponse = await provider.generate(prompt, {
+    spanName: "discharge-analysis",
+    metadata: {
+      patient_id: patient.id,
+      prompt_commit: commit,
+      prompt_from_opik: fromOpik,
+    },
+  });
+  const responseText = llmResponse.content;
+  const latencyMs = llmResponse.latencyMs;
 
-1. An overall readiness score from 0-100 (higher = more ready)
-2. A list of risk factors categorized by severity (high/moderate/low)
-3. Specific recommendations for safe discharge
+  // Parse response - strict parsing, no fallback
+  const analysis = parseAnalysisResponse(patient.id, responseText);
 
-Respond in this exact JSON format:
-{
-  "score": <number 0-100>,
-  "status": "<ready|caution|not_ready>",
-  "riskFactors": [
+  // Log to Opik with prompt commit tracking
+  await logPromptUsage(
+    patient.id,
+    commit,
     {
-      "severity": "<high|moderate|low>",
-      "category": "<drug_interaction|care_gap|follow_up|cost_barrier|patient_education>",
-      "title": "<short title>",
-      "description": "<detailed description>",
-      "source": "<FDA|CMS|Guidelines|FHIR>",
-      "actionable": <true|false>,
-      "resolution": "<suggested action if actionable>"
-    }
-  ],
-  "recommendations": ["<recommendation 1>", "<recommendation 2>", ...]
+      patient_id: patient.id,
+      patient_name: patient.name,
+      medication_count: patient.medications.length,
+      interaction_count: drugInteractions.length,
+      care_gap_count: careGaps.filter((g) => g.status === "unmet").length,
+      prompt_from_opik: fromOpik,
+    },
+    {
+      score: analysis.score,
+      status: analysis.status,
+      riskFactors: analysis.riskFactors,
+      recommendations: analysis.recommendations,
+    },
+    latencyMs
+  );
+
+  return analysis;
 }
 
-Be conservative - if there are major drug interactions or unmet care gaps, the score should reflect significant risk.`;
-}
-
+/**
+ * Parse LLM response - strict parsing, throws on failure
+ */
 function parseAnalysisResponse(patientId: string, responseText: string): DischargeAnalysis {
+  // Extract JSON from response
+  const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error("LLM response did not contain valid JSON. Raw response: " + responseText.slice(0, 500));
+  }
+
+  let parsed: Record<string, unknown>;
   try {
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error("No JSON found in response");
-    }
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    throw new Error("Failed to parse LLM JSON response: " + (e as Error).message);
+  }
 
-    const parsed = JSON.parse(jsonMatch[0]);
+  // Validate required fields
+  if (typeof parsed.score !== "number") {
+    throw new Error("LLM response missing 'score' field");
+  }
+  if (!["ready", "caution", "not_ready"].includes(parsed.status as string)) {
+    throw new Error(`Invalid status '${parsed.status}' - must be ready, caution, or not_ready`);
+  }
+  if (!Array.isArray(parsed.riskFactors)) {
+    throw new Error("LLM response missing 'riskFactors' array");
+  }
 
-    const riskFactors: RiskFactor[] = (parsed.riskFactors || []).map(
-      (rf: Record<string, unknown>, index: number) => ({
+  // Parse risk factors with validation
+  const riskFactors: RiskFactor[] = (parsed.riskFactors as Record<string, unknown>[]).map(
+    (rf, index) => {
+      if (!["high", "moderate", "low"].includes(rf.severity as string)) {
+        throw new Error(`Invalid severity '${rf.severity}' in risk factor ${index}`);
+      }
+
+      return {
         id: `rf-${index}`,
         severity: rf.severity as RiskFactor["severity"],
-        category: rf.category as RiskFactor["category"],
-        title: rf.title as string,
-        description: rf.description as string,
-        source: rf.source as RiskFactor["source"],
-        actionable: rf.actionable as boolean,
+        category: (rf.category as RiskFactor["category"]) || "care_gap",
+        title: (rf.title as string) || "Unnamed risk",
+        description: (rf.description as string) || "",
+        source: (rf.source as RiskFactor["source"]) || "Internal",
+        actionable: (rf.actionable as boolean) ?? true,
         resolution: rf.resolution as string | undefined,
-      })
-    );
+      };
+    }
+  );
 
-    return {
-      patientId,
-      score: Math.max(0, Math.min(100, parsed.score)),
-      status: parsed.status,
-      riskFactors,
-      recommendations: parsed.recommendations || [],
-      analyzedAt: new Date().toISOString(),
-    };
-  } catch {
-    return {
-      patientId,
-      score: 50,
-      status: "caution",
-      riskFactors: [
-        {
-          id: "rf-error",
-          severity: "moderate",
-          category: "patient_education",
-          title: "Analysis incomplete",
-          description: "Unable to fully analyze patient data. Manual review recommended.",
-          source: "Internal",
-          actionable: true,
-          resolution: "Review patient chart manually",
-        },
-      ],
-      recommendations: ["Manual review recommended due to analysis limitations"],
-      analyzedAt: new Date().toISOString(),
-    };
-  }
+  return {
+    patientId,
+    score: Math.max(0, Math.min(100, parsed.score)),
+    status: parsed.status as DischargeAnalysis["status"],
+    riskFactors,
+    recommendations: (parsed.recommendations as string[]) || [],
+    analyzedAt: new Date().toISOString(),
+  };
 }
 
+/**
+ * Generate discharge plan using Gemini LLM
+ */
 export async function generateDischargePlan(
   patient: Patient,
   analysis: DischargeAnalysis
 ): Promise<string> {
-  const prompt = `Based on the discharge analysis for ${patient.name} (score: ${analysis.score}/100), generate a discharge checklist.
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is required");
+  }
+
+  const prompt = `Based on the discharge analysis for ${patient.name} (score: ${analysis.score}/100, status: ${analysis.status}), generate a detailed discharge checklist.
+
+Patient: ${patient.name}, ${patient.age}${patient.gender}, admitted ${patient.admissionDate}
 
 Risk factors identified:
 ${analysis.riskFactors.map((rf) => `- [${rf.severity.toUpperCase()}] ${rf.title}: ${rf.description}`).join("\n")}
 
 Generate a practical discharge checklist with:
-1. Medication reconciliation tasks
-2. Follow-up appointments needed
-3. Patient education items
-4. Warning signs to watch for
+1. HIGH PRIORITY - Must complete before discharge (based on high-severity risk factors)
+2. MODERATE PRIORITY - Should complete (based on moderate-severity risk factors)
+3. STANDARD TASKS - Routine discharge items
+4. FOLLOW-UP - Appointments and monitoring needed
+5. PATIENT EDUCATION - Key teaching points
 
-Format as a clear, actionable checklist.`;
+Format as a clear, actionable checklist that can be printed for the care team.`;
 
-  const result = await model.generateContent(prompt);
-  return result.response.text();
+  const provider = getLLMProvider();
+  const response = await provider.generate(prompt, {
+    spanName: "discharge-plan-generation",
+    metadata: {
+      patient_id: patient.id,
+      analysis_score: analysis.score,
+      analysis_status: analysis.status,
+    },
+  });
+  return response.content;
 }
