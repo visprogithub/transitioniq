@@ -381,7 +381,7 @@ export async function createEvaluationDataset(): Promise<void> {
   const opik = getOpikClient();
 
   try {
-    const dataset = opik.getOrCreateDataset("discharge-readiness-test-cases");
+    const dataset = await opik.getOrCreateDataset("discharge-readiness-test-cases");
 
     // Insert test cases
     await dataset.insert(
