@@ -71,31 +71,31 @@ export async function traceAnalysis<T>(
     const result = await fn();
     const duration = Date.now() - startTime;
 
-    // Enhanced output with structured data
-    span.end({
-      output: JSON.stringify(result).slice(0, 2000),
+    // Update span metadata before ending (API changed - end takes no args)
+    span.update({
       metadata: {
         duration_ms: duration,
         success: true,
         ...extractAnalysisMetrics(result),
       },
     });
+    span.end();
     trace.end();
 
     return {
       result,
       duration,
-      traceId: trace.id,
+      traceId: trace.data.id,
     };
   } catch (error) {
     const duration = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
     if (span) {
-      span.end({
-        output: errorMessage,
+      span.update({
         metadata: { duration_ms: duration, success: false, error: errorMessage },
       });
+      span.end();
     }
     if (trace) {
       trace.end();
@@ -202,18 +202,14 @@ export async function logEvaluationScore(
     },
   });
 
-  span.end({
-    output: JSON.stringify({
-      score,
-      expectedScore,
-      passed: expectedScore !== undefined ? Math.abs(score - expectedScore) <= 5 : true,
-    }),
+  span.update({
     metadata: {
       evaluation_type: name,
       success: true,
+      passed: expectedScore !== undefined ? Math.abs(score - expectedScore) <= 5 : true,
     },
   });
-
+  span.end();
   trace.end();
 }
 

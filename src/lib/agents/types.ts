@@ -61,7 +61,7 @@ export interface DrugInteractionContext {
 
 export interface CareGapContext {
   guideline: string;
-  status: "met" | "unmet";
+  status: "met" | "unmet" | "not_applicable";
   grade: string;
 }
 

@@ -168,7 +168,7 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
               age: patient.age,
               gender: patient.gender,
               medicationCount: patient.medications.length,
-              conditionCount: patient.conditions.length,
+              conditionCount: patient.diagnoses.length,
             };
             break;
           case "check_drug_interactions":

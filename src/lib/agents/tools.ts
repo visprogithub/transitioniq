@@ -83,7 +83,7 @@ async function fetchPatientTool(input: Record<string, unknown>): Promise<ToolRes
         age: patient.age,
         gender: patient.gender,
         medicationCount: patient.medications.length,
-        conditionCount: patient.conditions.length,
+        conditionCount: patient.diagnoses.length,
         raw: patient,
       },
       duration: Date.now() - startTime,
@@ -204,18 +204,20 @@ async function analyzeReadinessTool(input: Record<string, unknown>): Promise<Too
 
   // Drug interaction risks
   for (const interaction of drugInteractions) {
-    const deduction = interaction.severity === "major" ? 20 : interaction.severity === "moderate" ? 10 : 5;
+    // Map FDA severity to RiskFactor severity
+    const severity: "high" | "moderate" | "low" = interaction.severity === "major" ? "high" : interaction.severity === "moderate" ? "moderate" : "low";
+    const deduction = severity === "high" ? 20 : severity === "moderate" ? 10 : 5;
     score -= deduction;
 
     riskFactors.push({
       id: `di-${riskFactors.length}`,
-      severity: interaction.severity,
+      severity,
       category: "drug_interaction",
       title: `${interaction.drug1} + ${interaction.drug2} Interaction`,
       description: interaction.description,
       source: "FDA",
       actionable: true,
-      resolution: interaction.severity === "major"
+      resolution: severity === "high"
         ? "Review medication regimen with pharmacist"
         : "Monitor for adverse effects",
     });

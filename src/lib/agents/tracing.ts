@@ -7,7 +7,7 @@
  * - Multi-turn conversation tracking
  */
 
-import { Opik, Trace, Span } from "opik";
+import { Opik } from "opik";
 import type { ToolName, AgentGraph, ToolResult } from "./types";
 
 let opikClient: Opik | null = null;
@@ -61,35 +61,35 @@ export async function traceAgentExecution<T>(
     const agentGraph = resultObj?.agentGraph as AgentGraph | undefined;
     const toolsUsed = resultObj?.toolsUsed as unknown[] | undefined;
 
-    trace.end({
-      output: JSON.stringify({
-        success: true,
-        duration_ms: duration,
-        tools_executed: toolsUsed?.length || 0,
-        graph_nodes: agentGraph?.nodes?.length || 0,
-      }),
+    // Log result via a span
+    const resultSpan = trace.span({
+      name: "agent-result",
       metadata: {
         duration_ms: duration,
         success: true,
         tools_count: toolsUsed?.length || 0,
         graph_node_count: agentGraph?.nodes?.length || 0,
-        completed_at: new Date().toISOString(),
       },
     });
+    resultSpan.end();
 
+    trace.end();
     return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    const duration = Date.now() - startTime;
 
-    trace.end({
-      output: errorMessage,
+    const errorSpan = trace.span({
+      name: "agent-error",
       metadata: {
-        duration_ms: Date.now() - startTime,
+        duration_ms: duration,
         success: false,
         error: errorMessage,
       },
     });
+    errorSpan.end();
 
+    trace.end();
     throw error;
   }
 }
@@ -129,56 +129,36 @@ export async function traceToolCall<T>(
     const result = await fn();
     const duration = Date.now() - startTime;
 
-    span.end({
-      output: JSON.stringify({
-        success: result.success,
-        data_preview: JSON.stringify(result.data).slice(0, 500),
-      }),
+    // Update span metadata before ending
+    span.update({
       metadata: {
         duration_ms: duration,
         success: result.success,
         error: result.error,
       },
     });
-
-    trace.end({
-      output: JSON.stringify({ success: result.success }),
-      metadata: {
-        duration_ms: duration,
-        success: result.success,
-      },
-    });
-
+    span.end();
+    trace.end();
     return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     const duration = Date.now() - startTime;
 
-    span.end({
-      output: errorMessage,
+    span.update({
       metadata: {
         duration_ms: duration,
         success: false,
         error: errorMessage,
       },
     });
-
-    trace.end({
-      output: errorMessage,
-      metadata: {
-        duration_ms: duration,
-        success: false,
-        error: errorMessage,
-      },
-    });
-
+    span.end();
+    trace.end();
     throw error;
   }
 }
 
 /**
  * Log tool correctness evaluation to Opik
- * This is critical for the "Best Use of Opik" prize
  */
 export async function logToolCorrectness(
   toolName: ToolName,
@@ -199,6 +179,8 @@ export async function logToolCorrectness(
       tool: toolName,
       category: "evaluation",
       evaluation_type: "tool_correctness",
+      is_correct: isCorrect,
+      reason,
     },
   });
 
@@ -207,29 +189,12 @@ export async function logToolCorrectness(
     metadata: {
       tool: toolName,
       is_correct: isCorrect,
-      reason,
-    },
-  });
-
-  span.end({
-    output: JSON.stringify({
-      tool: toolName,
-      correct: isCorrect,
-      reason,
-    }),
-    metadata: {
       evaluation_passed: isCorrect,
       reason,
     },
   });
-
-  trace.end({
-    output: JSON.stringify({ correct: isCorrect }),
-    metadata: {
-      evaluation_type: "tool_correctness",
-      passed: isCorrect,
-    },
-  });
+  span.end();
+  trace.end();
 }
 
 /**
@@ -252,6 +217,12 @@ export async function logAgentTrajectory(
     return;
   }
 
+  const successRate = trajectory.length > 0
+    ? trajectory.filter((s) => s.success).length / trajectory.length
+    : 0;
+  const optimalSteps = 5;
+  const efficiency = Math.min(1, optimalSteps / Math.max(1, trajectory.length));
+
   const trace = opik.trace({
     name: "evaluation-agent-trajectory",
     metadata: {
@@ -260,10 +231,13 @@ export async function logAgentTrajectory(
       category: "evaluation",
       evaluation_type: "agent_trajectory",
       total_steps: trajectory.length,
+      success_rate: successRate,
+      efficiency_score: efficiency,
+      trajectory_quality: successRate >= 0.8 && efficiency >= 0.8 ? "good" : "needs_improvement",
     },
   });
 
-  // Create a span for each step in the trajectory
+  // Create a span for each step
   for (const step of trajectory) {
     const span = trace.span({
       name: `step-${step.step}`,
@@ -272,36 +246,13 @@ export async function logAgentTrajectory(
         action: step.action,
         tool: step.tool,
         success: step.success,
+        reasoning: step.reasoning,
       },
     });
-
-    span.end({
-      output: step.reasoning,
-      metadata: {
-        success: step.success,
-      },
-    });
+    span.end();
   }
 
-  // Evaluate trajectory quality
-  const successRate = trajectory.filter((s) => s.success).length / trajectory.length;
-  const optimalSteps = 5; // Expected steps for a full assessment
-  const efficiency = Math.min(1, optimalSteps / trajectory.length);
-
-  trace.end({
-    output: JSON.stringify({
-      total_steps: trajectory.length,
-      success_rate: successRate,
-      efficiency: efficiency,
-    }),
-    metadata: {
-      total_steps: trajectory.length,
-      successful_steps: trajectory.filter((s) => s.success).length,
-      success_rate: successRate,
-      efficiency_score: efficiency,
-      trajectory_quality: successRate >= 0.8 && efficiency >= 0.8 ? "good" : "needs_improvement",
-    },
-  });
+  trace.end();
 }
 
 /**
@@ -325,6 +276,11 @@ export async function logConversationMetrics(
       sessionId,
       category: "evaluation",
       evaluation_type: "multi_turn_conversation",
+      turn_count: turnCount,
+      tool_calls_total: toolCallsTotal,
+      task_completed: taskCompleted,
+      turns_per_completion: taskCompleted ? turnCount : -1,
+      efficiency: taskCompleted ? Math.max(0, 1 - (turnCount - 1) * 0.1) : 0,
     },
   });
 
@@ -336,26 +292,8 @@ export async function logConversationMetrics(
       task_completed: taskCompleted,
     },
   });
-
-  span.end({
-    output: JSON.stringify({
-      turns: turnCount,
-      tools: toolCallsTotal,
-      completed: taskCompleted,
-    }),
-    metadata: {
-      turns_per_completion: taskCompleted ? turnCount : -1,
-      efficiency: taskCompleted ? Math.max(0, 1 - (turnCount - 1) * 0.1) : 0,
-    },
-  });
-
-  trace.end({
-    output: JSON.stringify({ completed: taskCompleted }),
-    metadata: {
-      evaluation_type: "multi_turn",
-      task_completed: taskCompleted,
-    },
-  });
+  span.end();
+  trace.end();
 }
 
 /**
@@ -378,10 +316,12 @@ export async function logAgentGraph(
       category: "agent_graph",
       node_count: graph.nodes.length,
       edge_count: graph.edges.length,
+      successful_nodes: graph.nodes.filter((n) => n.status === "success").length,
+      failed_nodes: graph.nodes.filter((n) => n.status === "error").length,
     },
   });
 
-  // Create spans for each node to show the execution flow
+  // Create spans for each node
   for (const node of graph.nodes) {
     const span = trace.span({
       name: node.label,
@@ -390,33 +330,14 @@ export async function logAgentGraph(
         node_type: node.type,
         status: node.status,
         duration_ms: node.duration,
+        success: node.status === "success",
         ...node.metadata,
       },
     });
-
-    span.end({
-      output: JSON.stringify({
-        status: node.status,
-        duration: node.duration,
-      }),
-      metadata: {
-        success: node.status === "success",
-      },
-    });
+    span.end();
   }
 
-  // Log graph structure
-  trace.end({
-    output: JSON.stringify({
-      nodes: graph.nodes.map((n) => ({ id: n.id, type: n.type, status: n.status })),
-      edges: graph.edges,
-    }),
-    metadata: {
-      total_nodes: graph.nodes.length,
-      successful_nodes: graph.nodes.filter((n) => n.status === "success").length,
-      failed_nodes: graph.nodes.filter((n) => n.status === "error").length,
-    },
-  });
+  trace.end();
 }
 
 /**
@@ -463,6 +384,10 @@ export async function evaluateTaskCompletion(
       patientId,
       category: "evaluation",
       evaluation_type: "task_completion",
+      evaluation_passed: passed,
+      score,
+      checks_passed: passedChecks,
+      checks_total: checks.length,
     },
   });
 
@@ -476,22 +401,10 @@ export async function evaluateTaskCompletion(
         passed: check.expected === check.actual,
       },
     });
-
-    span.end({
-      output: JSON.stringify({ passed: check.expected === check.actual }),
-      metadata: { passed: check.expected === check.actual },
-    });
+    span.end();
   }
 
-  trace.end({
-    output: JSON.stringify({ passed, score }),
-    metadata: {
-      evaluation_passed: passed,
-      score,
-      checks_passed: passedChecks,
-      checks_total: checks.length,
-    },
-  });
+  trace.end();
 
   return { passed, score };
 }

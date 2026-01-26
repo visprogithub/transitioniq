@@ -1,9 +1,27 @@
 /**
  * Clinical Guidelines Checker
  * Evaluates patient data against evidence-based clinical guidelines
+ *
+ * Data Sources:
+ * - USPSTF (US Preventive Services Task Force): https://uspreventiveservicestaskforce.org/
+ *   Note: Full USPSTF API (data.uspreventiveservicestaskforce.org) requires approval.
+ *   Contact: uspstfpda@ahrq.gov for API access.
+ *
+ * - ACC/AHA (American College of Cardiology/American Heart Association):
+ *   Heart failure guidelines: https://www.acc.org/guidelines
+ *
+ * - ADA (American Diabetes Association):
+ *   Standards of Care: https://diabetesjournals.org/care
+ *
+ * - GOLD (Global Initiative for Chronic Obstructive Lung Disease):
+ *   COPD guidelines: https://goldcopd.org/
+ *
+ * The guidelines below are coded implementations of actual published recommendations
+ * with their evidence grades. In production, these would be fetched from the
+ * USPSTF Prevention TaskForce API when access is granted.
  */
 
-import type { Patient, Diagnosis, Medication, LabResult } from "../types/patient";
+import type { Patient } from "../types/patient";
 
 export interface CareGap {
   id: string;
@@ -174,6 +192,7 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     name: "INR in Therapeutic Range for Warfarin",
     organization: "ACC/AHA",
     grade: "A",
+    applicableConditions: ["atrial fibrillation", "I48"],
     applicableMedications: ["warfarin"],
     check: (patient) => {
       const onWarfarin = patient.medications.some((m) =>
