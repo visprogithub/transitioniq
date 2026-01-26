@@ -144,8 +144,10 @@ async function computeAnalysis(patient: Patient): Promise<DischargeAnalysis> {
 
   // Drug interactions
   for (const interaction of drugInteractions) {
-    const severity = interaction.severity;
-    const deduction = severity === "major" ? 20 : severity === "moderate" ? 10 : 5;
+    // Map FDA severity to RiskFactor severity
+    const fdaSeverity = interaction.severity;
+    const severity: "high" | "moderate" | "low" = fdaSeverity === "major" ? "high" : fdaSeverity === "moderate" ? "moderate" : "low";
+    const deduction = severity === "high" ? 20 : severity === "moderate" ? 10 : 5;
     score -= deduction;
 
     riskFactors.push({

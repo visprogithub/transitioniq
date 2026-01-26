@@ -208,7 +208,7 @@ export function RiskFactorList({ factors, isLoading = false }: RiskFactorListPro
           </h3>
           <div className="space-y-3">
             {highRisk.map((factor, i) => (
-              <RiskFactorCard key={factor.id} factor={factor} index={i} />
+              <RiskFactorCard key={factor.id} riskFactor={factor} index={i} />
             ))}
           </div>
         </div>
@@ -223,7 +223,7 @@ export function RiskFactorList({ factors, isLoading = false }: RiskFactorListPro
           </h3>
           <div className="space-y-3">
             {moderateRisk.map((factor, i) => (
-              <RiskFactorCard key={factor.id} factor={factor} index={i + highRisk.length} />
+              <RiskFactorCard key={factor.id} riskFactor={factor} index={i + highRisk.length} />
             ))}
           </div>
         </div>
@@ -240,7 +240,7 @@ export function RiskFactorList({ factors, isLoading = false }: RiskFactorListPro
             {lowRisk.map((factor, i) => (
               <RiskFactorCard
                 key={factor.id}
-                factor={factor}
+                riskFactor={factor}
                 index={i + highRisk.length + moderateRisk.length}
               />
             ))}

@@ -200,8 +200,10 @@ function computeAnalysisWithoutLLM(
 
   // Add drug interaction risk factors
   for (const interaction of drugInteractions) {
-    const severity = interaction.severity;
-    const scoreDeduction = severity === "major" ? 20 : severity === "moderate" ? 10 : 5;
+    // Map FDA severity (major/moderate/minor) to RiskFactor severity (high/moderate/low)
+    const fdaSeverity = interaction.severity;
+    const severity: "high" | "moderate" | "low" = fdaSeverity === "major" ? "high" : fdaSeverity === "moderate" ? "moderate" : "low";
+    const scoreDeduction = severity === "high" ? 20 : severity === "moderate" ? 10 : 5;
     score -= scoreDeduction;
 
     riskFactors.push({
@@ -212,7 +214,7 @@ function computeAnalysisWithoutLLM(
       description: interaction.description,
       source: "FDA",
       actionable: true,
-      resolution: severity === "major"
+      resolution: severity === "high"
         ? "Review medication regimen with pharmacist and consider alternatives"
         : "Monitor for adverse effects and adjust as needed",
     });

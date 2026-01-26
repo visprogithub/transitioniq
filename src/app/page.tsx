@@ -73,7 +73,7 @@ export default function DashboardPage() {
       setAnalysis(data);
 
       // Auto-expand high-severity risk factors
-      const highRiskIds = new Set(
+      const highRiskIds = new Set<string>(
         data.riskFactors
           .filter((rf: RiskFactor) => rf.severity === "high")
           .map((rf: RiskFactor) => rf.id)
