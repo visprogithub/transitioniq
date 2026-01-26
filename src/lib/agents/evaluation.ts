@@ -309,14 +309,6 @@ export async function runEvaluationExperiment(
         },
       });
 
-      // Log feedback scores
-      testSpan.logFeedbackScores([
-        { name: "score_accuracy", value: scoreAccuracyResult.score, reason: scoreAccuracyResult.reason },
-        { name: "status_correctness", value: statusCorrectnessResult.score, reason: statusCorrectnessResult.reason },
-        { name: "risk_coverage", value: riskCoverageResult.score, reason: riskCoverageResult.reason },
-        { name: "overall", value: overallScore },
-      ]);
-
       testSpan.end();
 
       results.push({
@@ -365,12 +357,6 @@ export async function runEvaluationExperiment(
       pass_rate: passRate,
     },
   });
-
-  // Log experiment-level feedback
-  experimentTrace.logFeedbackScores([
-    { name: "avg_overall_score", value: avgScore },
-    { name: "pass_rate", value: passRate },
-  ]);
 
   experimentTrace.end();
 

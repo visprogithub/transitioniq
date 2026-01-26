@@ -8,3 +8,4 @@ export * from "./tools";
 export * from "./tracing";
 export * from "./prompts";
 export * from "./experiments";
+export * from "./evaluation";

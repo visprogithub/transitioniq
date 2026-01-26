@@ -79,12 +79,31 @@ export async function POST(request: NextRequest) {
     }
 
     // Return computed analysis (fallback or when no API key)
+    const startTime = Date.now();
     const analysis = computeAnalysisWithoutLLM(
       patient,
       drugInteractions,
       unmetCareGaps,
       costEstimates
     );
+    const latencyMs = Date.now() - startTime;
+
+    // Log to Opik with full input/output
+    try {
+      await logAnalysisTrace(
+        patientId,
+        {
+          patient,
+          medications: patient.medications,
+          conditions: patient.diagnoses.map((d) => d.display),
+        },
+        analysis,
+        latencyMs
+      );
+    } catch (e) {
+      console.error("Failed to log trace:", e);
+    }
+
     return NextResponse.json(analysis);
   } catch (error) {
     console.error("Analysis error:", error);
