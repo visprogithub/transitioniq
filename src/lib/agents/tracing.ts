@@ -28,6 +28,21 @@ function getOpikClient(): Opik | null {
 }
 
 /**
+ * Flush all pending traces to Opik
+ * Call this after completing traces to ensure they're sent
+ */
+export async function flushTraces(): Promise<void> {
+  const opik = getOpikClient();
+  if (opik) {
+    try {
+      await opik.flush();
+    } catch (e) {
+      console.error("Failed to flush Opik traces:", e);
+    }
+  }
+}
+
+/**
  * Trace an entire agent execution as a top-level trace
  */
 export async function traceAgentExecution<T>(
@@ -74,6 +89,10 @@ export async function traceAgentExecution<T>(
     resultSpan.end();
 
     trace.end();
+
+    // Flush traces to ensure they're sent to Opik
+    await flushTraces();
+
     return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
@@ -90,6 +109,10 @@ export async function traceAgentExecution<T>(
     errorSpan.end();
 
     trace.end();
+
+    // Flush traces even on error
+    await flushTraces();
+
     throw error;
   }
 }

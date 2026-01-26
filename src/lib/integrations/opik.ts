@@ -82,6 +82,9 @@ export async function traceAnalysis<T>(
     span.end();
     trace.end();
 
+    // Flush to ensure trace is sent
+    await flushTraces();
+
     return {
       result,
       duration,
@@ -100,6 +103,9 @@ export async function traceAnalysis<T>(
     if (trace) {
       trace.end();
     }
+
+    // Flush even on error
+    await flushTraces();
 
     throw error;
   }
@@ -284,6 +290,9 @@ export async function flushTraces(): Promise<void> {
   const opik = getOpikClient();
   if (!opik) return;
 
-  // Give time for traces to be sent
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  try {
+    await opik.flush();
+  } catch (e) {
+    console.error("Failed to flush Opik traces:", e);
+  }
 }

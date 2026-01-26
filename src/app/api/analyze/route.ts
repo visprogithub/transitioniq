@@ -4,6 +4,7 @@ import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/
 import { evaluateCareGaps, type CareGap } from "@/lib/integrations/guidelines-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/gemini";
 import { traceGeminiCall, traceDataSourceCall } from "@/lib/integrations/opik";
+import { logAnalysisTrace } from "@/lib/agents/evaluation";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 import type { Patient } from "@/lib/types/patient";
 
