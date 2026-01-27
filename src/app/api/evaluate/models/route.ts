@@ -20,7 +20,7 @@ import {
   getConfiguredProviders,
   getModelConfig,
 } from "@/lib/integrations/llm-provider";
-import { analyzeDischargeReadiness, resetLLMProvider as resetGeminiProvider } from "@/lib/integrations/gemini";
+import { analyzeDischargeReadiness, resetLLMProvider } from "@/lib/integrations/analysis";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 // Test patients for evaluation
@@ -135,7 +135,7 @@ export async function POST(request: NextRequest) {
     // Set the active model
     try {
       setActiveModel(modelId);
-      resetGeminiProvider(); // Reset to pick up new model
+      resetLLMProvider(); // Reset to pick up new model
     } catch (e) {
       console.error(`Failed to set model ${modelId}:`, e);
       continue;

@@ -33,6 +33,55 @@ function getOpikClient(): Opik | null {
 /**
  * Discharge Analysis Prompt - stored in Opik Prompt Library
  */
+let cachedPlanPrompt: Prompt | null = null;
+
+/**
+ * Discharge Plan Generation Prompt - stored in Opik Prompt Library
+ */
+const DISCHARGE_PLAN_PROMPT = `You are generating a discharge checklist for a care team. Generate ONLY actionable task items based on the patient's specific risk factors.
+
+Patient: {{patient_name}}, {{patient_age}}yo {{patient_gender}}
+Discharge Readiness Score: {{score}}/100 ({{status}})
+
+HIGH-SEVERITY RISKS:
+{{high_risks}}
+
+MODERATE-SEVERITY RISKS:
+{{moderate_risks}}
+
+IMPORTANT FORMATTING RULES:
+1. Use ONLY these 5 section headers with ** markers:
+   **HIGH PRIORITY - Must Complete Before Discharge**
+   **MODERATE PRIORITY - Should Complete**
+   **STANDARD TASKS**
+   **FOLLOW-UP APPOINTMENTS**
+   **PATIENT EDUCATION**
+
+2. Under each header, list actionable tasks as checkbox items:
+   - [ ] Task description here
+
+3. DO NOT include:
+   - Patient demographic headers (name, DOB, etc.)
+   - Placeholder fields like "[To be filled]"
+   - Signature lines or form fields
+   - Any template-style content
+
+4. Each task must be a SPECIFIC ACTION based on the patient's actual risk factors
+
+Example format:
+**HIGH PRIORITY - Must Complete Before Discharge**
+- [ ] Review warfarin + aspirin interaction with clinical pharmacist
+- [ ] Verify INR is within therapeutic range (2.0-3.0) before discharge
+
+**FOLLOW-UP APPOINTMENTS**
+- [ ] Schedule cardiology follow-up within 7 days
+- [ ] Arrange PCP visit within 14 days for BP monitoring
+
+Generate the checklist now:`;
+
+/**
+ * Discharge Analysis Prompt - stored in Opik Prompt Library
+ */
 const DISCHARGE_ANALYSIS_PROMPT = `You are a clinical decision support system analyzing discharge readiness.
 
 ## Patient Information
@@ -91,10 +140,10 @@ Be conservative - if there are major drug interactions or unmet Grade A guidelin
 
 /**
  * Initialize prompts in Opik Prompt Library
- * Creates or updates the discharge-analysis prompt
+ * Creates or updates both discharge-analysis and discharge-plan prompts
  *
- * The prompt will be visible in the Opik dashboard under "Prompts" section.
- * Each change to the template creates a new version that can be tracked.
+ * The prompts will be visible in the Opik dashboard under "Prompts" section.
+ * Each change to a template creates a new version that can be tracked.
  */
 export async function initializeOpikPrompts(): Promise<{
   promptName: string;
@@ -108,8 +157,7 @@ export async function initializeOpikPrompts(): Promise<{
 
   try {
     // Create/update the discharge analysis prompt in Opik Prompt Library
-    // This will create a new version if the template has changed
-    const prompt = await opik.createPrompt({
+    const analysisPrompt = await opik.createPrompt({
       name: "discharge-analysis",
       prompt: DISCHARGE_ANALYSIS_PROMPT,
       description: "Clinical discharge readiness assessment prompt for TransitionIQ",
@@ -123,10 +171,30 @@ export async function initializeOpikPrompts(): Promise<{
     });
 
     // Cache the prompt for reuse
-    cachedPrompt = prompt;
+    cachedPrompt = analysisPrompt;
 
-    const versionInfo = prompt.commit || "initial";
+    const versionInfo = analysisPrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: discharge-analysis (version: ${versionInfo})`);
+
+    // Create/update the discharge plan prompt
+    const planPrompt = await opik.createPrompt({
+      name: "discharge-plan",
+      prompt: DISCHARGE_PLAN_PROMPT,
+      description: "Discharge checklist generation prompt for TransitionIQ",
+      metadata: {
+        version: "1.0",
+        author: "transitioniq",
+        use_case: "healthcare_discharge_planning",
+      },
+      tags: ["clinical", "discharge", "checklist", "healthcare", "transitioniq"],
+      changeDescription: "Initial discharge plan checklist generation prompt",
+    });
+
+    // Cache the plan prompt
+    cachedPlanPrompt = planPrompt;
+
+    const planVersionInfo = planPrompt.commit || "initial";
+    console.log(`[Opik] Prompt stored in Prompt Library: discharge-plan (version: ${planVersionInfo})`);
     console.log(`[Opik] View prompts at: https://www.comet.com/opik/prompts`);
 
     return {
@@ -135,7 +203,6 @@ export async function initializeOpikPrompts(): Promise<{
     };
   } catch (error) {
     console.error("[Opik] Failed to store prompt in Prompt Library:", error);
-    // Log more details for debugging
     if (error instanceof Error) {
       console.error("[Opik] Error details:", error.message);
     }
@@ -197,10 +264,86 @@ export async function getDischargeAnalysisPrompt(): Promise<{
 }
 
 /**
+ * Get the discharge plan prompt from Opik Prompt Library
+ * Falls back to local prompt if Opik unavailable
+ */
+export async function getDischargePlanPrompt(): Promise<{
+  template: string;
+  commit: string | null;
+  fromOpik: boolean;
+}> {
+  const opik = getOpikClient();
+
+  // Use cached prompt if available
+  if (cachedPlanPrompt) {
+    return {
+      template: cachedPlanPrompt.prompt,
+      commit: cachedPlanPrompt.commit || null,
+      fromOpik: true,
+    };
+  }
+
+  if (opik) {
+    try {
+      // Retrieve the prompt from Opik Prompt Library
+      const prompt = await opik.getPrompt({ name: "discharge-plan" });
+      if (prompt) {
+        // Cache for subsequent calls
+        cachedPlanPrompt = prompt;
+
+        console.log(`[Opik] Using discharge-plan prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
+
+        return {
+          template: prompt.prompt,
+          commit: prompt.commit || null,
+          fromOpik: true,
+        };
+      }
+    } catch (error) {
+      console.warn("[Opik] Failed to get discharge-plan prompt from Prompt Library, using local template:", error);
+    }
+  }
+
+  // Fallback to local prompt (not stored in Opik)
+  console.log("[Opik] Using local discharge-plan prompt template (not versioned in Opik)");
+  return {
+    template: DISCHARGE_PLAN_PROMPT,
+    commit: null,
+    fromOpik: false,
+  };
+}
+
+/**
+ * Format the discharge plan prompt with patient and analysis data
+ */
+export function formatDischargePlanPrompt(
+  template: string,
+  data: {
+    patient_name: string;
+    patient_age: number;
+    patient_gender: string;
+    score: number;
+    status: string;
+    high_risks: string;
+    moderate_risks: string;
+  }
+): string {
+  let formatted = template;
+
+  // Replace all mustache variables
+  for (const [key, value] of Object.entries(data)) {
+    formatted = formatted.replace(new RegExp(`{{${key}}}`, "g"), String(value));
+  }
+
+  return formatted;
+}
+
+/**
  * Clear the cached prompt (useful for testing different versions)
  */
 export function clearPromptCache(): void {
   cachedPrompt = null;
+  cachedPlanPrompt = null;
   console.log("[Opik] Prompt cache cleared");
 }
 
@@ -267,10 +410,14 @@ export async function logPromptUsage(
   promptCommit: string | null,
   input: Record<string, unknown>,
   output: Record<string, unknown>,
-  latencyMs: number
+  latencyMs: number,
+  modelId?: string
 ): Promise<void> {
   const opik = getOpikClient();
   if (!opik) return;
+
+  // Get actual model ID being used
+  const activeModel = modelId || (input.model_id as string) || "unknown";
 
   try {
     const trace = opik.trace({
@@ -289,7 +436,7 @@ export async function logPromptUsage(
       },
       metadata: {
         category: "llm_call",
-        model: "gemini-2.0-flash",
+        model: activeModel,
         prompt_name: "discharge-analysis",
         prompt_commit: promptCommit || "local",
         latency_ms: latencyMs,
@@ -297,11 +444,11 @@ export async function logPromptUsage(
     });
 
     const span = trace.span({
-      name: "gemini-generation",
+      name: "llm-generation",
       input: { prompt_length: JSON.stringify(input).length },
       output: { response_length: JSON.stringify(output).length },
       metadata: {
-        model: "gemini-2.0-flash",
+        model: activeModel,
         latency_ms: latencyMs,
       },
     });

@@ -39,36 +39,63 @@ export interface LLMResponse {
   };
 }
 
+/**
+ * Error type for rate limits and usage limits
+ * Frontend can check error.code to show appropriate UI
+ */
+export interface RateLimitError extends Error {
+  code: "RATE_LIMITED" | "OUT_OF_CREDITS";
+  modelId: string;
+  provider: ModelProvider;
+}
+
+/**
+ * Check if an error is a rate limit or usage limit error
+ */
+export function isModelLimitError(error: unknown): error is RateLimitError {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    ((error as RateLimitError).code === "RATE_LIMITED" ||
+     (error as RateLimitError).code === "OUT_OF_CREDITS")
+  );
+}
+
 // Default model configs
 // Includes Gemini 2.0 Flash, HuggingFace, OpenAI GPT-4o Mini, and Anthropic
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
   // === GEMINI MODELS (requires GEMINI_API_KEY) ===
-  // Only Gemini 2.0 Flash is supported (1.5 models deprecated)
+  // Free tier: 5 RPM for flash, 15 RPM for flash-lite
   "gemini-2.0-flash": {
     provider: "gemini",
     modelId: "gemini-2.0-flash",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
   },
+  // Flash-Lite has higher free tier limits (15 RPM vs 5 RPM)
+  "gemini-2.0-flash-lite": {
+    provider: "gemini",
+    modelId: "gemini-2.0-flash-lite",
+    apiKey: process.env.GEMINI_API_KEY || "",
+    temperature: 0.7,
+  },
 
   // === HUGGING FACE MODELS (requires HF_API_KEY - free tier) ===
   // Get free API key at: https://huggingface.co/settings/tokens
-  // Uses NEW router.huggingface.co endpoint (old api-inference.huggingface.co is deprecated)
-  "hf-mistral-7b": {
+  // Uses router.huggingface.co/v1/chat/completions (OpenAI-compatible endpoint)
+  "hf-qwen-7b": {
     provider: "huggingface",
-    modelId: "mistralai/Mistral-7B-Instruct-v0.3",
+    modelId: "Qwen/Qwen2.5-7B-Instruct",
     apiKey: process.env.HF_API_KEY || "",
     temperature: 0.7,
     maxTokens: 2048,
-    hfEndpoint: "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3/v1/chat/completions",
   },
-  "hf-zephyr-7b": {
+  "hf-llama-3.2-3b": {
     provider: "huggingface",
-    modelId: "HuggingFaceH4/zephyr-7b-beta",
+    modelId: "meta-llama/Llama-3.2-3B-Instruct",
     apiKey: process.env.HF_API_KEY || "",
     temperature: 0.7,
     maxTokens: 2048,
-    hfEndpoint: "https://router.huggingface.co/hf-inference/models/HuggingFaceH4/zephyr-7b-beta/v1/chat/completions",
   },
 
   // === OPENAI MODELS (requires OPENAI_API_KEY) ===
@@ -99,30 +126,45 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
   },
 };
 
-// Active model (can be changed for A/B testing)
-// Priority: Gemini > OpenAI > HuggingFace > Anthropic
-let activeModelId = process.env.LLM_MODEL ||
-  (process.env.GEMINI_API_KEY ? "gemini-2.0-flash" :
-   process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
-   process.env.HF_API_KEY ? "hf-mistral-7b" :
-   process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" : "gemini-2.0-flash");
+// Active model storage using globalThis to persist across Next.js module reloads
+// This fixes the issue where module-level variables get cached and stale
+declare global {
+  // eslint-disable-next-line no-var
+  var __transitioniq_active_model: string | undefined;
+}
+
+// Default model priority: OpenAI > HuggingFace > Anthropic > Gemini (Gemini has strict rate limits on free tier)
+function getDefaultModelId(): string {
+  return process.env.LLM_MODEL ||
+    (process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
+     process.env.HF_API_KEY ? "hf-qwen-7b" :
+     process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" :
+     process.env.GEMINI_API_KEY ? "gemini-2.0-flash-lite" : "openai-gpt-4o-mini");
+}
+
+// Initialize globalThis storage if not set
+if (!globalThis.__transitioniq_active_model) {
+  globalThis.__transitioniq_active_model = getDefaultModelId();
+}
 
 /**
  * Get the current active model ID
+ * Uses globalThis to persist across Next.js module reloads
  */
 export function getActiveModelId(): string {
-  return activeModelId;
+  return globalThis.__transitioniq_active_model || getDefaultModelId();
 }
 
 /**
  * Set the active model for evaluation
+ * Uses globalThis to persist across Next.js module reloads
  */
 export function setActiveModel(modelId: string): void {
   if (!MODEL_CONFIGS[modelId]) {
     throw new Error(`Unknown model: ${modelId}. Available: ${Object.keys(MODEL_CONFIGS).join(", ")}`);
   }
-  activeModelId = modelId;
-  console.log(`[LLM] Active model set to: ${modelId}`);
+  globalThis.__transitioniq_active_model = modelId;
+  console.log(`[LLM] Active model set to: ${modelId} (stored in globalThis)`);
 }
 
 /**
@@ -168,7 +210,7 @@ export class LLMProvider {
   private opik: Opik | null = null;
 
   constructor(modelId?: string) {
-    const id = modelId || activeModelId;
+    const id = modelId || getActiveModelId();
     const config = MODEL_CONFIGS[id];
 
     if (!config) {
@@ -275,18 +317,25 @@ export class LLMProvider {
       // Calculate estimated cost based on token usage
       const estimatedCost = tokenUsage ? this.estimateCost(tokenUsage) : undefined;
 
-      // Update LLM span with usage data (OpenAI format for Opik)
+      // Log token usage for debugging Opik dashboards
+      if (tokenUsage) {
+        console.log(`[LLM] Token usage for ${this.config.modelId}: prompt=${tokenUsage.promptTokens}, completion=${tokenUsage.completionTokens}, total=${tokenUsage.totalTokens}, cost=$${estimatedCost?.toFixed(6) || "N/A"}`);
+      } else {
+        console.log(`[LLM] No token usage returned from ${this.config.provider} - ${this.config.modelId}`);
+      }
+
+      // Update LLM span with usage data (Opik uses camelCase keys)
       if (llmSpan) {
         llmSpan.update({
           output: {
             response: content.slice(0, 1000), // Truncate for display
           },
-          // Pass usage in OpenAI format for Opik dashboard
-          // Keys must be: prompt_tokens, completion_tokens, total_tokens
+          // Pass usage in Opik's expected format (camelCase keys)
+          // See: https://www.comet.com/docs/opik/tracing/log_traces
           usage: tokenUsage ? {
-            prompt_tokens: tokenUsage.promptTokens,
-            completion_tokens: tokenUsage.completionTokens,
-            total_tokens: tokenUsage.totalTokens,
+            promptTokens: tokenUsage.promptTokens,
+            completionTokens: tokenUsage.completionTokens,
+            totalTokens: tokenUsage.totalTokens,
           } : undefined,
           // Set total estimated cost if we calculated it
           totalEstimatedCost: estimatedCost,
@@ -379,12 +428,21 @@ export class LLMProvider {
       }
 
       // Provide user-friendly error messages for rate limits and quota issues
+      // Include special markers so frontend can detect and prompt user to switch models
       if (isRateLimited) {
-        throw new Error(`Model rate limited (${this.config.modelId}). Please try again later or select a different model.`);
+        const error = new Error(`Model rate limited (${this.config.modelId}). Please try again later or select a different model.`);
+        (error as RateLimitError).code = "RATE_LIMITED";
+        (error as RateLimitError).modelId = this.config.modelId;
+        (error as RateLimitError).provider = this.config.provider;
+        throw error;
       }
 
       if (isOutOfCredits) {
-        throw new Error(`Model out of usage/credits (${this.config.modelId}). Please add credits or select a different model.`);
+        const error = new Error(`Model out of usage/credits (${this.config.modelId}). Please add credits or select a different model.`);
+        (error as RateLimitError).code = "OUT_OF_CREDITS";
+        (error as RateLimitError).modelId = this.config.modelId;
+        (error as RateLimitError).provider = this.config.provider;
+        throw error;
       }
 
       throw error;
@@ -408,15 +466,18 @@ export class LLMProvider {
   /**
    * Estimate cost based on token usage and model
    * Prices are approximate and in USD per 1K tokens
+   * Note: HuggingFace free tier has nominal costs for tracking purposes
    */
   private estimateCost(usage: NonNullable<LLMResponse["tokenUsage"]>): number {
     // Pricing per 1K tokens (approximate, as of early 2025)
+    // HuggingFace uses nominal pricing for Opik dashboard visibility
     const pricing: Record<string, { input: number; output: number }> = {
       // Gemini
       "gemini-2.0-flash": { input: 0.00010, output: 0.00040 },
-      // HuggingFace (free inference API)
-      "mistralai/Mistral-7B-Instruct-v0.3": { input: 0.0, output: 0.0 },
-      "HuggingFaceH4/zephyr-7b-beta": { input: 0.0, output: 0.0 },
+      "gemini-2.0-flash-lite": { input: 0.000075, output: 0.00030 },
+      // HuggingFace (free tier - using nominal costs for tracking)
+      "Qwen/Qwen2.5-7B-Instruct": { input: 0.00005, output: 0.00010 },
+      "meta-llama/Llama-3.2-3B-Instruct": { input: 0.00003, output: 0.00006 },
       // OpenAI
       "gpt-4o-mini": { input: 0.00015, output: 0.00060 },
       // Anthropic
@@ -472,17 +533,17 @@ export class LLMProvider {
   }
 
   /**
-   * Generate using HuggingFace Inference API
-   * Uses the new router.huggingface.co endpoint with OpenAI-compatible chat completions
-   * Docs: https://huggingface.co/docs/api-inference/
+   * Generate using HuggingFace Inference Providers API
+   * Uses router.huggingface.co/v1/chat/completions (OpenAI-compatible)
+   * Docs: https://huggingface.co/docs/inference-providers/en/tasks/chat-completion
    */
   private async generateHuggingFace(prompt: string): Promise<{
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
     // Use OpenAI-compatible chat completions endpoint
-    const endpoint = this.config.hfEndpoint ||
-      `https://router.huggingface.co/hf-inference/models/${this.config.modelId}/v1/chat/completions`;
+    // The model is specified in the request body, not in the URL
+    const endpoint = "https://router.huggingface.co/v1/chat/completions";
 
     const response = await fetch(endpoint, {
       method: "POST",
@@ -507,6 +568,9 @@ export class LLMProvider {
       const error = await response.text();
       if (response.status === 503) {
         throw new Error(`HuggingFace model is loading. Please try again in a few seconds.`);
+      }
+      if (response.status === 404) {
+        throw new Error(`HuggingFace model not found or not available for inference: ${this.config.modelId}`);
       }
       throw new Error(`HuggingFace API error: ${response.status} - ${error}`);
     }

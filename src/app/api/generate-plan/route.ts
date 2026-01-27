@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
-import { generateDischargePlan } from "@/lib/integrations/gemini";
+import { generateDischargePlan } from "@/lib/integrations/analysis";
 import { traceGeminiCall } from "@/lib/integrations/opik";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 

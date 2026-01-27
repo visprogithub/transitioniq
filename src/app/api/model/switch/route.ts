@@ -14,7 +14,7 @@ import {
   getAvailableModels,
   getModelConfig,
 } from "@/lib/integrations/llm-provider";
-import { resetLLMProvider } from "@/lib/integrations/gemini";
+import { resetLLMProvider } from "@/lib/integrations/analysis";
 
 export async function POST(request: NextRequest) {
   try {

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu } from "lucide-react";
+import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu, AlertTriangle } from "lucide-react";
 import { PatientHeader } from "@/components/PatientHeader";
 import { DischargeScore } from "@/components/DischargeScore";
 import { RiskFactorCard } from "@/components/RiskFactorCard";
@@ -10,12 +10,32 @@ import { EvaluationDashboard } from "@/components/EvaluationDashboard";
 import { SafetyDisclaimer, MedicalCaveats, ResponsibleAIBadge } from "@/components/SafetyDisclaimer";
 import { ModelSelector } from "@/components/ModelSelector";
 import { DischargePlan } from "@/components/DischargePlan";
+import { Tooltip } from "@/components/Tooltip";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 
-// Extended analysis type with model info
+// Extended analysis type with model and agent info
 interface AnalysisWithModel extends DischargeAnalysis {
   modelUsed?: string;
+  agentUsed?: boolean;
+  sessionId?: string;
+  message?: string;
+  toolsUsed?: Array<{
+    id: string;
+    tool: string;
+    success?: boolean;
+    duration?: number;
+  }>;
+  agentGraph?: {
+    nodes: Array<{ id: string; label: string; status: string; duration?: number }>;
+    edges: Array<{ from: string; to: string }>;
+  };
+  steps?: Array<{
+    id: string;
+    type: string;
+    content: string;
+    timestamp: string;
+  }>;
 }
 
 type TabType = "dashboard" | "evaluation";
@@ -40,6 +60,11 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [showPatientDropdown, setShowPatientDropdown] = useState(false);
   const [expandedRiskFactors, setExpandedRiskFactors] = useState<Set<string>>(new Set());
+  const [modelLimitError, setModelLimitError] = useState<{
+    modelId: string;
+    provider: string;
+    availableModels: string[];
+  } | null>(null);
 
   // Load patient data when selection changes
   useEffect(() => {
@@ -73,6 +98,7 @@ export default function DashboardPage() {
 
     setIsAnalyzing(true);
     setError(null);
+    setModelLimitError(null);
 
     try {
       const response = await fetch("/api/analyze", {
@@ -81,8 +107,23 @@ export default function DashboardPage() {
         body: JSON.stringify({ patientId: patient.id }),
       });
 
-      if (!response.ok) throw new Error("Analysis failed");
       const data = await response.json();
+
+      // Check for rate limit / usage limit error
+      if (response.status === 429 && data.suggestModelSwitch) {
+        setModelLimitError({
+          modelId: data.modelId,
+          provider: data.provider,
+          availableModels: data.availableModels || [],
+        });
+        setIsAnalyzing(false);
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || "Analysis failed");
+      }
+
       setAnalysis(data);
 
       // Auto-expand high-severity risk factors
@@ -160,28 +201,32 @@ export default function DashboardPage() {
 
               {/* Tab Navigation */}
               <nav className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
-                <button
-                  onClick={() => setActiveTab("dashboard")}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                    activeTab === "dashboard"
-                      ? "bg-white text-gray-900 shadow-sm"
-                      : "text-gray-600 hover:text-gray-900"
-                  }`}
-                >
-                  <LayoutDashboard className="w-4 h-4" />
-                  Dashboard
-                </button>
-                <button
-                  onClick={() => setActiveTab("evaluation")}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                    activeTab === "evaluation"
-                      ? "bg-white text-gray-900 shadow-sm"
-                      : "text-gray-600 hover:text-gray-900"
-                  }`}
-                >
-                  <FlaskConical className="w-4 h-4" />
-                  Evaluation
-                </button>
+                <Tooltip content="View patient discharge readiness assessment" position="bottom">
+                  <button
+                    onClick={() => setActiveTab("dashboard")}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                      activeTab === "dashboard"
+                        ? "bg-white text-gray-900 shadow-sm"
+                        : "text-gray-600 hover:text-gray-900"
+                    }`}
+                  >
+                    <LayoutDashboard className="w-4 h-4" />
+                    Dashboard
+                  </button>
+                </Tooltip>
+                <Tooltip content="Test and compare different AI models" position="bottom">
+                  <button
+                    onClick={() => setActiveTab("evaluation")}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                      activeTab === "evaluation"
+                        ? "bg-white text-gray-900 shadow-sm"
+                        : "text-gray-600 hover:text-gray-900"
+                    }`}
+                  >
+                    <FlaskConical className="w-4 h-4" />
+                    Evaluation
+                  </button>
+                </Tooltip>
               </nav>
             </div>
 
@@ -202,16 +247,18 @@ export default function DashboardPage() {
               {/* Patient Selector - only show on dashboard tab */}
               {activeTab === "dashboard" && (
                 <div className="relative">
-                  <button
-                    onClick={() => setShowPatientDropdown(!showPatientDropdown)}
-                    className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                  >
-                    <Users className="w-4 h-4 text-gray-600" />
-                    <span className="text-sm font-medium text-gray-700">
-                      {patient ? patient.name : "Select Patient"}
-                    </span>
-                    <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showPatientDropdown ? "rotate-180" : ""}`} />
-                  </button>
+                  <Tooltip content="Select a demo patient to analyze" position="bottom">
+                    <button
+                      onClick={() => setShowPatientDropdown(!showPatientDropdown)}
+                      className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                    >
+                      <Users className="w-4 h-4 text-gray-600" />
+                      <span className="text-sm font-medium text-gray-700">
+                        {patient ? patient.name : "Select Patient"}
+                      </span>
+                      <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showPatientDropdown ? "rotate-180" : ""}`} />
+                    </button>
+                  </Tooltip>
 
                   <AnimatePresence>
                     {showPatientDropdown && (
@@ -272,6 +319,65 @@ export default function DashboardPage() {
               )}
             </AnimatePresence>
 
+            {/* Model Rate Limit Banner */}
+            <AnimatePresence>
+              {modelLimitError && (
+                <motion.div
+                  initial={{ opacity: 0, y: -20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl"
+                >
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="font-medium text-amber-800">Model Rate Limited</p>
+                      <p className="text-sm text-amber-700 mt-1">
+                        The model <span className="font-mono bg-amber-100 px-1 rounded">{modelLimitError.modelId}</span> has
+                        reached its rate or usage limit. Please switch to a different model to continue.
+                      </p>
+                      {modelLimitError.availableModels.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <span className="text-sm text-amber-700">Available models:</span>
+                          {modelLimitError.availableModels.slice(0, 3).map((modelId) => (
+                            <button
+                              key={modelId}
+                              onClick={async () => {
+                                try {
+                                  const response = await fetch("/api/model/switch", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ modelId }),
+                                  });
+                                  if (response.ok) {
+                                    setCurrentModel(modelId);
+                                    setModelLimitError(null);
+                                    // Re-run analysis with new model
+                                    runAnalysis();
+                                  }
+                                } catch (e) {
+                                  console.error("Failed to switch model:", e);
+                                }
+                              }}
+                              className="px-3 py-1 text-sm bg-amber-200 hover:bg-amber-300 text-amber-800 rounded-lg font-medium transition-colors"
+                            >
+                              Switch to {modelId}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <button
+                        onClick={() => setModelLimitError(null)}
+                        className="mt-3 text-sm text-amber-600 hover:text-amber-800 underline"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {/* No Patient Selected */}
             {!selectedPatientId && (
           <motion.div
@@ -284,12 +390,14 @@ export default function DashboardPage() {
             </div>
             <h2 className="text-xl font-semibold text-gray-900 mb-2">Select a Patient</h2>
             <p className="text-gray-500 mb-6">Choose a patient to begin discharge readiness assessment</p>
-            <button
-              onClick={() => setShowPatientDropdown(true)}
-              className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors"
-            >
-              Select Patient
-            </button>
+            <Tooltip content="Choose from demo patients to begin" position="bottom">
+              <button
+                onClick={() => setShowPatientDropdown(true)}
+                className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors"
+              >
+                Select Patient
+              </button>
+            </Tooltip>
           </motion.div>
         )}
 
@@ -307,13 +415,15 @@ export default function DashboardPage() {
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-semibold text-gray-900">Discharge Readiness Score</h3>
                     {!isAnalyzing && (
-                      <button
-                        onClick={runAnalysis}
-                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-                      >
-                        <Sparkles className="w-4 h-4" />
-                        {analysis ? "Re-analyze" : "Analyze"}
-                      </button>
+                      <Tooltip content={analysis ? "Run analysis again with current model" : "Assess discharge readiness using AI"} position="bottom">
+                        <button
+                          onClick={runAnalysis}
+                          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                        >
+                          <Sparkles className="w-4 h-4" />
+                          {analysis ? "Re-analyze" : "Analyze"}
+                        </button>
+                      </Tooltip>
                     )}
                   </div>
 
@@ -322,7 +432,7 @@ export default function DashboardPage() {
                       <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
                         <Activity className="w-8 h-8 text-gray-400" />
                       </div>
-                      <p className="text-gray-500">Click "Analyze" to assess discharge readiness</p>
+                      <p className="text-gray-500">Click &quot;Analyze&quot; to assess discharge readiness</p>
                     </div>
                   )}
 
@@ -333,12 +443,57 @@ export default function DashboardPage() {
                         status={analysis?.status || "caution"}
                         isLoading={isAnalyzing}
                       />
-                      {/* Show model used */}
+                      {/* Show model and agent info */}
                       {analysis?.modelUsed && (
-                        <div className="mt-4 flex items-center justify-center gap-2 text-sm text-gray-500">
-                          <Cpu className="w-4 h-4" />
-                          <span>Analyzed with: <span className="font-medium text-gray-700">{analysis.modelUsed}</span></span>
+                        <div className="mt-4 space-y-2">
+                          <div className="flex items-center justify-center gap-2 text-sm text-gray-500">
+                            <Cpu className="w-4 h-4" />
+                            <span>Analyzed with: <span className="font-medium text-gray-700">{analysis.modelUsed}</span></span>
+                          </div>
+                          {analysis.agentUsed && (
+                            <div className="flex items-center justify-center gap-2 text-sm text-emerald-600">
+                              <Sparkles className="w-4 h-4" />
+                              <span className="font-medium">Multi-turn Agent Workflow</span>
+                            </div>
+                          )}
                         </div>
+                      )}
+
+                      {/* Agent Workflow Details */}
+                      {analysis?.agentUsed && analysis.toolsUsed && analysis.toolsUsed.length > 0 && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200"
+                        >
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
+                            <Activity className="w-4 h-4" />
+                            Agent Execution ({analysis.toolsUsed.length} tools)
+                          </h4>
+                          <div className="space-y-1">
+                            {analysis.toolsUsed.map((tool, i) => (
+                              <div
+                                key={tool.id || i}
+                                className="flex items-center justify-between text-xs"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span className={`w-2 h-2 rounded-full ${
+                                    tool.success ? "bg-emerald-500" : "bg-red-500"
+                                  }`} />
+                                  <span className="font-mono text-gray-600">{tool.tool}</span>
+                                </div>
+                                {tool.duration && (
+                                  <span className="text-gray-400">{tool.duration}ms</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                          {analysis.sessionId && (
+                            <div className="mt-2 pt-2 border-t border-gray-200 text-xs text-gray-400">
+                              Session: <span className="font-mono">{analysis.sessionId.slice(0, 8)}...</span>
+                            </div>
+                          )}
+                        </motion.div>
                       )}
                     </>
                   )}
@@ -350,14 +505,16 @@ export default function DashboardPage() {
                       animate={{ opacity: 1, y: 0 }}
                       className="mt-6 text-center"
                     >
-                      <button
-                        onClick={generatePlan}
-                        disabled={isGeneratingPlan}
-                        className="flex items-center gap-2 mx-auto px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-lg font-medium hover:from-emerald-600 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg"
-                      >
-                        <FileText className="w-5 h-5" />
-                        Generate Discharge Plan
-                      </button>
+                      <Tooltip content="Create an actionable checklist based on risk factors" position="top">
+                        <button
+                          onClick={generatePlan}
+                          disabled={isGeneratingPlan}
+                          className="flex items-center gap-2 mx-auto px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-lg font-medium hover:from-emerald-600 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg"
+                        >
+                          <FileText className="w-5 h-5" />
+                          Generate Discharge Plan
+                        </button>
+                      </Tooltip>
                     </motion.div>
                   )}
 
