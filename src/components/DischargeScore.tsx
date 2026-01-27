@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
+import { Tooltip } from "./Tooltip";
 
 interface DischargeScoreProps {
   score: number;
@@ -149,18 +150,24 @@ export function DischargeScore({ score, status, isLoading = false }: DischargeSc
           animate={{ opacity: 1 }}
           transition={{ delay: 1.5 }}
         >
-          <div className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-full bg-red-500" />
-            <span>0-39: Not Ready</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-full bg-amber-500" />
-            <span>40-69: Caution</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-full bg-emerald-500" />
-            <span>70-100: Ready</span>
-          </div>
+          <Tooltip content="High risk of complications or readmission. Address all red risk factors before discharge." position="bottom">
+            <div className="flex items-center gap-2 cursor-help">
+              <span className="w-3 h-3 rounded-full bg-red-500" />
+              <span>0-39: Not Ready</span>
+            </div>
+          </Tooltip>
+          <Tooltip content="Moderate concerns present. Review yellow risk factors and consider additional interventions." position="bottom">
+            <div className="flex items-center gap-2 cursor-help">
+              <span className="w-3 h-3 rounded-full bg-amber-500" />
+              <span>40-69: Caution</span>
+            </div>
+          </Tooltip>
+          <Tooltip content="Patient meets discharge criteria. Standard discharge process can proceed." position="bottom">
+            <div className="flex items-center gap-2 cursor-help">
+              <span className="w-3 h-3 rounded-full bg-emerald-500" />
+              <span>70-100: Ready</span>
+            </div>
+          </Tooltip>
         </motion.div>
       )}
     </div>

@@ -1,12 +1,19 @@
 /**
  * Agent Tools - Executable tools the agent can invoke
+ *
+ * Tools use the LLM provider abstraction for model-agnostic analysis.
+ * The active model can be switched via the ModelSelector UI.
  */
 
 import { getPatient } from "@/lib/data/demo-patients";
-import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/fda-client";
-import { evaluateCareGaps, type CareGap } from "@/lib/integrations/guidelines-client";
+import { checkDrugInteractions } from "@/lib/integrations/fda-client";
+import {
+  analyzeDischargeReadiness as llmAnalyzeReadiness,
+  generateDischargePlan as llmGeneratePlan,
+} from "@/lib/integrations/analysis";
+import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import type { Patient } from "@/lib/types/patient";
-import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
+import type { DischargeAnalysis } from "@/lib/types/analysis";
 import type { ToolResult, ToolName, PatientContext, DrugInteractionContext, CareGapContext, CostContext } from "./types";
 
 /**
@@ -39,13 +46,13 @@ export const TOOLS: Record<ToolName, ToolDefinition> = {
   },
   analyze_readiness: {
     name: "analyze_readiness",
-    description: "Analyze all gathered data to compute discharge readiness score and risk factors",
+    description: "Analyze all gathered data using selected LLM to compute discharge readiness score and risk factors",
     parameters: ["patient", "drugInteractions", "careGaps", "costs"],
     execute: analyzeReadinessTool,
   },
   generate_plan: {
     name: "generate_plan",
-    description: "Generate a discharge planning checklist based on analysis results",
+    description: "Generate a discharge planning checklist using selected LLM based on analysis results",
     parameters: ["analysis", "patient"],
     execute: generatePlanTool,
   },
@@ -98,7 +105,8 @@ async function fetchPatientTool(input: Record<string, unknown>): Promise<ToolRes
 }
 
 /**
- * Check drug interactions
+ * Check drug interactions via FDA API
+ * No fallbacks - let it fail if FDA API is unavailable
  */
 async function checkDrugInteractionsTool(input: Record<string, unknown>): Promise<ToolResult<DrugInteractionContext[]>> {
   const startTime = Date.now();
@@ -117,79 +125,168 @@ async function checkDrugInteractionsTool(input: Record<string, unknown>): Promis
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    // Fallback to known interactions
-    const fallbackInteractions = getKnownInteractionsFallback(medications);
+    console.error("[Agent Tool] FDA drug interaction check failed:", error);
     return {
-      success: true,
-      data: fallbackInteractions,
+      success: false,
+      error: error instanceof Error ? error.message : "FDA drug interaction check failed",
       duration: Date.now() - startTime,
     };
   }
 }
 
 /**
- * Evaluate care gaps
+ * Evaluate care gaps using LLM reasoning
+ * Uses the currently selected model to analyze against clinical guidelines
  */
 async function evaluateCareGapsTool(input: Record<string, unknown>): Promise<ToolResult<CareGapContext[]>> {
   const startTime = Date.now();
   const patient = input.patient as Patient;
 
+  console.log(`[Agent Tool] evaluate_care_gaps using model: ${getActiveModelId()}`);
+
   try {
-    const gaps = evaluateCareGaps(patient);
+    // Use LLM to reason about care gaps against clinical guidelines
+    const { createLLMProvider } = await import("@/lib/integrations/llm-provider");
+    const provider = createLLMProvider(getActiveModelId());
+
+    const patientContext = `
+Patient: ${patient.name}, ${patient.age}yo ${patient.gender === "M" ? "Male" : "Female"}
+Diagnoses: ${patient.diagnoses.map((d) => d.display).join(", ")}
+Medications: ${patient.medications.map((m) => `${m.name} ${m.dose}`).join(", ")}
+Labs: ${patient.recentLabs?.map((l) => `${l.name}: ${l.value} ${l.unit}${l.abnormal ? " [ABNORMAL]" : ""}`).join(", ") || "None available"}
+Vitals: ${patient.vitalSigns ? `BP ${patient.vitalSigns.bloodPressure}, HR ${patient.vitalSigns.heartRate}` : "Not available"}
+`;
+
+    const prompt = `You are a clinical decision support system analyzing a patient against evidence-based clinical guidelines.
+
+${patientContext}
+
+Evaluate this patient against the following major clinical guidelines:
+1. ACC/AHA Heart Failure Guidelines (if applicable)
+2. ADA Diabetes Standards of Care (if applicable)
+3. ACC/AHA/HRS Atrial Fibrillation Guidelines (if applicable)
+4. GOLD COPD Guidelines (if applicable)
+5. Discharge Planning Standards (CMS/TJC)
+
+For each applicable guideline, determine if the patient meets the recommendation or has a care gap.
+
+Respond with ONLY a JSON array of care gaps found, no other text:
+[
+  {"guideline": "Guideline Name", "status": "met" or "unmet", "grade": "A" or "B" or "C"},
+  ...
+]
+
+Notes:
+- Grade A = Strong recommendation, high-quality evidence
+- Grade B = Moderate recommendation or moderate evidence
+- Grade C = Weak recommendation or low-quality evidence
+- Only include guidelines that apply to this patient's conditions
+- Be thorough but clinically accurate`;
+
+    const response = await provider.generate(prompt, {
+      spanName: "care-gap-evaluation",
+      metadata: {
+        patient_id: patient.id,
+        diagnosis_count: patient.diagnoses.length,
+        medication_count: patient.medications.length,
+      },
+    });
+
+    // Parse LLM response
+    const jsonMatch = response.content.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      throw new Error("LLM did not return valid JSON array for care gap evaluation");
+    }
+
+    const gaps = JSON.parse(jsonMatch[0]) as CareGapContext[];
+
     return {
       success: true,
-      data: gaps.map((g) => ({
-        guideline: g.guideline,
-        status: g.status,
-        grade: g.grade,
-      })),
+      data: gaps,
       duration: Date.now() - startTime,
     };
   } catch (error) {
+    console.error("[Agent Tool] LLM care gap evaluation failed:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to evaluate care gaps",
+      error: error instanceof Error ? error.message : "LLM care gap evaluation failed",
       duration: Date.now() - startTime,
     };
   }
 }
 
 /**
- * Estimate medication costs
+ * Estimate medication costs using LLM reasoning
+ * Uses the currently selected model to reason about medication costs
  */
 async function estimateCostsTool(input: Record<string, unknown>): Promise<ToolResult<CostContext[]>> {
   const startTime = Date.now();
   const medications = input.medications as Patient["medications"];
 
-  const highCostMeds = [
-    { pattern: "eliquis", cost: 500 },
-    { pattern: "xarelto", cost: 450 },
-    { pattern: "entresto", cost: 550 },
-    { pattern: "jardiance", cost: 450 },
-    { pattern: "ozempic", cost: 900 },
-    { pattern: "spiriva", cost: 350 },
-  ];
+  console.log(`[Agent Tool] estimate_costs using model: ${getActiveModelId()}`);
 
-  const costs = medications.map((med) => {
-    const medNameLower = med.name.toLowerCase();
-    const highCost = highCostMeds.find((hc) => medNameLower.includes(hc.pattern));
+  try {
+    // Use LLM to reason about medication costs
+    const { createLLMProvider } = await import("@/lib/integrations/llm-provider");
+    const provider = createLLMProvider(getActiveModelId());
+
+    const medicationList = medications.map((m) => `- ${m.name} ${m.dose} ${m.frequency}`).join("\n");
+
+    const prompt = `Analyze the following medications and estimate their monthly out-of-pocket costs for a typical Medicare Part D patient without supplemental coverage.
+
+Medications:
+${medicationList}
+
+For each medication, estimate:
+1. The approximate monthly out-of-pocket cost in USD
+2. Whether it's typically covered by Medicare Part D (true/false)
+
+Consider:
+- Brand vs generic availability
+- Typical copay tiers
+- High-cost specialty medications (biologics, newer anticoagulants, GLP-1 agonists)
+- Common generic medications typically have low costs ($10-30/month)
+- Brand-name medications without generics often cost $100-500+/month
+
+Respond with ONLY a JSON array, no other text:
+[
+  {"medication": "Drug Name", "monthlyOOP": 150, "covered": true},
+  ...
+]`;
+
+    const response = await provider.generate(prompt, {
+      spanName: "cost-estimation",
+      metadata: {
+        medication_count: medications.length,
+      },
+    });
+
+    // Parse LLM response
+    const jsonMatch = response.content.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      throw new Error("LLM did not return valid JSON array for cost estimation");
+    }
+
+    const costs = JSON.parse(jsonMatch[0]) as CostContext[];
 
     return {
-      medication: med.name,
-      monthlyOOP: highCost ? highCost.cost : 10,
-      covered: !highCost,
+      success: true,
+      data: costs,
+      duration: Date.now() - startTime,
     };
-  });
-
-  return {
-    success: true,
-    data: costs,
-    duration: Date.now() - startTime,
-  };
+  } catch (error) {
+    console.error("[Agent Tool] LLM cost estimation failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "LLM cost estimation failed",
+      duration: Date.now() - startTime,
+    };
+  }
 }
 
 /**
- * Analyze discharge readiness
+ * Analyze discharge readiness using LLM
+ * Uses the currently selected model via LLMProvider
  */
 async function analyzeReadinessTool(input: Record<string, unknown>): Promise<ToolResult<DischargeAnalysis>> {
   const startTime = Date.now();
@@ -199,128 +296,56 @@ async function analyzeReadinessTool(input: Record<string, unknown>): Promise<Too
   const careGaps = input.careGaps as CareGapContext[];
   const costs = input.costs as CostContext[];
 
-  const riskFactors: RiskFactor[] = [];
-  let score = 100;
+  console.log(`[Agent Tool] analyze_readiness using model: ${getActiveModelId()}`);
 
-  // Drug interaction risks
-  for (const interaction of drugInteractions) {
-    // Map FDA severity to RiskFactor severity
-    const severity: "high" | "moderate" | "low" = interaction.severity === "major" ? "high" : interaction.severity === "moderate" ? "moderate" : "low";
-    const deduction = severity === "high" ? 20 : severity === "moderate" ? 10 : 5;
-    score -= deduction;
+  try {
+    // Convert tool context types to analysis types
+    const formattedInteractions = drugInteractions.map((i) => ({
+      drug1: i.drug1,
+      drug2: i.drug2,
+      severity: i.severity as "major" | "moderate" | "minor",
+      description: i.description,
+    }));
 
-    riskFactors.push({
-      id: `di-${riskFactors.length}`,
-      severity,
-      category: "drug_interaction",
-      title: `${interaction.drug1} + ${interaction.drug2} Interaction`,
-      description: interaction.description,
-      source: "FDA",
-      actionable: true,
-      resolution: severity === "high"
-        ? "Review medication regimen with pharmacist"
-        : "Monitor for adverse effects",
-    });
+    const formattedGaps = careGaps.map((g) => ({
+      guideline: g.guideline,
+      recommendation: `Grade ${g.grade} - ${g.status}`,
+      grade: g.grade,
+      status: g.status,
+    }));
+
+    const formattedCosts = costs.map((c) => ({
+      medication: c.medication,
+      monthlyOOP: c.monthlyOOP,
+      covered: c.covered,
+    }));
+
+    // Use LLM-powered analysis with the selected model
+    const analysis = await llmAnalyzeReadiness(
+      patient,
+      formattedInteractions,
+      formattedGaps,
+      formattedCosts
+    );
+
+    return {
+      success: true,
+      data: analysis,
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    console.error("[Agent Tool] LLM analysis failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "LLM analysis failed",
+      duration: Date.now() - startTime,
+    };
   }
-
-  // Care gap risks
-  const unmetGaps = careGaps.filter((g) => g.status === "unmet");
-  for (const gap of unmetGaps) {
-    const severity = gap.grade === "A" ? "high" : gap.grade === "B" ? "moderate" : "low";
-    const deduction = severity === "high" ? 15 : severity === "moderate" ? 8 : 3;
-    score -= deduction;
-
-    riskFactors.push({
-      id: `cg-${riskFactors.length}`,
-      severity,
-      category: "care_gap",
-      title: gap.guideline,
-      description: `Grade ${gap.grade} recommendation not met`,
-      source: "Guidelines",
-      actionable: true,
-    });
-  }
-
-  // Lab abnormality risks
-  const abnormalLabs = patient.recentLabs?.filter((l) => l.abnormal) || [];
-  for (const lab of abnormalLabs) {
-    let severity: "high" | "moderate" | "low" = "low";
-    let deduction = 5;
-
-    if (lab.name.toLowerCase().includes("inr") && (lab.value > 4 || lab.value < 1.5)) {
-      severity = "high";
-      deduction = 15;
-    } else if (lab.name.toLowerCase().includes("bnp") && lab.value > 500) {
-      severity = "moderate";
-      deduction = 10;
-    }
-
-    score -= deduction;
-
-    riskFactors.push({
-      id: `lab-${riskFactors.length}`,
-      severity,
-      category: "lab_abnormality",
-      title: `Abnormal ${lab.name}`,
-      description: `${lab.name}: ${lab.value} ${lab.unit} (ref: ${lab.referenceRange})`,
-      source: "FHIR",
-      actionable: severity !== "low",
-    });
-  }
-
-  // Cost barrier risks
-  const highCostMeds = costs.filter((c) => c.monthlyOOP > 100);
-  for (const med of highCostMeds) {
-    const severity = med.monthlyOOP > 400 ? "moderate" : "low";
-    score -= severity === "moderate" ? 5 : 2;
-
-    riskFactors.push({
-      id: `cost-${riskFactors.length}`,
-      severity,
-      category: "cost_barrier",
-      title: `High Cost: ${med.medication}`,
-      description: `$${med.monthlyOOP}/month out-of-pocket`,
-      source: "CMS",
-      actionable: true,
-      resolution: "Discuss alternatives or assistance programs",
-    });
-  }
-
-  score = Math.max(0, Math.min(100, score));
-
-  let status: "ready" | "caution" | "not_ready";
-  if (score >= 70) status = "ready";
-  else if (score >= 40) status = "caution";
-  else status = "not_ready";
-
-  const recommendations: string[] = [];
-  if (drugInteractions.some((i) => i.severity === "major")) {
-    recommendations.push("Review medication regimen for high-risk interactions");
-  }
-  if (unmetGaps.some((g) => g.grade === "A")) {
-    recommendations.push("Address Grade A guideline recommendations");
-  }
-  recommendations.push("Schedule follow-up within 7-14 days");
-
-  return {
-    success: true,
-    data: {
-      patientId: patient.id,
-      score,
-      status,
-      riskFactors: riskFactors.sort((a, b) => {
-        const order = { high: 0, moderate: 1, low: 2 };
-        return order[a.severity] - order[b.severity];
-      }),
-      recommendations,
-      analyzedAt: new Date().toISOString(),
-    },
-    duration: Date.now() - startTime,
-  };
 }
 
 /**
- * Generate discharge plan
+ * Generate discharge plan using LLM
+ * Uses the currently selected model via LLMProvider
  */
 async function generatePlanTool(input: Record<string, unknown>): Promise<ToolResult<string>> {
   const startTime = Date.now();
@@ -328,45 +353,25 @@ async function generatePlanTool(input: Record<string, unknown>): Promise<ToolRes
   const analysis = input.analysis as DischargeAnalysis;
   const patient = input.patient as Patient;
 
-  const highRisks = analysis.riskFactors.filter((rf) => rf.severity === "high");
-  const moderateRisks = analysis.riskFactors.filter((rf) => rf.severity === "moderate");
+  console.log(`[Agent Tool] generate_plan using model: ${getActiveModelId()}`);
 
-  const lines: string[] = [
-    `DISCHARGE PLANNING CHECKLIST`,
-    `Patient: ${patient.name}`,
-    `Score: ${analysis.score}/100 (${analysis.status.toUpperCase().replace("_", " ")})`,
-    `Generated: ${new Date().toLocaleString()}`,
-    "",
-  ];
+  try {
+    // Use LLM-powered plan generation with the selected model
+    const plan = await llmGeneratePlan(patient, analysis);
 
-  if (highRisks.length > 0) {
-    lines.push("HIGH PRIORITY - MUST ADDRESS:");
-    highRisks.forEach((rf, i) => {
-      lines.push(`${i + 1}. ${rf.title}: ${rf.description}`);
-      if (rf.resolution) lines.push(`   Action: ${rf.resolution}`);
-    });
-    lines.push("");
+    return {
+      success: true,
+      data: plan,
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    console.error("[Agent Tool] LLM plan generation failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "LLM plan generation failed",
+      duration: Date.now() - startTime,
+    };
   }
-
-  if (moderateRisks.length > 0) {
-    lines.push("MODERATE PRIORITY:");
-    moderateRisks.forEach((rf, i) => {
-      lines.push(`${i + 1}. ${rf.title}: ${rf.description}`);
-    });
-    lines.push("");
-  }
-
-  lines.push("STANDARD TASKS:");
-  lines.push("- Medication reconciliation completed");
-  lines.push("- Patient education provided");
-  lines.push("- Follow-up scheduled (7-14 days)");
-  lines.push("- Written instructions given");
-
-  return {
-    success: true,
-    data: lines.join("\n"),
-    duration: Date.now() - startTime,
-  };
 }
 
 /**
@@ -398,30 +403,3 @@ export function listTools(): ToolDefinition[] {
   return Object.values(TOOLS);
 }
 
-/**
- * Fallback drug interactions for known combinations
- */
-function getKnownInteractionsFallback(medications: Patient["medications"]): DrugInteractionContext[] {
-  const interactions: DrugInteractionContext[] = [];
-  const medNames = medications.map((m) => m.name.toLowerCase());
-
-  if (medNames.some((m) => m.includes("warfarin")) && medNames.some((m) => m.includes("aspirin"))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Aspirin",
-      severity: "major",
-      description: "Increased bleeding risk",
-    });
-  }
-
-  if (medNames.some((m) => m.includes("warfarin")) && medNames.some((m) => m.includes("eliquis"))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Eliquis",
-      severity: "major",
-      description: "Dual anticoagulation - high bleeding risk",
-    });
-  }
-
-  return interactions;
-}

@@ -13,9 +13,28 @@ import { DischargePlan } from "@/components/DischargePlan";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 
-// Extended analysis type with model info
+// Extended analysis type with model and agent info
 interface AnalysisWithModel extends DischargeAnalysis {
   modelUsed?: string;
+  agentUsed?: boolean;
+  sessionId?: string;
+  message?: string;
+  toolsUsed?: Array<{
+    id: string;
+    tool: string;
+    success?: boolean;
+    duration?: number;
+  }>;
+  agentGraph?: {
+    nodes: Array<{ id: string; label: string; status: string; duration?: number }>;
+    edges: Array<{ from: string; to: string }>;
+  };
+  steps?: Array<{
+    id: string;
+    type: string;
+    content: string;
+    timestamp: string;
+  }>;
 }
 
 type TabType = "dashboard" | "evaluation";
@@ -402,7 +421,7 @@ export default function DashboardPage() {
                       <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
                         <Activity className="w-8 h-8 text-gray-400" />
                       </div>
-                      <p className="text-gray-500">Click "Analyze" to assess discharge readiness</p>
+                      <p className="text-gray-500">Click &quot;Analyze&quot; to assess discharge readiness</p>
                     </div>
                   )}
 
@@ -413,12 +432,57 @@ export default function DashboardPage() {
                         status={analysis?.status || "caution"}
                         isLoading={isAnalyzing}
                       />
-                      {/* Show model used */}
+                      {/* Show model and agent info */}
                       {analysis?.modelUsed && (
-                        <div className="mt-4 flex items-center justify-center gap-2 text-sm text-gray-500">
-                          <Cpu className="w-4 h-4" />
-                          <span>Analyzed with: <span className="font-medium text-gray-700">{analysis.modelUsed}</span></span>
+                        <div className="mt-4 space-y-2">
+                          <div className="flex items-center justify-center gap-2 text-sm text-gray-500">
+                            <Cpu className="w-4 h-4" />
+                            <span>Analyzed with: <span className="font-medium text-gray-700">{analysis.modelUsed}</span></span>
+                          </div>
+                          {analysis.agentUsed && (
+                            <div className="flex items-center justify-center gap-2 text-sm text-emerald-600">
+                              <Sparkles className="w-4 h-4" />
+                              <span className="font-medium">Multi-turn Agent Workflow</span>
+                            </div>
+                          )}
                         </div>
+                      )}
+
+                      {/* Agent Workflow Details */}
+                      {analysis?.agentUsed && analysis.toolsUsed && analysis.toolsUsed.length > 0 && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200"
+                        >
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
+                            <Activity className="w-4 h-4" />
+                            Agent Execution ({analysis.toolsUsed.length} tools)
+                          </h4>
+                          <div className="space-y-1">
+                            {analysis.toolsUsed.map((tool, i) => (
+                              <div
+                                key={tool.id || i}
+                                className="flex items-center justify-between text-xs"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span className={`w-2 h-2 rounded-full ${
+                                    tool.success ? "bg-emerald-500" : "bg-red-500"
+                                  }`} />
+                                  <span className="font-mono text-gray-600">{tool.tool}</span>
+                                </div>
+                                {tool.duration && (
+                                  <span className="text-gray-400">{tool.duration}ms</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                          {analysis.sessionId && (
+                            <div className="mt-2 pt-2 border-t border-gray-200 text-xs text-gray-400">
+                              Session: <span className="font-mono">{analysis.sessionId.slice(0, 8)}...</span>
+                            </div>
+                          )}
+                        </motion.div>
                       )}
                     </>
                   )}

@@ -210,7 +210,7 @@ export class LLMProvider {
   private opik: Opik | null = null;
 
   constructor(modelId?: string) {
-    const id = modelId || activeModelId;
+    const id = modelId || getActiveModelId();
     const config = MODEL_CONFIGS[id];
 
     if (!config) {

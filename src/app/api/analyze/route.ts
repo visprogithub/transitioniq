@@ -1,17 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/fda-client";
-import { evaluateCareGaps, type CareGap } from "@/lib/integrations/guidelines-client";
+import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
 import { traceDataSourceCall } from "@/lib/integrations/opik";
 import { getActiveModelId, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
-import type { DischargeAnalysis } from "@/lib/types/analysis";
+import { runAgent, getSession } from "@/lib/agents/orchestrator";
 import type { Patient } from "@/lib/types/patient";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { patientId } = body;
+    const { patientId, useAgent = true, sessionId } = body;
 
     if (!patientId) {
       return NextResponse.json({ error: "patientId required" }, { status: 400 });
@@ -22,6 +22,52 @@ export async function POST(request: NextRequest) {
     if (!patient) {
       return NextResponse.json({ error: "Patient not found" }, { status: 404 });
     }
+
+    // Use the TypeScript agent orchestrator for multi-turn analysis
+    if (useAgent) {
+      console.log("[Analyze] Using multi-turn agent orchestrator");
+
+      try {
+        // Run the agent with ReAct-style loop
+        const agentResponse = await runAgent({
+          patientId,
+          sessionId,
+          message: `Assess discharge readiness for patient ${patientId}`,
+        });
+
+        // Get session for additional context
+        const session = getSession(agentResponse.sessionId);
+
+        // Return agent response with full context
+        return NextResponse.json({
+          // Analysis results
+          score: agentResponse.analysis?.score,
+          status: agentResponse.analysis?.status,
+          riskFactors: agentResponse.analysis?.riskFactors || [],
+          recommendations: agentResponse.analysis?.recommendations || [],
+          analyzedAt: new Date().toISOString(),
+
+          // Agent execution metadata
+          modelUsed: getActiveModelId(),
+          agentUsed: true,
+          sessionId: agentResponse.sessionId,
+          message: agentResponse.message,
+          toolsUsed: agentResponse.toolsUsed,
+          agentGraph: agentResponse.agentGraph,
+          suggestedActions: agentResponse.suggestedActions,
+
+          // Session context
+          steps: session?.steps || [],
+          conversationHistory: session?.context.conversationHistory || [],
+        });
+      } catch (agentError) {
+        console.warn("[Analyze] Agent error, falling back to direct LLM:", agentError);
+        // Fall through to direct LLM implementation
+      }
+    }
+
+    // Fallback: Direct LLM implementation (single-turn)
+    console.log("[Analyze] Using direct LLM (single-turn)");
 
     // Run data gathering in parallel with Opik tracing
     const [drugInteractionsResult, careGapsResult] = await Promise.all([
@@ -77,6 +123,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       ...analysis,
       modelUsed: getActiveModelId(),
+      agentUsed: false,
     });
   } catch (error) {
     console.error("Analysis error:", error);
