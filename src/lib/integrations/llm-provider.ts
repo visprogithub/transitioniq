@@ -43,32 +43,37 @@ export interface LLMResponse {
 // Includes Gemini 2.0 Flash, HuggingFace, OpenAI GPT-4o Mini, and Anthropic
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
   // === GEMINI MODELS (requires GEMINI_API_KEY) ===
-  // Only Gemini 2.0 Flash is supported (1.5 models deprecated)
+  // Free tier: 5 RPM for flash, 15 RPM for flash-lite
   "gemini-2.0-flash": {
     provider: "gemini",
     modelId: "gemini-2.0-flash",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
   },
+  // Flash-Lite has higher free tier limits (15 RPM vs 5 RPM)
+  "gemini-2.0-flash-lite": {
+    provider: "gemini",
+    modelId: "gemini-2.0-flash-lite",
+    apiKey: process.env.GEMINI_API_KEY || "",
+    temperature: 0.7,
+  },
 
   // === HUGGING FACE MODELS (requires HF_API_KEY - free tier) ===
   // Get free API key at: https://huggingface.co/settings/tokens
-  // Uses NEW router.huggingface.co endpoint (old api-inference.huggingface.co is deprecated)
-  "hf-mistral-7b": {
+  // Uses router.huggingface.co/v1/chat/completions (OpenAI-compatible endpoint)
+  "hf-qwen-7b": {
     provider: "huggingface",
-    modelId: "mistralai/Mistral-7B-Instruct-v0.3",
+    modelId: "Qwen/Qwen2.5-7B-Instruct",
     apiKey: process.env.HF_API_KEY || "",
     temperature: 0.7,
     maxTokens: 2048,
-    hfEndpoint: "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3/v1/chat/completions",
   },
-  "hf-zephyr-7b": {
+  "hf-llama-3.2-3b": {
     provider: "huggingface",
-    modelId: "HuggingFaceH4/zephyr-7b-beta",
+    modelId: "meta-llama/Llama-3.2-3B-Instruct",
     apiKey: process.env.HF_API_KEY || "",
     temperature: 0.7,
     maxTokens: 2048,
-    hfEndpoint: "https://router.huggingface.co/hf-inference/models/HuggingFaceH4/zephyr-7b-beta/v1/chat/completions",
   },
 
   // === OPENAI MODELS (requires OPENAI_API_KEY) ===
@@ -100,12 +105,12 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
 };
 
 // Active model (can be changed for A/B testing)
-// Priority: Gemini > OpenAI > HuggingFace > Anthropic
+// Priority: Gemini Flash-Lite (higher free limits) > OpenAI > HuggingFace > Anthropic
 let activeModelId = process.env.LLM_MODEL ||
-  (process.env.GEMINI_API_KEY ? "gemini-2.0-flash" :
+  (process.env.GEMINI_API_KEY ? "gemini-2.0-flash-lite" :
    process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
-   process.env.HF_API_KEY ? "hf-mistral-7b" :
-   process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" : "gemini-2.0-flash");
+   process.env.HF_API_KEY ? "hf-qwen-7b" :
+   process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" : "gemini-2.0-flash-lite");
 
 /**
  * Get the current active model ID
@@ -414,9 +419,10 @@ export class LLMProvider {
     const pricing: Record<string, { input: number; output: number }> = {
       // Gemini
       "gemini-2.0-flash": { input: 0.00010, output: 0.00040 },
+      "gemini-2.0-flash-lite": { input: 0.000075, output: 0.00030 },
       // HuggingFace (free inference API)
-      "mistralai/Mistral-7B-Instruct-v0.3": { input: 0.0, output: 0.0 },
-      "HuggingFaceH4/zephyr-7b-beta": { input: 0.0, output: 0.0 },
+      "Qwen/Qwen2.5-7B-Instruct": { input: 0.0, output: 0.0 },
+      "meta-llama/Llama-3.2-3B-Instruct": { input: 0.0, output: 0.0 },
       // OpenAI
       "gpt-4o-mini": { input: 0.00015, output: 0.00060 },
       // Anthropic
@@ -472,17 +478,17 @@ export class LLMProvider {
   }
 
   /**
-   * Generate using HuggingFace Inference API
-   * Uses the new router.huggingface.co endpoint with OpenAI-compatible chat completions
-   * Docs: https://huggingface.co/docs/api-inference/
+   * Generate using HuggingFace Inference Providers API
+   * Uses router.huggingface.co/v1/chat/completions (OpenAI-compatible)
+   * Docs: https://huggingface.co/docs/inference-providers/en/tasks/chat-completion
    */
   private async generateHuggingFace(prompt: string): Promise<{
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
     // Use OpenAI-compatible chat completions endpoint
-    const endpoint = this.config.hfEndpoint ||
-      `https://router.huggingface.co/hf-inference/models/${this.config.modelId}/v1/chat/completions`;
+    // The model is specified in the request body, not in the URL
+    const endpoint = "https://router.huggingface.co/v1/chat/completions";
 
     const response = await fetch(endpoint, {
       method: "POST",
@@ -507,6 +513,9 @@ export class LLMProvider {
       const error = await response.text();
       if (response.status === 503) {
         throw new Error(`HuggingFace model is loading. Please try again in a few seconds.`);
+      }
+      if (response.status === 404) {
+        throw new Error(`HuggingFace model not found or not available for inference: ${this.config.modelId}`);
       }
       throw new Error(`HuggingFace API error: ${response.status} - ${error}`);
     }
