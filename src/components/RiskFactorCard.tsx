@@ -151,7 +151,9 @@ export function RiskFactorCard({ riskFactor, isExpanded: controlledExpanded, onT
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <CategoryIcon className="w-5 h-5 text-gray-400" />
+          <Tooltip content={categoryTooltips[factor.category] || "Risk factor category"} position="left">
+            <CategoryIcon className="w-5 h-5 text-gray-400 cursor-help" />
+          </Tooltip>
           {isExpanded ? (
             <ChevronUp className="w-5 h-5 text-gray-400" />
           ) : (

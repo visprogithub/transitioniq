@@ -13,6 +13,8 @@ import type { DischargeAnalysis, RiskFactor } from "../types/analysis";
 import {
   getDischargeAnalysisPrompt,
   formatDischargePrompt,
+  getDischargePlanPrompt,
+  formatDischargePlanPrompt,
   logPromptUsage,
   initializeOpikPrompts,
 } from "./opik-prompts";
@@ -65,7 +67,7 @@ interface CostEstimate {
 }
 
 /**
- * Analyze discharge readiness using Gemini LLM
+ * Analyze discharge readiness using selected LLM
  * NO FALLBACK - throws error if LLM unavailable
  */
 export async function analyzeDischargeReadiness(
@@ -156,7 +158,8 @@ export async function analyzeDischargeReadiness(
   // Parse response - strict parsing, no fallback
   const analysis = parseAnalysisResponse(patient.id, responseText);
 
-  // Log to Opik with prompt commit tracking
+  // Log to Opik with prompt commit tracking and model info
+  const modelId = getActiveModelId();
   await logPromptUsage(
     patient.id,
     commit,
@@ -174,7 +177,8 @@ export async function analyzeDischargeReadiness(
       riskFactors: analysis.riskFactors,
       recommendations: analysis.recommendations,
     },
-    latencyMs
+    latencyMs,
+    modelId
   );
 
   return analysis;
@@ -239,7 +243,7 @@ function parseAnalysisResponse(patientId: string, responseText: string): Dischar
 }
 
 /**
- * Generate discharge plan using Gemini LLM
+ * Generate discharge plan using LLM with Opik prompt versioning
  */
 export async function generateDischargePlan(
   patient: Patient,
@@ -247,21 +251,27 @@ export async function generateDischargePlan(
 ): Promise<string> {
   // Note: API key validation is handled by LLMProvider for the active model
 
-  const prompt = `Based on the discharge analysis for ${patient.name} (score: ${analysis.score}/100, status: ${analysis.status}), generate a detailed discharge checklist.
+  // Build risk factor context
+  const highRisks = analysis.riskFactors.filter((rf) => rf.severity === "high");
+  const moderateRisks = analysis.riskFactors.filter((rf) => rf.severity === "moderate");
 
-Patient: ${patient.name}, ${patient.age}${patient.gender}, admitted ${patient.admissionDate}
+  // Get prompt from Opik Prompt Library
+  const { template, commit, fromOpik } = await getDischargePlanPrompt();
 
-Risk factors identified:
-${analysis.riskFactors.map((rf) => `- [${rf.severity.toUpperCase()}] ${rf.title}: ${rf.description}`).join("\n")}
-
-Generate a practical discharge checklist with:
-1. HIGH PRIORITY - Must complete before discharge (based on high-severity risk factors)
-2. MODERATE PRIORITY - Should complete (based on moderate-severity risk factors)
-3. STANDARD TASKS - Routine discharge items
-4. FOLLOW-UP - Appointments and monitoring needed
-5. PATIENT EDUCATION - Key teaching points
-
-Format as a clear, actionable checklist that can be printed for the care team.`;
+  // Format prompt with patient and analysis data
+  const prompt = formatDischargePlanPrompt(template, {
+    patient_name: patient.name,
+    patient_age: patient.age,
+    patient_gender: patient.gender === "M" ? "Male" : "Female",
+    score: analysis.score,
+    status: analysis.status,
+    high_risks: highRisks.length > 0
+      ? highRisks.map((rf) => `- ${rf.title}: ${rf.description}`).join("\n")
+      : "None identified",
+    moderate_risks: moderateRisks.length > 0
+      ? moderateRisks.map((rf) => `- ${rf.title}: ${rf.description}`).join("\n")
+      : "None identified",
+  });
 
   const provider = getLLMProvider();
   const response = await provider.generate(prompt, {
@@ -270,7 +280,13 @@ Format as a clear, actionable checklist that can be printed for the care team.`;
       patient_id: patient.id,
       analysis_score: analysis.score,
       analysis_status: analysis.status,
+      prompt_name: "discharge-plan",
+      prompt_commit: commit,
+      prompt_from_opik: fromOpik,
     },
   });
+
+  console.log(`[Analysis] Discharge plan generated using prompt version: ${commit || "local"} (from Opik: ${fromOpik})`);
+
   return response.content;
 }

@@ -10,6 +10,7 @@ import { EvaluationDashboard } from "@/components/EvaluationDashboard";
 import { SafetyDisclaimer, MedicalCaveats, ResponsibleAIBadge } from "@/components/SafetyDisclaimer";
 import { ModelSelector } from "@/components/ModelSelector";
 import { DischargePlan } from "@/components/DischargePlan";
+import { Tooltip } from "@/components/Tooltip";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 
@@ -200,28 +201,32 @@ export default function DashboardPage() {
 
               {/* Tab Navigation */}
               <nav className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
-                <button
-                  onClick={() => setActiveTab("dashboard")}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                    activeTab === "dashboard"
-                      ? "bg-white text-gray-900 shadow-sm"
-                      : "text-gray-600 hover:text-gray-900"
-                  }`}
-                >
-                  <LayoutDashboard className="w-4 h-4" />
-                  Dashboard
-                </button>
-                <button
-                  onClick={() => setActiveTab("evaluation")}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                    activeTab === "evaluation"
-                      ? "bg-white text-gray-900 shadow-sm"
-                      : "text-gray-600 hover:text-gray-900"
-                  }`}
-                >
-                  <FlaskConical className="w-4 h-4" />
-                  Evaluation
-                </button>
+                <Tooltip content="View patient discharge readiness assessment" position="bottom">
+                  <button
+                    onClick={() => setActiveTab("dashboard")}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                      activeTab === "dashboard"
+                        ? "bg-white text-gray-900 shadow-sm"
+                        : "text-gray-600 hover:text-gray-900"
+                    }`}
+                  >
+                    <LayoutDashboard className="w-4 h-4" />
+                    Dashboard
+                  </button>
+                </Tooltip>
+                <Tooltip content="Test and compare different AI models" position="bottom">
+                  <button
+                    onClick={() => setActiveTab("evaluation")}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                      activeTab === "evaluation"
+                        ? "bg-white text-gray-900 shadow-sm"
+                        : "text-gray-600 hover:text-gray-900"
+                    }`}
+                  >
+                    <FlaskConical className="w-4 h-4" />
+                    Evaluation
+                  </button>
+                </Tooltip>
               </nav>
             </div>
 
@@ -242,16 +247,18 @@ export default function DashboardPage() {
               {/* Patient Selector - only show on dashboard tab */}
               {activeTab === "dashboard" && (
                 <div className="relative">
-                  <button
-                    onClick={() => setShowPatientDropdown(!showPatientDropdown)}
-                    className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                  >
-                    <Users className="w-4 h-4 text-gray-600" />
-                    <span className="text-sm font-medium text-gray-700">
-                      {patient ? patient.name : "Select Patient"}
-                    </span>
-                    <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showPatientDropdown ? "rotate-180" : ""}`} />
-                  </button>
+                  <Tooltip content="Select a demo patient to analyze" position="bottom">
+                    <button
+                      onClick={() => setShowPatientDropdown(!showPatientDropdown)}
+                      className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                    >
+                      <Users className="w-4 h-4 text-gray-600" />
+                      <span className="text-sm font-medium text-gray-700">
+                        {patient ? patient.name : "Select Patient"}
+                      </span>
+                      <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showPatientDropdown ? "rotate-180" : ""}`} />
+                    </button>
+                  </Tooltip>
 
                   <AnimatePresence>
                     {showPatientDropdown && (
@@ -383,12 +390,14 @@ export default function DashboardPage() {
             </div>
             <h2 className="text-xl font-semibold text-gray-900 mb-2">Select a Patient</h2>
             <p className="text-gray-500 mb-6">Choose a patient to begin discharge readiness assessment</p>
-            <button
-              onClick={() => setShowPatientDropdown(true)}
-              className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors"
-            >
-              Select Patient
-            </button>
+            <Tooltip content="Choose from demo patients to begin" position="bottom">
+              <button
+                onClick={() => setShowPatientDropdown(true)}
+                className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors"
+              >
+                Select Patient
+              </button>
+            </Tooltip>
           </motion.div>
         )}
 
@@ -406,13 +415,15 @@ export default function DashboardPage() {
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-semibold text-gray-900">Discharge Readiness Score</h3>
                     {!isAnalyzing && (
-                      <button
-                        onClick={runAnalysis}
-                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-                      >
-                        <Sparkles className="w-4 h-4" />
-                        {analysis ? "Re-analyze" : "Analyze"}
-                      </button>
+                      <Tooltip content={analysis ? "Run analysis again with current model" : "Assess discharge readiness using AI"} position="bottom">
+                        <button
+                          onClick={runAnalysis}
+                          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                        >
+                          <Sparkles className="w-4 h-4" />
+                          {analysis ? "Re-analyze" : "Analyze"}
+                        </button>
+                      </Tooltip>
                     )}
                   </div>
 
@@ -494,14 +505,16 @@ export default function DashboardPage() {
                       animate={{ opacity: 1, y: 0 }}
                       className="mt-6 text-center"
                     >
-                      <button
-                        onClick={generatePlan}
-                        disabled={isGeneratingPlan}
-                        className="flex items-center gap-2 mx-auto px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-lg font-medium hover:from-emerald-600 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg"
-                      >
-                        <FileText className="w-5 h-5" />
-                        Generate Discharge Plan
-                      </button>
+                      <Tooltip content="Create an actionable checklist based on risk factors" position="top">
+                        <button
+                          onClick={generatePlan}
+                          disabled={isGeneratingPlan}
+                          className="flex items-center gap-2 mx-auto px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-lg font-medium hover:from-emerald-600 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg"
+                        >
+                          <FileText className="w-5 h-5" />
+                          Generate Discharge Plan
+                        </button>
+                      </Tooltip>
                     </motion.div>
                   )}
 

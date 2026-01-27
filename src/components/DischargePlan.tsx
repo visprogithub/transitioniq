@@ -14,6 +14,7 @@ import {
   ChevronRight,
   Printer,
 } from "lucide-react";
+import { Tooltip } from "@/components/Tooltip";
 
 interface DischargePlanProps {
   plan: string;
@@ -202,13 +203,14 @@ export function DischargePlan({ plan, patientName }: DischargePlanProps) {
               />
             </div>
           </div>
-          <button
-            onClick={() => window.print()}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-            title="Print plan"
-          >
-            <Printer className="w-5 h-5" />
-          </button>
+          <Tooltip content="Print discharge checklist" position="bottom">
+            <button
+              onClick={() => window.print()}
+              className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+            >
+              <Printer className="w-5 h-5" />
+            </button>
+          </Tooltip>
         </div>
       </div>
 

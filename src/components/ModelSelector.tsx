@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Cpu, ChevronDown, CheckCircle, Loader2 } from "lucide-react";
+import { Tooltip } from "@/components/Tooltip";
 
 interface ModelInfo {
   id: string;
@@ -121,37 +122,39 @@ export function ModelSelector({ onModelChange, compact = false }: ModelSelectorP
 
   return (
     <div className="relative">
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        disabled={isSwitching}
-        className={`flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors ${
-          isSwitching ? "opacity-50 cursor-wait" : ""
-        }`}
-      >
-        {isSwitching ? (
-          <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
-        ) : (
-          <Cpu className="w-4 h-4 text-gray-600" />
-        )}
-        {!compact && (
-          <>
+      <Tooltip content="Change AI model for analysis (tracked in Opik)" position="bottom">
+        <button
+          onClick={() => setIsOpen(!isOpen)}
+          disabled={isSwitching}
+          className={`flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors ${
+            isSwitching ? "opacity-50 cursor-wait" : ""
+          }`}
+        >
+          {isSwitching ? (
+            <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
+          ) : (
+            <Cpu className="w-4 h-4 text-gray-600" />
+          )}
+          {!compact && (
+            <>
+              <span className={`text-xs px-1.5 py-0.5 rounded ${providerStyle.bg} ${providerStyle.text}`}>
+                {providerStyle.label}
+              </span>
+              <span className="text-sm font-medium text-gray-700 max-w-[120px] truncate">
+                {activeModelInfo?.displayName || activeModel || "Select Model"}
+              </span>
+            </>
+          )}
+          {compact && activeModelInfo && (
             <span className={`text-xs px-1.5 py-0.5 rounded ${providerStyle.bg} ${providerStyle.text}`}>
               {providerStyle.label}
             </span>
-            <span className="text-sm font-medium text-gray-700 max-w-[120px] truncate">
-              {activeModelInfo?.displayName || activeModel || "Select Model"}
-            </span>
-          </>
-        )}
-        {compact && activeModelInfo && (
-          <span className={`text-xs px-1.5 py-0.5 rounded ${providerStyle.bg} ${providerStyle.text}`}>
-            {providerStyle.label}
-          </span>
-        )}
-        <ChevronDown
-          className={`w-4 h-4 text-gray-500 transition-transform ${isOpen ? "rotate-180" : ""}`}
-        />
-      </button>
+          )}
+          <ChevronDown
+            className={`w-4 h-4 text-gray-500 transition-transform ${isOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+      </Tooltip>
 
       <AnimatePresence>
         {isOpen && (

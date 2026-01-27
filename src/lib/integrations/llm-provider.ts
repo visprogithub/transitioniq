@@ -317,18 +317,25 @@ export class LLMProvider {
       // Calculate estimated cost based on token usage
       const estimatedCost = tokenUsage ? this.estimateCost(tokenUsage) : undefined;
 
-      // Update LLM span with usage data (OpenAI format for Opik)
+      // Log token usage for debugging Opik dashboards
+      if (tokenUsage) {
+        console.log(`[LLM] Token usage for ${this.config.modelId}: prompt=${tokenUsage.promptTokens}, completion=${tokenUsage.completionTokens}, total=${tokenUsage.totalTokens}, cost=$${estimatedCost?.toFixed(6) || "N/A"}`);
+      } else {
+        console.log(`[LLM] No token usage returned from ${this.config.provider} - ${this.config.modelId}`);
+      }
+
+      // Update LLM span with usage data (Opik uses camelCase keys)
       if (llmSpan) {
         llmSpan.update({
           output: {
             response: content.slice(0, 1000), // Truncate for display
           },
-          // Pass usage in OpenAI format for Opik dashboard
-          // Keys must be: prompt_tokens, completion_tokens, total_tokens
+          // Pass usage in Opik's expected format (camelCase keys)
+          // See: https://www.comet.com/docs/opik/tracing/log_traces
           usage: tokenUsage ? {
-            prompt_tokens: tokenUsage.promptTokens,
-            completion_tokens: tokenUsage.completionTokens,
-            total_tokens: tokenUsage.totalTokens,
+            promptTokens: tokenUsage.promptTokens,
+            completionTokens: tokenUsage.completionTokens,
+            totalTokens: tokenUsage.totalTokens,
           } : undefined,
           // Set total estimated cost if we calculated it
           totalEstimatedCost: estimatedCost,
@@ -459,16 +466,18 @@ export class LLMProvider {
   /**
    * Estimate cost based on token usage and model
    * Prices are approximate and in USD per 1K tokens
+   * Note: HuggingFace free tier has nominal costs for tracking purposes
    */
   private estimateCost(usage: NonNullable<LLMResponse["tokenUsage"]>): number {
     // Pricing per 1K tokens (approximate, as of early 2025)
+    // HuggingFace uses nominal pricing for Opik dashboard visibility
     const pricing: Record<string, { input: number; output: number }> = {
       // Gemini
       "gemini-2.0-flash": { input: 0.00010, output: 0.00040 },
       "gemini-2.0-flash-lite": { input: 0.000075, output: 0.00030 },
-      // HuggingFace (free inference API)
-      "Qwen/Qwen2.5-7B-Instruct": { input: 0.0, output: 0.0 },
-      "meta-llama/Llama-3.2-3B-Instruct": { input: 0.0, output: 0.0 },
+      // HuggingFace (free tier - using nominal costs for tracking)
+      "Qwen/Qwen2.5-7B-Instruct": { input: 0.00005, output: 0.00010 },
+      "meta-llama/Llama-3.2-3B-Instruct": { input: 0.00003, output: 0.00006 },
       // OpenAI
       "gpt-4o-mini": { input: 0.00015, output: 0.00060 },
       // Anthropic
