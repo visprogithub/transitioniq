@@ -2,11 +2,12 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu, AlertTriangle } from "lucide-react";
+import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu, AlertTriangle, Heart } from "lucide-react";
 import { PatientHeader } from "@/components/PatientHeader";
 import { DischargeScore } from "@/components/DischargeScore";
 import { RiskFactorCard } from "@/components/RiskFactorCard";
 import { EvaluationDashboard } from "@/components/EvaluationDashboard";
+import { PatientRecoveryCoach } from "@/components/PatientRecoveryCoach";
 import { SafetyDisclaimer, MedicalCaveats, ResponsibleAIBadge } from "@/components/SafetyDisclaimer";
 import { ModelSelector } from "@/components/ModelSelector";
 import { DischargePlan } from "@/components/DischargePlan";
@@ -38,13 +39,22 @@ interface AnalysisWithModel extends DischargeAnalysis {
   }>;
 }
 
-type TabType = "dashboard" | "evaluation";
+type TabType = "dashboard" | "patient" | "evaluation";
 
 // Demo patients for quick selection
 const DEMO_PATIENTS = [
   { id: "demo-polypharmacy", name: "John Smith", description: "68M, 12 medications, AFib + Diabetes" },
   { id: "demo-heart-failure", name: "Mary Johnson", description: "72F, CHF + COPD" },
-  { id: "demo-ready", name: "Robert Chen", description: "45M, Post-appendectomy" },
+  { id: "demo-ready", name: "Robert Chen", description: "45M, Post-appendectomy (Ready)" },
+  { id: "demo-pediatric", name: "Emily Wilson", description: "8F, Post-tonsillectomy (Ready)" },
+  { id: "demo-geriatric-fall", name: "Dorothy Martinez", description: "88F, Hip fracture + Dementia" },
+  { id: "demo-pregnancy-gdm", name: "Sarah Thompson", description: "32F, Gestational diabetes" },
+  { id: "demo-renal-dialysis", name: "William Jackson", description: "65M, CKD Stage 4 + Dialysis" },
+  { id: "demo-psychiatric-bipolar", name: "Jennifer Adams", description: "45F, Bipolar + Lithium" },
+  { id: "demo-oncology-neutropenic", name: "Michael Brown", description: "58M, Post-chemo neutropenia" },
+  { id: "demo-simple-surgery", name: "Lisa Garcia", description: "35F, Cholecystectomy (Ready)" },
+  { id: "demo-extreme-polypharmacy", name: "Harold Wilson", description: "75M, 18 medications, Multiple issues" },
+  { id: "demo-social-risk", name: "David Thompson", description: "52M, Homeless + COPD" },
 ];
 
 export default function DashboardPage() {
@@ -201,7 +211,7 @@ export default function DashboardPage() {
 
               {/* Tab Navigation */}
               <nav className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
-                <Tooltip content="View patient discharge readiness assessment" position="bottom">
+                <Tooltip content="Clinical discharge readiness assessment" position="bottom">
                   <button
                     onClick={() => setActiveTab("dashboard")}
                     className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -211,10 +221,23 @@ export default function DashboardPage() {
                     }`}
                   >
                     <LayoutDashboard className="w-4 h-4" />
-                    Dashboard
+                    Clinical
                   </button>
                 </Tooltip>
-                <Tooltip content="Test and compare different AI models" position="bottom">
+                <Tooltip content="Patient-friendly recovery guidance" position="bottom">
+                  <button
+                    onClick={() => setActiveTab("patient")}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                      activeTab === "patient"
+                        ? "bg-white text-gray-900 shadow-sm"
+                        : "text-gray-600 hover:text-gray-900"
+                    }`}
+                  >
+                    <Heart className="w-4 h-4" />
+                    Patient View
+                  </button>
+                </Tooltip>
+                <Tooltip content="Test and compare AI models" position="bottom">
                   <button
                     onClick={() => setActiveTab("evaluation")}
                     className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -244,8 +267,8 @@ export default function DashboardPage() {
                 }}
               />
 
-              {/* Patient Selector - only show on dashboard tab */}
-              {activeTab === "dashboard" && (
+              {/* Patient Selector - show on dashboard and patient tabs */}
+              {(activeTab === "dashboard" || activeTab === "patient") && (
                 <div className="relative">
                   <Tooltip content="Select a demo patient to analyze" position="bottom">
                     <button
@@ -300,6 +323,15 @@ export default function DashboardPage() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Evaluation Tab */}
         {activeTab === "evaluation" && <EvaluationDashboard />}
+
+        {/* Patient View Tab */}
+        {activeTab === "patient" && (
+          <PatientRecoveryCoach
+            patient={patient}
+            analysis={analysis}
+            isLoading={isLoadingPatient}
+          />
+        )}
 
         {/* Dashboard Tab */}
         {activeTab === "dashboard" && (

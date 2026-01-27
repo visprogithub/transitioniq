@@ -324,20 +324,26 @@ export class LLMProvider {
         console.log(`[LLM] No token usage returned from ${this.config.provider} - ${this.config.modelId}`);
       }
 
-      // Update LLM span with usage data (Opik uses camelCase keys)
+      // Update LLM span with usage data
+      // IMPORTANT: Opik requires snake_case keys for token metrics to show in dashboard
+      // See: https://www.comet.com/docs/opik/tracing/cost_tracking
       if (llmSpan) {
+        const usagePayload = tokenUsage ? {
+          prompt_tokens: tokenUsage.promptTokens,
+          completion_tokens: tokenUsage.completionTokens,
+          total_tokens: tokenUsage.totalTokens,
+        } : undefined;
+
+        // Debug log the payload being sent to Opik
+        console.log(`[Opik] Updating span with usage:`, JSON.stringify(usagePayload), `cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
+
         llmSpan.update({
           output: {
             response: content.slice(0, 1000), // Truncate for display
           },
-          // Pass usage in Opik's expected format (camelCase keys)
-          // See: https://www.comet.com/docs/opik/tracing/log_traces
-          usage: tokenUsage ? {
-            promptTokens: tokenUsage.promptTokens,
-            completionTokens: tokenUsage.completionTokens,
-            totalTokens: tokenUsage.totalTokens,
-          } : undefined,
-          // Set total estimated cost if we calculated it
+          usage: usagePayload,
+          model: this.config.modelId,
+          provider: this.config.provider,
           totalEstimatedCost: estimatedCost,
           metadata: {
             success: true,
@@ -354,12 +360,12 @@ export class LLMProvider {
             content_length: content.length,
             content_preview: content.slice(0, 500),
             latency_ms: latencyMs,
-            token_usage: tokenUsage,
-            estimated_cost_usd: estimatedCost,
           },
           metadata: {
             success: true,
             latency_ms: latencyMs,
+            prompt_tokens: tokenUsage?.promptTokens,
+            completion_tokens: tokenUsage?.completionTokens,
             total_tokens: tokenUsage?.totalTokens,
             estimated_cost_usd: estimatedCost,
           },

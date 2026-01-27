@@ -13,6 +13,8 @@ import {
   ExternalLink,
   ChevronDown,
   ChevronRight,
+  Cloud,
+  FlaskConical,
 } from "lucide-react";
 
 interface ModelSummary {
@@ -70,6 +72,34 @@ interface ModelsInfo {
   };
 }
 
+interface OpikExperimentResult {
+  experimentId: string;
+  experimentName: string;
+  opikDashboardUrl: string;
+  summary: {
+    totalCases: number;
+    passedCases: number;
+    passRate: number;
+    avgScore: number;
+    avgLatencyMs: number;
+  };
+  results: Array<{
+    patientId: string;
+    score: number;
+    status: string;
+    riskFactorCount: number;
+    highRiskCount: number;
+    scores: {
+      scoreAccuracy: number;
+      statusCorrectness: number;
+      riskFactorCoverage: number;
+      overall: number;
+    };
+    passed: boolean;
+    latencyMs: number;
+  }>;
+}
+
 export function EvaluationDashboard() {
   const [modelsInfo, setModelsInfo] = useState<ModelsInfo | null>(null);
   const [isLoadingInfo, setIsLoadingInfo] = useState(false);
@@ -79,6 +109,9 @@ export function EvaluationDashboard() {
   const [experimentName, setExperimentName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [expandedResults, setExpandedResults] = useState<Set<string>>(new Set());
+  const [isRunningOpikExperiment, setIsRunningOpikExperiment] = useState(false);
+  const [opikExperimentResult, setOpikExperimentResult] = useState<OpikExperimentResult | null>(null);
+  const [opikError, setOpikError] = useState<string | null>(null);
 
   // Load available models
   async function loadModelsInfo() {
@@ -124,6 +157,36 @@ export function EvaluationDashboard() {
       setError(err instanceof Error ? err.message : "Evaluation failed");
     } finally {
       setIsRunningEval(false);
+    }
+  }
+
+  // Run Opik cloud experiment
+  async function runOpikExperiment() {
+    setIsRunningOpikExperiment(true);
+    setOpikError(null);
+    setOpikExperimentResult(null);
+
+    try {
+      const response = await fetch("/api/experiments/opik", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          experimentName: experimentName || `opik-experiment-${Date.now()}`,
+          modelId: selectedModels.length > 0 ? selectedModels[0] : undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Opik experiment failed");
+      }
+
+      const data = await response.json();
+      setOpikExperimentResult(data);
+    } catch (err) {
+      setOpikError(err instanceof Error ? err.message : "Opik experiment failed");
+    } finally {
+      setIsRunningOpikExperiment(false);
     }
   }
 
@@ -204,17 +267,8 @@ export function EvaluationDashboard() {
             Compare LLM models and track results in Opik
           </p>
         </div>
-        {evalResults?.opikDashboardUrl && (
-          <a
-            href={evalResults.opikDashboardUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
-          >
-            <ExternalLink className="w-4 h-4" />
-            View in Opik
-          </a>
-        )}
+        {/* Note: Opik dashboard URL links to generic experiments page, not specific experiment
+            Hiding for now - users should navigate to Opik dashboard manually */}
       </div>
 
       {/* Error Banner */}
@@ -363,24 +417,120 @@ export function EvaluationDashboard() {
               </div>
             </div>
 
-            {/* Run Button */}
-            <div className="pt-4">
-              <button
-                onClick={runEvaluation}
-                disabled={isRunningEval || selectedModels.length === 0}
-                className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-700 text-white rounded-lg font-medium hover:from-purple-700 hover:to-purple-800 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isRunningEval ? (
-                  <RefreshCw className="w-5 h-5 animate-spin" />
-                ) : (
-                  <Play className="w-5 h-5" />
-                )}
-                {isRunningEval ? "Running Evaluation..." : "Run Evaluation"}
-              </button>
+            {/* Run Buttons */}
+            <div className="pt-4 space-y-4">
+              <div className="flex flex-wrap gap-4">
+                {/* Local Evaluation Button */}
+                <button
+                  onClick={runEvaluation}
+                  disabled={isRunningEval || selectedModels.length === 0}
+                  className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-700 text-white rounded-lg font-medium hover:from-purple-700 hover:to-purple-800 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isRunningEval ? (
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <Play className="w-5 h-5" />
+                  )}
+                  {isRunningEval ? "Running Evaluation..." : "Run Local Evaluation"}
+                </button>
+
+                {/* Opik Cloud Experiment Button */}
+                <button
+                  onClick={runOpikExperiment}
+                  disabled={isRunningOpikExperiment || selectedModels.length === 0}
+                  className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-blue-600 to-indigo-700 text-white rounded-lg font-medium hover:from-blue-700 hover:to-indigo-800 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isRunningOpikExperiment ? (
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <FlaskConical className="w-5 h-5" />
+                  )}
+                  {isRunningOpikExperiment ? "Running Opik Experiment..." : "Run Opik Cloud Experiment"}
+                </button>
+              </div>
+
               {selectedModels.length === 0 && (
-                <p className="text-sm text-amber-600 mt-2">
+                <p className="text-sm text-amber-600">
                   Select at least one model to evaluate
                 </p>
+              )}
+
+              {/* Opik Error */}
+              {opikError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                  <p className="font-medium">Opik Experiment Error</p>
+                  <p>{opikError}</p>
+                </div>
+              )}
+
+              {/* Opik Experiment Result */}
+              {opikExperimentResult && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl"
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <Cloud className="w-5 h-5 text-blue-600" />
+                      <span className="font-semibold text-blue-900">
+                        Opik Cloud Experiment Complete
+                      </span>
+                    </div>
+                    {/* Note: Opik dashboard URL links to generic experiments page, not specific experiment
+                        Users should navigate to comet.com/opik manually to see detailed experiment results */}
+                    <span className="text-xs text-blue-600 italic">
+                      View detailed results at comet.com/opik
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div>
+                      <p className="text-blue-600 font-medium">Experiment</p>
+                      <p className="text-blue-900">{opikExperimentResult.experimentName}</p>
+                    </div>
+                    <div>
+                      <p className="text-blue-600 font-medium">Pass Rate</p>
+                      <p className="text-blue-900">{(opikExperimentResult.summary.passRate * 100).toFixed(1)}%</p>
+                    </div>
+                    <div>
+                      <p className="text-blue-600 font-medium">Test Cases</p>
+                      <p className="text-blue-900">
+                        {opikExperimentResult.summary.passedCases}/{opikExperimentResult.summary.totalCases} passed
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-blue-600 font-medium">Avg Score</p>
+                      <p className={`font-bold ${getScoreColor(opikExperimentResult.summary.avgScore)}`}>
+                        {(opikExperimentResult.summary.avgScore * 100).toFixed(1)}%
+                      </p>
+                    </div>
+                  </div>
+                  {/* Individual Results */}
+                  {opikExperimentResult.results && opikExperimentResult.results.length > 0 && (
+                    <div className="mt-4 pt-4 border-t border-blue-200">
+                      <p className="text-blue-600 font-medium mb-2">Test Case Results:</p>
+                      <div className="space-y-2">
+                        {opikExperimentResult.results.map((result) => (
+                          <div
+                            key={result.patientId}
+                            className={`flex items-center justify-between p-2 rounded-lg ${
+                              result.passed ? "bg-green-50" : "bg-red-50"
+                            }`}
+                          >
+                            <span className="text-sm font-medium">{result.patientId}</span>
+                            <div className="flex items-center gap-4 text-sm">
+                              <span>Score: {result.score}</span>
+                              <span>Status: {result.status}</span>
+                              <span className={result.passed ? "text-green-600" : "text-red-600"}>
+                                {result.passed ? "✓ PASS" : "✗ FAIL"}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </motion.div>
               )}
             </div>
           </div>
