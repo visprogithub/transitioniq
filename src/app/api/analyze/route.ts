@@ -50,13 +50,12 @@ export async function POST(request: NextRequest) {
     // REQUIRED: Use real LLM for analysis - no fallback
     // Check if any LLM API key is configured (supports multiple providers)
     const hasLLMKey = process.env.GEMINI_API_KEY ||
-                      process.env.GROQ_API_KEY ||
                       process.env.OPENAI_API_KEY ||
                       process.env.ANTHROPIC_API_KEY ||
                       process.env.HF_API_KEY;
     if (!hasLLMKey) {
       return NextResponse.json(
-        { error: "No LLM API key configured. Set GEMINI_API_KEY, GROQ_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or HF_API_KEY." },
+        { error: "No LLM API key configured. Set GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or HF_API_KEY." },
         { status: 500 }
       );
     }

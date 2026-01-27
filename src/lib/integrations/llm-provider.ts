@@ -7,14 +7,15 @@
  * Supported providers:
  * - Gemini (Google) - requires GEMINI_API_KEY
  * - Hugging Face Inference API - requires HF_API_KEY (free tier available)
- * - Groq - requires GROQ_API_KEY (generous free tier)
+ * - OpenAI - requires OPENAI_API_KEY
+ * - Anthropic - requires ANTHROPIC_API_KEY
  */
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Opik } from "opik";
 
 // Model configuration
-export type ModelProvider = "gemini" | "huggingface" | "groq" | "openai" | "anthropic";
+export type ModelProvider = "gemini" | "huggingface" | "openai" | "anthropic";
 
 export interface ModelConfig {
   provider: ModelProvider;
@@ -39,8 +40,7 @@ export interface LLMResponse {
 }
 
 // Default model configs
-// Includes Gemini, Groq (free tier), OpenAI, and Anthropic
-// NOTE: HuggingFace removed due to API changes, Gemini 1.5 removed due to deprecation
+// Includes Gemini 2.0 Flash, HuggingFace, OpenAI GPT-4o Mini, and Anthropic
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
   // === GEMINI MODELS (requires GEMINI_API_KEY) ===
   // Only Gemini 2.0 Flash is supported (1.5 models deprecated)
@@ -51,42 +51,31 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
     temperature: 0.7,
   },
 
-  // === GROQ MODELS (requires GROQ_API_KEY - generous free tier) ===
-  // Get free API key at: https://console.groq.com/
-  "groq-llama-3.3-70b": {
-    provider: "groq",
-    modelId: "llama-3.3-70b-versatile",
-    apiKey: process.env.GROQ_API_KEY || "",
+  // === HUGGING FACE MODELS (requires HF_API_KEY - free tier) ===
+  // Get free API key at: https://huggingface.co/settings/tokens
+  // Uses NEW router.huggingface.co endpoint (old api-inference.huggingface.co is deprecated)
+  "hf-mistral-7b": {
+    provider: "huggingface",
+    modelId: "mistralai/Mistral-7B-Instruct-v0.3",
+    apiKey: process.env.HF_API_KEY || "",
     temperature: 0.7,
-    maxTokens: 4096,
+    maxTokens: 2048,
+    hfEndpoint: "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3/v1/chat/completions",
   },
-  "groq-llama-3.1-8b": {
-    provider: "groq",
-    modelId: "llama-3.1-8b-instant",
-    apiKey: process.env.GROQ_API_KEY || "",
+  "hf-zephyr-7b": {
+    provider: "huggingface",
+    modelId: "HuggingFaceH4/zephyr-7b-beta",
+    apiKey: process.env.HF_API_KEY || "",
     temperature: 0.7,
-    maxTokens: 4096,
-  },
-  "groq-mixtral-8x7b": {
-    provider: "groq",
-    modelId: "mixtral-8x7b-32768",
-    apiKey: process.env.GROQ_API_KEY || "",
-    temperature: 0.7,
-    maxTokens: 4096,
+    maxTokens: 2048,
+    hfEndpoint: "https://router.huggingface.co/hf-inference/models/HuggingFaceH4/zephyr-7b-beta/v1/chat/completions",
   },
 
   // === OPENAI MODELS (requires OPENAI_API_KEY) ===
-  // Uses cheapest model by default (gpt-4o-mini)
+  // Uses cheapest model (gpt-4o-mini)
   "openai-gpt-4o-mini": {
     provider: "openai",
     modelId: "gpt-4o-mini",
-    apiKey: process.env.OPENAI_API_KEY || "",
-    temperature: 0.7,
-    maxTokens: 4096,
-  },
-  "openai-gpt-4o": {
-    provider: "openai",
-    modelId: "gpt-4o",
     apiKey: process.env.OPENAI_API_KEY || "",
     temperature: 0.7,
     maxTokens: 4096,
@@ -111,9 +100,12 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
 };
 
 // Active model (can be changed for A/B testing)
-// Defaults to Groq if available (free), otherwise Gemini
+// Priority: Gemini > OpenAI > HuggingFace > Anthropic
 let activeModelId = process.env.LLM_MODEL ||
-  (process.env.GROQ_API_KEY ? "groq-llama-3.3-70b" : "gemini-2.0-flash");
+  (process.env.GEMINI_API_KEY ? "gemini-2.0-flash" :
+   process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
+   process.env.HF_API_KEY ? "hf-mistral-7b" :
+   process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" : "gemini-2.0-flash");
 
 /**
  * Get the current active model ID
@@ -162,7 +154,7 @@ export function getModelConfig(modelId: string): ModelConfig | undefined {
 export function getConfiguredProviders(): ModelProvider[] {
   const providers = new Set<ModelProvider>();
   if (process.env.GEMINI_API_KEY) providers.add("gemini");
-  if (process.env.GROQ_API_KEY) providers.add("groq");
+  if (process.env.HF_API_KEY) providers.add("huggingface");
   if (process.env.OPENAI_API_KEY) providers.add("openai");
   if (process.env.ANTHROPIC_API_KEY) providers.add("anthropic");
   return Array.from(providers);
@@ -186,7 +178,6 @@ export class LLMProvider {
     if (!config.apiKey) {
       const envVarMap: Record<ModelProvider, string> = {
         gemini: "GEMINI_API_KEY",
-        groq: "GROQ_API_KEY",
         huggingface: "HF_API_KEY",
         openai: "OPENAI_API_KEY",
         anthropic: "ANTHROPIC_API_KEY",
@@ -263,8 +254,8 @@ export class LLMProvider {
         const result = await this.generateGemini(prompt);
         content = result.content;
         tokenUsage = result.tokenUsage;
-      } else if (this.config.provider === "groq") {
-        const result = await this.generateGroq(prompt);
+      } else if (this.config.provider === "huggingface") {
+        const result = await this.generateHuggingFace(prompt);
         content = result.content;
         tokenUsage = result.tokenUsage;
       } else if (this.config.provider === "openai") {
@@ -339,8 +330,18 @@ export class LLMProvider {
       const latencyMs = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
-      // Check for rate limit errors
-      const isRateLimited = errorMessage.includes("429") || errorMessage.includes("quota") || errorMessage.includes("Too Many Requests");
+      // Check for rate limit / quota errors
+      const isRateLimited = errorMessage.includes("429") ||
+        errorMessage.includes("quota") ||
+        errorMessage.includes("Too Many Requests") ||
+        errorMessage.includes("rate limit") ||
+        errorMessage.includes("RESOURCE_EXHAUSTED");
+
+      // Check for out of credits/usage errors
+      const isOutOfCredits = errorMessage.includes("insufficient_quota") ||
+        errorMessage.includes("billing") ||
+        errorMessage.includes("credit") ||
+        errorMessage.includes("usage limit");
 
       // Log error to LLM span
       if (llmSpan) {
@@ -352,6 +353,7 @@ export class LLMProvider {
             success: false,
             error: true,
             rate_limited: isRateLimited,
+            out_of_credits: isOutOfCredits,
             latency_ms: latencyMs,
           },
         });
@@ -368,6 +370,7 @@ export class LLMProvider {
             success: false,
             error: true,
             rate_limited: isRateLimited,
+            out_of_credits: isOutOfCredits,
             latency_ms: latencyMs,
           },
         });
@@ -375,9 +378,13 @@ export class LLMProvider {
         await this.opik?.flush();
       }
 
-      // Provide more helpful error message for rate limits
+      // Provide user-friendly error messages for rate limits and quota issues
       if (isRateLimited) {
-        throw new Error(`Rate limit exceeded for ${this.config.modelId}. Please wait and try again, or use a paid API key.`);
+        throw new Error(`Model rate limited (${this.config.modelId}). Please try again later or select a different model.`);
+      }
+
+      if (isOutOfCredits) {
+        throw new Error(`Model out of usage/credits (${this.config.modelId}). Please add credits or select a different model.`);
       }
 
       throw error;
@@ -389,9 +396,8 @@ export class LLMProvider {
    * Opik expects specific provider names for cost calculation
    */
   private mapProviderToOpik(provider: ModelProvider): string {
-    const providerMap: Record<ModelProvider, string> = {
+    const providerMap: Record<string, string> = {
       gemini: "google_ai",
-      groq: "groq",
       huggingface: "huggingface",
       openai: "openai",
       anthropic: "anthropic",
@@ -408,21 +414,14 @@ export class LLMProvider {
     const pricing: Record<string, { input: number; output: number }> = {
       // Gemini
       "gemini-2.0-flash": { input: 0.00010, output: 0.00040 },
-      "gemini-1.5-flash": { input: 0.000075, output: 0.00030 },
-      "gemini-1.5-pro": { input: 0.00125, output: 0.00500 },
-      // Groq (very cheap/free tier)
-      "llama-3.3-70b-versatile": { input: 0.00059, output: 0.00079 },
-      "llama-3.1-8b-instant": { input: 0.00005, output: 0.00008 },
-      "mixtral-8x7b-32768": { input: 0.00024, output: 0.00024 },
-      // OpenAI
-      "gpt-4o-mini": { input: 0.00015, output: 0.00060 },
-      "gpt-4o": { input: 0.00250, output: 0.01000 },
-      // Anthropic
-      "claude-3-haiku-20240307": { input: 0.00025, output: 0.00125 },
-      "claude-3-sonnet-20240229": { input: 0.00300, output: 0.01500 },
       // HuggingFace (free inference API)
       "mistralai/Mistral-7B-Instruct-v0.3": { input: 0.0, output: 0.0 },
       "HuggingFaceH4/zephyr-7b-beta": { input: 0.0, output: 0.0 },
+      // OpenAI
+      "gpt-4o-mini": { input: 0.00015, output: 0.00060 },
+      // Anthropic
+      "claude-3-haiku-20240307": { input: 0.00025, output: 0.00125 },
+      "claude-3-sonnet-20240229": { input: 0.00300, output: 0.01500 },
     };
 
     const modelPricing = pricing[this.config.modelId];
@@ -473,14 +472,19 @@ export class LLMProvider {
   }
 
   /**
-   * Generate using Groq (free tier available)
-   * Docs: https://console.groq.com/docs/quickstart
+   * Generate using HuggingFace Inference API
+   * Uses the new router.huggingface.co endpoint with OpenAI-compatible chat completions
+   * Docs: https://huggingface.co/docs/api-inference/
    */
-  private async generateGroq(prompt: string): Promise<{
+  private async generateHuggingFace(prompt: string): Promise<{
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    // Use OpenAI-compatible chat completions endpoint
+    const endpoint = this.config.hfEndpoint ||
+      `https://router.huggingface.co/hf-inference/models/${this.config.modelId}/v1/chat/completions`;
+
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${this.config.apiKey}`,
@@ -495,13 +499,16 @@ export class LLMProvider {
           },
         ],
         temperature: this.config.temperature || 0.7,
-        max_tokens: this.config.maxTokens || 4096,
+        max_tokens: this.config.maxTokens || 2048,
       }),
     });
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`Groq API error: ${response.status} - ${error}`);
+      if (response.status === 503) {
+        throw new Error(`HuggingFace model is loading. Please try again in a few seconds.`);
+      }
+      throw new Error(`HuggingFace API error: ${response.status} - ${error}`);
     }
 
     const data = await response.json();
@@ -517,60 +524,6 @@ export class LLMProvider {
             totalTokens: usage.total_tokens || 0,
           }
         : undefined,
-    };
-  }
-
-  /**
-   * Generate using Hugging Face Inference API (free tier available)
-   * Docs: https://huggingface.co/docs/api-inference/
-   * NOTE: Uses new router.huggingface.co endpoint (api-inference.huggingface.co is deprecated)
-   */
-  private async generateHuggingFace(prompt: string): Promise<{
-    content: string;
-    tokenUsage?: LLMResponse["tokenUsage"];
-  }> {
-    const endpoint = this.config.hfEndpoint ||
-      `https://router.huggingface.co/hf-inference/models/${this.config.modelId}`;
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${this.config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        inputs: prompt,
-        parameters: {
-          temperature: this.config.temperature || 0.7,
-          max_new_tokens: this.config.maxTokens || 2048,
-          return_full_text: false,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      // Check for model loading status
-      if (response.status === 503) {
-        throw new Error(`HuggingFace model is loading. Please try again in a few seconds.`);
-      }
-      throw new Error(`HuggingFace API error: ${response.status} - ${error}`);
-    }
-
-    const data = await response.json();
-
-    // HF returns array of generated text
-    let content = "";
-    if (Array.isArray(data) && data.length > 0) {
-      content = data[0]?.generated_text || "";
-    } else if (data.generated_text) {
-      content = data.generated_text;
-    }
-
-    // HF doesn't return token counts in the same way
-    return {
-      content,
-      tokenUsage: undefined,
     };
   }
 
