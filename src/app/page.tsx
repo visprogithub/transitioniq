@@ -2,14 +2,21 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard } from "lucide-react";
+import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu } from "lucide-react";
 import { PatientHeader } from "@/components/PatientHeader";
 import { DischargeScore } from "@/components/DischargeScore";
 import { RiskFactorCard } from "@/components/RiskFactorCard";
 import { EvaluationDashboard } from "@/components/EvaluationDashboard";
 import { SafetyDisclaimer, MedicalCaveats, ResponsibleAIBadge } from "@/components/SafetyDisclaimer";
+import { ModelSelector } from "@/components/ModelSelector";
+import { DischargePlan } from "@/components/DischargePlan";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
+
+// Extended analysis type with model info
+interface AnalysisWithModel extends DischargeAnalysis {
+  modelUsed?: string;
+}
 
 type TabType = "dashboard" | "evaluation";
 
@@ -24,7 +31,8 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<TabType>("dashboard");
   const [selectedPatientId, setSelectedPatientId] = useState<string>("");
   const [patient, setPatient] = useState<Patient | null>(null);
-  const [analysis, setAnalysis] = useState<DischargeAnalysis | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisWithModel | null>(null);
+  const [currentModel, setCurrentModel] = useState<string>("");
   const [isLoadingPatient, setIsLoadingPatient] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
@@ -177,51 +185,66 @@ export default function DashboardPage() {
               </nav>
             </div>
 
-            {/* Patient Selector - only show on dashboard tab */}
-            {activeTab === "dashboard" && (
-              <div className="relative">
-                <button
-                  onClick={() => setShowPatientDropdown(!showPatientDropdown)}
-                  className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                >
-                  <Users className="w-4 h-4 text-gray-600" />
-                  <span className="text-sm font-medium text-gray-700">
-                    {patient ? patient.name : "Select Patient"}
-                  </span>
-                  <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showPatientDropdown ? "rotate-180" : ""}`} />
-                </button>
+            {/* Model Selector and Patient Selector */}
+            <div className="flex items-center gap-3">
+              {/* Model Selector - always visible */}
+              <ModelSelector
+                onModelChange={(modelId) => {
+                  setCurrentModel(modelId);
+                  // Clear analysis when model changes so user re-runs with new model
+                  if (analysis) {
+                    setAnalysis(null);
+                    setDischargePlan(null);
+                  }
+                }}
+              />
 
-                <AnimatePresence>
-                  {showPatientDropdown && (
-                    <motion.div
-                      initial={{ opacity: 0, y: -10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -10 }}
-                      className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50"
-                    >
-                      <div className="p-2">
-                        <p className="text-xs font-medium text-gray-500 px-3 py-2">Demo Patients</p>
-                        {DEMO_PATIENTS.map((p) => (
-                          <button
-                            key={p.id}
-                            onClick={() => {
-                              setSelectedPatientId(p.id);
-                              setShowPatientDropdown(false);
-                            }}
-                            className={`w-full text-left px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors ${
-                              selectedPatientId === p.id ? "bg-blue-50" : ""
-                            }`}
-                          >
-                            <p className="font-medium text-gray-900">{p.name}</p>
-                            <p className="text-xs text-gray-500">{p.description}</p>
-                          </button>
-                        ))}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            )}
+              {/* Patient Selector - only show on dashboard tab */}
+              {activeTab === "dashboard" && (
+                <div className="relative">
+                  <button
+                    onClick={() => setShowPatientDropdown(!showPatientDropdown)}
+                    className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                  >
+                    <Users className="w-4 h-4 text-gray-600" />
+                    <span className="text-sm font-medium text-gray-700">
+                      {patient ? patient.name : "Select Patient"}
+                    </span>
+                    <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showPatientDropdown ? "rotate-180" : ""}`} />
+                  </button>
+
+                  <AnimatePresence>
+                    {showPatientDropdown && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -10 }}
+                        className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50"
+                      >
+                        <div className="p-2">
+                          <p className="text-xs font-medium text-gray-500 px-3 py-2">Demo Patients</p>
+                          {DEMO_PATIENTS.map((p) => (
+                            <button
+                              key={p.id}
+                              onClick={() => {
+                                setSelectedPatientId(p.id);
+                                setShowPatientDropdown(false);
+                              }}
+                              className={`w-full text-left px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors ${
+                                selectedPatientId === p.id ? "bg-blue-50" : ""
+                              }`}
+                            >
+                              <p className="font-medium text-gray-900">{p.name}</p>
+                              <p className="text-xs text-gray-500">{p.description}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -304,11 +327,20 @@ export default function DashboardPage() {
                   )}
 
                   {(isAnalyzing || analysis) && (
-                    <DischargeScore
-                      score={analysis?.score || 0}
-                      status={analysis?.status || "caution"}
-                      isLoading={isAnalyzing}
-                    />
+                    <>
+                      <DischargeScore
+                        score={analysis?.score || 0}
+                        status={analysis?.status || "caution"}
+                        isLoading={isAnalyzing}
+                      />
+                      {/* Show model used */}
+                      {analysis?.modelUsed && (
+                        <div className="mt-4 flex items-center justify-center gap-2 text-sm text-gray-500">
+                          <Cpu className="w-4 h-4" />
+                          <span>Analyzed with: <span className="font-medium text-gray-700">{analysis.modelUsed}</span></span>
+                        </div>
+                      )}
+                    </>
                   )}
 
                   {/* Generate Plan Button */}
@@ -391,15 +423,10 @@ export default function DashboardPage() {
                   exit={{ opacity: 0, y: -20 }}
                   className="bg-white rounded-xl shadow-sm p-6"
                 >
-                  <div className="flex items-center gap-2 mb-4">
-                    <FileText className="w-5 h-5 text-emerald-600" />
-                    <h3 className="text-lg font-semibold text-gray-900">Discharge Plan</h3>
-                  </div>
-                  <div className="prose prose-sm max-w-none">
-                    <div className="whitespace-pre-wrap text-gray-700 bg-gray-50 rounded-lg p-4 font-mono text-sm">
-                      {dischargePlan}
-                    </div>
-                  </div>
+                  <DischargePlan
+                    plan={dischargePlan}
+                    patientName={patient?.name}
+                  />
                 </motion.div>
               )}
             </AnimatePresence>
