@@ -1,8 +1,9 @@
 /**
- * Gemini LLM Integration - REQUIRED for all analysis
+ * Discharge Analysis Module - LLM-powered patient analysis
  *
- * This module provides real LLM-powered analysis using Gemini.
- * NO FALLBACKS - if Gemini fails, the request fails.
+ * This module provides discharge readiness analysis using the LLMProvider abstraction.
+ * Supports multiple LLM providers (Gemini, OpenAI, Anthropic, HuggingFace).
+ * NO FALLBACKS - if the LLM fails, the request fails.
  *
  * Uses the LLMProvider abstraction for model swapping and Opik evaluation.
  */
@@ -18,26 +19,28 @@ import {
 import { createLLMProvider, getActiveModelId, type LLMProvider } from "./llm-provider";
 
 // Note: API key validation is now handled by LLMProvider
-// Multiple providers are supported (Gemini, Groq, OpenAI, Anthropic, HuggingFace)
+// Multiple providers are supported (Gemini, OpenAI, Anthropic, HuggingFace)
 
 // Initialize Opik prompts on first use
 let promptsInitialized = false;
 
-// LLM provider instance (created on first use)
-let llmProvider: LLMProvider | null = null;
-
+/**
+ * Get LLM provider for the current active model
+ * Always passes the model ID explicitly to avoid module caching issues
+ */
 function getLLMProvider(): LLMProvider {
-  if (!llmProvider) {
-    llmProvider = createLLMProvider();
-  }
-  return llmProvider;
+  // IMPORTANT: Always get the current activeModelId and pass it explicitly
+  // This avoids Next.js module caching issues where the default would be stale
+  const modelId = getActiveModelId();
+  console.log(`[Analysis] Creating LLM provider for model: ${modelId}`);
+  return createLLMProvider(modelId);
 }
 
 /**
- * Reset the LLM provider (useful for model switching in evaluations)
+ * Reset the LLM provider (kept for API compatibility)
  */
 export function resetLLMProvider(): void {
-  llmProvider = null;
+  // No-op - we now create fresh providers each time with explicit model ID
 }
 
 interface DrugInteraction {

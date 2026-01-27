@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu } from "lucide-react";
+import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu, AlertTriangle } from "lucide-react";
 import { PatientHeader } from "@/components/PatientHeader";
 import { DischargeScore } from "@/components/DischargeScore";
 import { RiskFactorCard } from "@/components/RiskFactorCard";
@@ -40,6 +40,11 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [showPatientDropdown, setShowPatientDropdown] = useState(false);
   const [expandedRiskFactors, setExpandedRiskFactors] = useState<Set<string>>(new Set());
+  const [modelLimitError, setModelLimitError] = useState<{
+    modelId: string;
+    provider: string;
+    availableModels: string[];
+  } | null>(null);
 
   // Load patient data when selection changes
   useEffect(() => {
@@ -73,6 +78,7 @@ export default function DashboardPage() {
 
     setIsAnalyzing(true);
     setError(null);
+    setModelLimitError(null);
 
     try {
       const response = await fetch("/api/analyze", {
@@ -81,8 +87,23 @@ export default function DashboardPage() {
         body: JSON.stringify({ patientId: patient.id }),
       });
 
-      if (!response.ok) throw new Error("Analysis failed");
       const data = await response.json();
+
+      // Check for rate limit / usage limit error
+      if (response.status === 429 && data.suggestModelSwitch) {
+        setModelLimitError({
+          modelId: data.modelId,
+          provider: data.provider,
+          availableModels: data.availableModels || [],
+        });
+        setIsAnalyzing(false);
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || "Analysis failed");
+      }
+
       setAnalysis(data);
 
       // Auto-expand high-severity risk factors
@@ -268,6 +289,65 @@ export default function DashboardPage() {
                 >
                   <p className="font-medium">Error</p>
                   <p className="text-sm">{error}</p>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Model Rate Limit Banner */}
+            <AnimatePresence>
+              {modelLimitError && (
+                <motion.div
+                  initial={{ opacity: 0, y: -20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl"
+                >
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="font-medium text-amber-800">Model Rate Limited</p>
+                      <p className="text-sm text-amber-700 mt-1">
+                        The model <span className="font-mono bg-amber-100 px-1 rounded">{modelLimitError.modelId}</span> has
+                        reached its rate or usage limit. Please switch to a different model to continue.
+                      </p>
+                      {modelLimitError.availableModels.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <span className="text-sm text-amber-700">Available models:</span>
+                          {modelLimitError.availableModels.slice(0, 3).map((modelId) => (
+                            <button
+                              key={modelId}
+                              onClick={async () => {
+                                try {
+                                  const response = await fetch("/api/model/switch", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ modelId }),
+                                  });
+                                  if (response.ok) {
+                                    setCurrentModel(modelId);
+                                    setModelLimitError(null);
+                                    // Re-run analysis with new model
+                                    runAnalysis();
+                                  }
+                                } catch (e) {
+                                  console.error("Failed to switch model:", e);
+                                }
+                              }}
+                              className="px-3 py-1 text-sm bg-amber-200 hover:bg-amber-300 text-amber-800 rounded-lg font-medium transition-colors"
+                            >
+                              Switch to {modelId}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <button
+                        onClick={() => setModelLimitError(null)}
+                        className="mt-3 text-sm text-amber-600 hover:text-amber-800 underline"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>

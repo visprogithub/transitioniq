@@ -39,6 +39,28 @@ export interface LLMResponse {
   };
 }
 
+/**
+ * Error type for rate limits and usage limits
+ * Frontend can check error.code to show appropriate UI
+ */
+export interface RateLimitError extends Error {
+  code: "RATE_LIMITED" | "OUT_OF_CREDITS";
+  modelId: string;
+  provider: ModelProvider;
+}
+
+/**
+ * Check if an error is a rate limit or usage limit error
+ */
+export function isModelLimitError(error: unknown): error is RateLimitError {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    ((error as RateLimitError).code === "RATE_LIMITED" ||
+     (error as RateLimitError).code === "OUT_OF_CREDITS")
+  );
+}
+
 // Default model configs
 // Includes Gemini 2.0 Flash, HuggingFace, OpenAI GPT-4o Mini, and Anthropic
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
@@ -104,30 +126,45 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
   },
 };
 
-// Active model (can be changed for A/B testing)
-// Priority: Gemini Flash-Lite (higher free limits) > OpenAI > HuggingFace > Anthropic
-let activeModelId = process.env.LLM_MODEL ||
-  (process.env.GEMINI_API_KEY ? "gemini-2.0-flash-lite" :
-   process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
-   process.env.HF_API_KEY ? "hf-qwen-7b" :
-   process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" : "gemini-2.0-flash-lite");
+// Active model storage using globalThis to persist across Next.js module reloads
+// This fixes the issue where module-level variables get cached and stale
+declare global {
+  // eslint-disable-next-line no-var
+  var __transitioniq_active_model: string | undefined;
+}
+
+// Default model priority: OpenAI > HuggingFace > Anthropic > Gemini (Gemini has strict rate limits on free tier)
+function getDefaultModelId(): string {
+  return process.env.LLM_MODEL ||
+    (process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
+     process.env.HF_API_KEY ? "hf-qwen-7b" :
+     process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" :
+     process.env.GEMINI_API_KEY ? "gemini-2.0-flash-lite" : "openai-gpt-4o-mini");
+}
+
+// Initialize globalThis storage if not set
+if (!globalThis.__transitioniq_active_model) {
+  globalThis.__transitioniq_active_model = getDefaultModelId();
+}
 
 /**
  * Get the current active model ID
+ * Uses globalThis to persist across Next.js module reloads
  */
 export function getActiveModelId(): string {
-  return activeModelId;
+  return globalThis.__transitioniq_active_model || getDefaultModelId();
 }
 
 /**
  * Set the active model for evaluation
+ * Uses globalThis to persist across Next.js module reloads
  */
 export function setActiveModel(modelId: string): void {
   if (!MODEL_CONFIGS[modelId]) {
     throw new Error(`Unknown model: ${modelId}. Available: ${Object.keys(MODEL_CONFIGS).join(", ")}`);
   }
-  activeModelId = modelId;
-  console.log(`[LLM] Active model set to: ${modelId}`);
+  globalThis.__transitioniq_active_model = modelId;
+  console.log(`[LLM] Active model set to: ${modelId} (stored in globalThis)`);
 }
 
 /**
@@ -384,12 +421,21 @@ export class LLMProvider {
       }
 
       // Provide user-friendly error messages for rate limits and quota issues
+      // Include special markers so frontend can detect and prompt user to switch models
       if (isRateLimited) {
-        throw new Error(`Model rate limited (${this.config.modelId}). Please try again later or select a different model.`);
+        const error = new Error(`Model rate limited (${this.config.modelId}). Please try again later or select a different model.`);
+        (error as RateLimitError).code = "RATE_LIMITED";
+        (error as RateLimitError).modelId = this.config.modelId;
+        (error as RateLimitError).provider = this.config.provider;
+        throw error;
       }
 
       if (isOutOfCredits) {
-        throw new Error(`Model out of usage/credits (${this.config.modelId}). Please add credits or select a different model.`);
+        const error = new Error(`Model out of usage/credits (${this.config.modelId}). Please add credits or select a different model.`);
+        (error as RateLimitError).code = "OUT_OF_CREDITS";
+        (error as RateLimitError).modelId = this.config.modelId;
+        (error as RateLimitError).provider = this.config.provider;
+        throw error;
       }
 
       throw error;

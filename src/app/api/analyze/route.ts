@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps, type CareGap } from "@/lib/integrations/guidelines-client";
-import { analyzeDischargeReadiness } from "@/lib/integrations/gemini";
+import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
 import { traceDataSourceCall } from "@/lib/integrations/opik";
-import { getActiveModelId } from "@/lib/integrations/llm-provider";
+import { getActiveModelId, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import type { Patient } from "@/lib/types/patient";
 
@@ -80,6 +80,26 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Analysis error:", error);
+
+    // Check if this is a rate limit or usage limit error
+    // Return a special response so frontend can prompt user to switch models
+    if (isModelLimitError(error)) {
+      const availableModels = getAvailableModels();
+      const otherModels = availableModels.filter((m) => m !== error.modelId);
+
+      return NextResponse.json(
+        {
+          error: error.message,
+          code: error.code,
+          modelId: error.modelId,
+          provider: error.provider,
+          suggestModelSwitch: true,
+          availableModels: otherModels,
+        },
+        { status: 429 }
+      );
+    }
+
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Analysis failed" },
       { status: 500 }
