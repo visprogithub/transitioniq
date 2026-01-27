@@ -5,11 +5,15 @@
  * - Versioned prompts with commit tracking
  * - A/B testing between prompt versions
  * - Linking prompts to traces for analysis
+ *
+ * The prompts are stored in Opik's Prompt Library and can be viewed/edited
+ * in the Opik dashboard at https://www.comet.com/opik
  */
 
-import { Opik } from "opik";
+import { Opik, type Prompt } from "opik";
 
 let opikClient: Opik | null = null;
+let cachedPrompt: Prompt | null = null;
 
 function getOpikClient(): Opik | null {
   if (!process.env.OPIK_API_KEY) {
@@ -88,6 +92,9 @@ Be conservative - if there are major drug interactions or unmet Grade A guidelin
 /**
  * Initialize prompts in Opik Prompt Library
  * Creates or updates the discharge-analysis prompt
+ *
+ * The prompt will be visible in the Opik dashboard under "Prompts" section.
+ * Each change to the template creates a new version that can be tracked.
  */
 export async function initializeOpikPrompts(): Promise<{
   promptName: string;
@@ -95,39 +102,53 @@ export async function initializeOpikPrompts(): Promise<{
 } | null> {
   const opik = getOpikClient();
   if (!opik) {
-    console.log("[Opik] No API key - prompts will not be versioned");
+    console.log("[Opik] No API key - prompts will not be versioned in Opik Prompt Library");
     return null;
   }
 
   try {
-    // Create/update the discharge analysis prompt in Opik
+    // Create/update the discharge analysis prompt in Opik Prompt Library
+    // This will create a new version if the template has changed
     const prompt = await opik.createPrompt({
       name: "discharge-analysis",
       prompt: DISCHARGE_ANALYSIS_PROMPT,
+      description: "Clinical discharge readiness assessment prompt for TransitionIQ",
       metadata: {
         version: "2.0",
         author: "transitioniq",
-        description: "Clinical discharge readiness assessment prompt",
-        model: "gemini-2.0-flash",
-        tags: ["clinical", "discharge", "healthcare"],
+        use_case: "healthcare_discharge_assessment",
       },
+      tags: ["clinical", "discharge", "healthcare", "transitioniq"],
+      changeDescription: "Updated prompt template for discharge readiness scoring",
     });
 
-    console.log(`[Opik] Prompt registered: discharge-analysis (commit: ${prompt.commit || "unknown"})`);
+    // Cache the prompt for reuse
+    cachedPrompt = prompt;
+
+    const versionInfo = prompt.commit || "initial";
+    console.log(`[Opik] Prompt stored in Prompt Library: discharge-analysis (version: ${versionInfo})`);
+    console.log(`[Opik] View prompts at: https://www.comet.com/opik/prompts`);
 
     return {
       promptName: "discharge-analysis",
-      commit: prompt.commit || "unknown",
+      commit: versionInfo,
     };
   } catch (error) {
-    console.error("[Opik] Failed to initialize prompts:", error);
+    console.error("[Opik] Failed to store prompt in Prompt Library:", error);
+    // Log more details for debugging
+    if (error instanceof Error) {
+      console.error("[Opik] Error details:", error.message);
+    }
     return null;
   }
 }
 
 /**
- * Get the discharge analysis prompt from Opik
+ * Get the discharge analysis prompt from Opik Prompt Library
  * Falls back to local prompt if Opik unavailable
+ *
+ * This retrieves the latest version of the prompt from Opik,
+ * enabling prompt versioning and A/B testing.
  */
 export async function getDischargeAnalysisPrompt(): Promise<{
   template: string;
@@ -136,10 +157,25 @@ export async function getDischargeAnalysisPrompt(): Promise<{
 }> {
   const opik = getOpikClient();
 
+  // Use cached prompt if available
+  if (cachedPrompt) {
+    return {
+      template: cachedPrompt.prompt,
+      commit: cachedPrompt.commit || null,
+      fromOpik: true,
+    };
+  }
+
   if (opik) {
     try {
+      // Retrieve the prompt from Opik Prompt Library
       const prompt = await opik.getPrompt({ name: "discharge-analysis" });
       if (prompt) {
+        // Cache for subsequent calls
+        cachedPrompt = prompt;
+
+        console.log(`[Opik] Using prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
+
         return {
           template: prompt.prompt,
           commit: prompt.commit || null,
@@ -147,16 +183,50 @@ export async function getDischargeAnalysisPrompt(): Promise<{
         };
       }
     } catch (error) {
-      console.warn("[Opik] Failed to get prompt, using local:", error);
+      console.warn("[Opik] Failed to get prompt from Prompt Library, using local template:", error);
     }
   }
 
-  // Fallback to local prompt
+  // Fallback to local prompt (not stored in Opik)
+  console.log("[Opik] Using local prompt template (not versioned in Opik)");
   return {
     template: DISCHARGE_ANALYSIS_PROMPT,
     commit: null,
     fromOpik: false,
   };
+}
+
+/**
+ * Clear the cached prompt (useful for testing different versions)
+ */
+export function clearPromptCache(): void {
+  cachedPrompt = null;
+  console.log("[Opik] Prompt cache cleared");
+}
+
+/**
+ * Get a specific version of the prompt from Opik
+ */
+export async function getPromptVersion(commit: string): Promise<{
+  template: string;
+  commit: string;
+} | null> {
+  const opik = getOpikClient();
+  if (!opik) return null;
+
+  try {
+    const prompt = await opik.getPrompt({ name: "discharge-analysis", commit });
+    if (prompt) {
+      return {
+        template: prompt.prompt,
+        commit: prompt.commit || commit,
+      };
+    }
+  } catch (error) {
+    console.warn(`[Opik] Failed to get prompt version ${commit}:`, error);
+  }
+
+  return null;
 }
 
 /**

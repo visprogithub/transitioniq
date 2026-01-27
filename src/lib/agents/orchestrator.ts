@@ -11,6 +11,19 @@
 import { v4 as uuidv4 } from "uuid";
 import { executeTool, listTools, TOOLS } from "./tools";
 import { traceAgentExecution, traceToolCall, logToolCorrectness } from "./tracing";
+import {
+  createMemorySession,
+  getMemorySession,
+  addConversationTurn,
+  setPatientContext,
+  storeToolResult,
+  addReasoningStep,
+  storeAssessment,
+  getAssessmentContext,
+  buildContextForLLM,
+  getMemoryStats,
+} from "./memory";
+import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import type {
   AgentState,
   AgentStep,
@@ -49,6 +62,10 @@ export function createSession(goal: string): AgentState {
     updatedAt: new Date().toISOString(),
   };
   sessions.set(sessionId, state);
+
+  // Initialize memory session
+  createMemorySession(sessionId, goal);
+
   return state;
 }
 
@@ -83,10 +100,25 @@ export async function runAgent(
       content: input.message,
       timestamp: new Date().toISOString(),
     });
+
+    // Also add to memory system
+    addConversationTurn(state.sessionId, {
+      role: "user",
+      content: input.message,
+    });
   }
 
   if (input.patientId) {
     state.patientId = input.patientId;
+
+    // Check for patient history in long-term memory
+    const patientContext = getAssessmentContext(input.patientId);
+    if (patientContext.previousAssessments.length > 0) {
+      addReasoningStep(
+        state.sessionId,
+        `Found ${patientContext.previousAssessments.length} previous assessments. Score trend: ${patientContext.scoreTrend}`
+      );
+    }
   }
 
   // Run the agent loop with tracing
@@ -157,6 +189,10 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
       if (toolCall.success) {
         updateGraphNode(graph, nodeId, "success", toolCall.duration);
 
+        // Store in memory system
+        storeToolResult(state.sessionId, plannedStep.tool, toolCall.output);
+        addReasoningStep(state.sessionId, `Tool ${plannedStep.tool} completed successfully`);
+
         // Update context with tool results
         switch (plannedStep.tool) {
           case "fetch_patient":
@@ -170,6 +206,8 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
               medicationCount: patient.medications.length,
               conditionCount: patient.diagnoses.length,
             };
+            // Store patient context in memory
+            setPatientContext(state.sessionId, patient);
             break;
           case "check_drug_interactions":
             drugInteractions = toolCall.output as unknown[];
@@ -191,6 +229,19 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
               riskFactorCount: analysis.riskFactors.length,
               highRiskCount: analysis.riskFactors.filter((r) => r.severity === "high").length,
             };
+
+            // Store assessment in long-term memory for future reference
+            if (state.patientId) {
+              await storeAssessment(
+                state.patientId,
+                analysis,
+                getActiveModelId()
+              );
+              addReasoningStep(
+                state.sessionId,
+                `Assessment stored: score=${analysis.score}, status=${analysis.status}`
+              );
+            }
             break;
         }
 
@@ -220,6 +271,17 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
       content: response.message,
       timestamp: new Date().toISOString(),
       toolCalls: toolsUsed,
+    });
+
+    // Also add to memory system with metadata
+    addConversationTurn(state.sessionId, {
+      role: "assistant",
+      content: response.message,
+      metadata: {
+        toolCalls: toolsUsed.map((tc) => ({ tool: tc.tool, success: tc.success })),
+        analysisScore: analysis?.score,
+        model: getActiveModelId(),
+      },
     });
 
     state.status = "completed";

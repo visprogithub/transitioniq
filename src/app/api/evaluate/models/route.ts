@@ -15,8 +15,10 @@ import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import {
   setActiveModel,
   getAvailableModels,
+  getAllModels,
   getActiveModelId,
-  resetLLMProvider,
+  getConfiguredProviders,
+  getModelConfig,
 } from "@/lib/integrations/llm-provider";
 import { analyzeDischargeReadiness, resetLLMProvider as resetGeminiProvider } from "@/lib/integrations/gemini";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
@@ -35,11 +37,35 @@ const EXPECTED_OUTCOMES: Record<string, { scoreRange: [number, number]; status: 
  * GET - List available models for evaluation
  */
 export async function GET() {
+  const availableModels = getAvailableModels();
+  const allModels = getAllModels();
+  const configuredProviders = getConfiguredProviders();
+
+  // Build model info with provider details
+  const modelInfo = allModels.map((modelId) => {
+    const config = getModelConfig(modelId);
+    return {
+      id: modelId,
+      provider: config?.provider || "unknown",
+      available: availableModels.includes(modelId),
+      displayName: modelId,
+    };
+  });
+
   return NextResponse.json({
-    availableModels: getAvailableModels(),
+    availableModels,
+    allModels: modelInfo,
+    configuredProviders,
     activeModel: getActiveModelId(),
     testPatients: EVAL_PATIENTS,
     expectedOutcomes: EXPECTED_OUTCOMES,
+    apiKeyStatus: {
+      gemini: !!process.env.GEMINI_API_KEY,
+      groq: !!process.env.GROQ_API_KEY,
+      huggingface: !!process.env.HF_API_KEY,
+      openai: !!process.env.OPENAI_API_KEY,
+      anthropic: !!process.env.ANTHROPIC_API_KEY,
+    },
   });
 }
 
@@ -52,9 +78,13 @@ export async function GET() {
  * - experimentName: string (optional - for Opik tracking)
  */
 export async function POST(request: NextRequest) {
-  if (!process.env.GEMINI_API_KEY) {
+  const availableModels = getAvailableModels();
+  if (availableModels.length === 0) {
     return NextResponse.json(
-      { error: "GEMINI_API_KEY required for model evaluation" },
+      {
+        error: "No LLM API keys configured. Set at least one of: GEMINI_API_KEY, GROQ_API_KEY, or HF_API_KEY",
+        hint: "GROQ_API_KEY is recommended - free tier at https://console.groq.com/",
+      },
       { status: 500 }
     );
   }

@@ -48,10 +48,26 @@ interface EvalResponse {
   opikDashboardUrl: string | null;
 }
 
+interface ModelInfo {
+  id: string;
+  provider: string;
+  available: boolean;
+  displayName: string;
+}
+
 interface ModelsInfo {
   availableModels: string[];
+  allModels: ModelInfo[];
+  configuredProviders: string[];
   activeModel: string;
   testPatients: string[];
+  apiKeyStatus: {
+    gemini: boolean;
+    groq: boolean;
+    huggingface: boolean;
+    openai: boolean;
+    anthropic: boolean;
+  };
 }
 
 export function EvaluationDashboard() {
@@ -154,6 +170,30 @@ export function EvaluationDashboard() {
     return "text-red-600";
   }
 
+  // Get provider color and label
+  function getProviderStyle(provider: string) {
+    switch (provider) {
+      case "gemini":
+        return { bg: "bg-blue-100", text: "text-blue-700", label: "Gemini" };
+      case "groq":
+        return { bg: "bg-orange-100", text: "text-orange-700", label: "Groq" };
+      case "huggingface":
+        return { bg: "bg-yellow-100", text: "text-yellow-700", label: "HF" };
+      case "openai":
+        return { bg: "bg-green-100", text: "text-green-700", label: "OpenAI" };
+      case "anthropic":
+        return { bg: "bg-purple-100", text: "text-purple-700", label: "Claude" };
+      default:
+        return { bg: "bg-gray-100", text: "text-gray-700", label: provider };
+    }
+  }
+
+  // Get provider from model ID
+  function getProviderFromModel(modelId: string): string {
+    const modelInfo = modelsInfo?.allModels.find((m) => m.id === modelId);
+    return modelInfo?.provider || "unknown";
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -231,36 +271,79 @@ export function EvaluationDashboard() {
               />
             </div>
 
+            {/* API Key Status */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Configured Providers
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(modelsInfo.apiKeyStatus).map(([provider, isConfigured]) => {
+                  const style = getProviderStyle(provider);
+                  return (
+                    <span
+                      key={provider}
+                      className={`px-3 py-1 rounded-lg text-sm font-medium flex items-center gap-1.5 ${
+                        isConfigured
+                          ? `${style.bg} ${style.text}`
+                          : "bg-gray-100 text-gray-400"
+                      }`}
+                    >
+                      {isConfigured ? (
+                        <CheckCircle className="w-3.5 h-3.5" />
+                      ) : (
+                        <XCircle className="w-3.5 h-3.5" />
+                      )}
+                      {style.label}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Model Checkboxes */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Models to Evaluate
+                Models to Evaluate ({modelsInfo.availableModels.length} available)
               </label>
               <div className="flex flex-wrap gap-2">
-                {modelsInfo.availableModels.map((model) => (
-                  <label
-                    key={model}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
-                      selectedModels.includes(model)
-                        ? "bg-blue-50 border-blue-300 text-blue-700"
-                        : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedModels.includes(model)}
-                      onChange={() => toggleModel(model)}
-                      className="sr-only"
-                    />
-                    <span className="text-sm font-medium">{model}</span>
-                    {model === modelsInfo.activeModel && (
-                      <span className="text-xs bg-blue-200 text-blue-800 px-1.5 py-0.5 rounded">
-                        active
+                {modelsInfo.availableModels.map((model) => {
+                  const provider = getProviderFromModel(model);
+                  const providerStyle = getProviderStyle(provider);
+                  return (
+                    <label
+                      key={model}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
+                        selectedModels.includes(model)
+                          ? "bg-blue-50 border-blue-300 text-blue-700"
+                          : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedModels.includes(model)}
+                        onChange={() => toggleModel(model)}
+                        className="sr-only"
+                      />
+                      <span
+                        className={`text-xs px-1.5 py-0.5 rounded ${providerStyle.bg} ${providerStyle.text}`}
+                      >
+                        {providerStyle.label}
                       </span>
-                    )}
-                  </label>
-                ))}
+                      <span className="text-sm font-medium">{model}</span>
+                      {model === modelsInfo.activeModel && (
+                        <span className="text-xs bg-blue-200 text-blue-800 px-1.5 py-0.5 rounded">
+                          active
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
               </div>
+              {modelsInfo.availableModels.length === 0 && (
+                <p className="text-sm text-amber-600 mt-2">
+                  No API keys configured. Add at least one of: GEMINI_API_KEY, GROQ_API_KEY, HF_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY
+                </p>
+              )}
             </div>
 
             {/* Test Patients Info */}
@@ -314,14 +397,24 @@ export function EvaluationDashboard() {
           {/* Summary Cards */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {Object.entries(evalResults.modelSummaries).map(
-              ([modelId, summary]) => (
+              ([modelId, summary]) => {
+                const provider = getProviderFromModel(modelId);
+                const providerStyle = getProviderStyle(provider);
+                return (
                 <div
                   key={modelId}
                   className="bg-white rounded-xl shadow-sm p-6"
                 >
-                  <h4 className="font-semibold text-gray-900 mb-4">
-                    {modelId}
-                  </h4>
+                  <div className="flex items-center gap-2 mb-4">
+                    <span
+                      className={`text-xs px-2 py-1 rounded ${providerStyle.bg} ${providerStyle.text}`}
+                    >
+                      {providerStyle.label}
+                    </span>
+                    <h4 className="font-semibold text-gray-900">
+                      {modelId}
+                    </h4>
+                  </div>
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="text-gray-500 text-sm">Avg Score</span>
@@ -355,7 +448,8 @@ export function EvaluationDashboard() {
                     )}
                   </div>
                 </div>
-              )
+              );
+              }
             )}
           </div>
 
@@ -368,6 +462,8 @@ export function EvaluationDashboard() {
               {evalResults.results.map((result, idx) => {
                 const key = `${result.model}-${result.patient}-${idx}`;
                 const isExpanded = expandedResults.has(key);
+                const provider = getProviderFromModel(result.model);
+                const providerStyle = getProviderStyle(provider);
 
                 return (
                   <div
@@ -385,11 +481,16 @@ export function EvaluationDashboard() {
                         ) : (
                           <ChevronRight className="w-4 h-4 text-gray-400" />
                         )}
-                        <div className="text-left">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-xs px-1.5 py-0.5 rounded ${providerStyle.bg} ${providerStyle.text}`}
+                          >
+                            {providerStyle.label}
+                          </span>
                           <span className="font-medium text-gray-900">
                             {result.model}
                           </span>
-                          <span className="mx-2 text-gray-400">→</span>
+                          <span className="mx-1 text-gray-400">→</span>
                           <span className="text-gray-600">{result.patient}</span>
                         </div>
                       </div>

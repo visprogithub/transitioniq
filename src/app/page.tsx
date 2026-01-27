@@ -7,6 +7,7 @@ import { PatientHeader } from "@/components/PatientHeader";
 import { DischargeScore } from "@/components/DischargeScore";
 import { RiskFactorCard } from "@/components/RiskFactorCard";
 import { EvaluationDashboard } from "@/components/EvaluationDashboard";
+import { SafetyDisclaimer, MedicalCaveats, ResponsibleAIBadge } from "@/components/SafetyDisclaimer";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 
@@ -127,7 +128,10 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 flex flex-col">
+      {/* Safety Banner */}
+      <SafetyDisclaimer variant="banner" />
+
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -138,7 +142,10 @@ export default function DashboardPage() {
                   <Activity className="w-6 h-6 text-white" />
                 </div>
                 <div>
-                  <h1 className="text-xl font-bold text-gray-900">TransitionIQ</h1>
+                  <div className="flex items-center gap-2">
+                    <h1 className="text-xl font-bold text-gray-900">TransitionIQ</h1>
+                    <ResponsibleAIBadge />
+                  </div>
                   <p className="text-xs text-gray-500">Discharge Readiness Assessment</p>
                 </div>
               </div>
@@ -397,6 +404,17 @@ export default function DashboardPage() {
               )}
             </AnimatePresence>
 
+            {/* Medical Caveats - shown after analysis */}
+            {analysis && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+              >
+                <MedicalCaveats />
+              </motion.div>
+            )}
+
             {/* Recommendations */}
             {analysis && analysis.recommendations.length > 0 && (
               <motion.div
@@ -429,15 +447,18 @@ export default function DashboardPage() {
         )}
       </main>
 
+      {/* Safety Footer */}
+      <SafetyDisclaimer variant="footer" />
+
       {/* Footer */}
-      <footer className="bg-white border-t border-gray-200 mt-auto py-6">
+      <footer className="bg-white border-t border-gray-200 py-4">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <p className="text-center text-sm text-gray-500">
             TransitionIQ - AI-powered discharge readiness assessment
             <span className="mx-2">·</span>
             Built for Encode Club Hackathon
             <span className="mx-2">·</span>
-            Powered by Gemini & Opik
+            Multi-model AI with Opik observability
           </p>
         </div>
       </footer>
