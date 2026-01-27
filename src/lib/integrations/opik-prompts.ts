@@ -14,6 +14,8 @@ import { Opik, type Prompt } from "opik";
 
 let opikClient: Opik | null = null;
 let cachedPrompt: Prompt | null = null;
+let cachedPatientSummaryPrompt: Prompt | null = null;
+let cachedLLMJudgePrompt: Prompt | null = null;
 
 function getOpikClient(): Opik | null {
   if (!process.env.OPIK_API_KEY) {
@@ -34,6 +36,89 @@ function getOpikClient(): Opik | null {
  * Discharge Analysis Prompt - stored in Opik Prompt Library
  */
 let cachedPlanPrompt: Prompt | null = null;
+
+/**
+ * Patient Summary Prompt - stored in Opik Prompt Library
+ * Converts clinical analysis to patient-friendly language
+ */
+const PATIENT_SUMMARY_PROMPT = `You are a patient communication specialist. Convert the clinical discharge analysis into simple, friendly language that any patient can understand.
+
+Patient: {{patientName}}, {{patientAge}} years old
+Clinical Score: {{score}}/100
+Clinical Status: {{status}}
+
+Risk Factors Identified:
+{{riskFactors}}
+
+Current Medications:
+{{medications}}
+
+Generate a patient-friendly summary in JSON format. Use simple words, avoid medical jargon, and be encouraging.
+
+Rules:
+1. readinessLevel must be "good" (score >= 70), "caution" (score 40-69), or "needs_attention" (score < 40)
+2. readinessMessage should be warm and reassuring, 1-2 sentences
+3. whatYouNeedToKnow: Convert each significant risk factor to plain English (max 4 items)
+   - Use "pill" icon for medication issues
+   - Use "heart" icon for vital signs / lab issues
+   - Use "calendar" icon for follow-up / scheduling
+   - Use "alert" icon for general warnings
+4. medicationReminders: Simple instructions for each medication (max 5)
+   - Mark blood thinners, insulin, and heart medications as "important"
+5. questionsForDoctor: Generate 3-4 questions the patient should ask (plain English)
+6. nextSteps: 4-5 actionable tasks with priority levels
+
+Respond with ONLY valid JSON matching this schema:
+{
+  "readinessLevel": "good" | "caution" | "needs_attention",
+  "readinessMessage": "string",
+  "whatYouNeedToKnow": [{ "title": "string", "description": "string", "icon": "pill" | "heart" | "calendar" | "alert" }],
+  "medicationReminders": [{ "medication": "string", "instruction": "string", "important": boolean }],
+  "questionsForDoctor": ["string"],
+  "nextSteps": [{ "task": "string", "completed": false, "priority": "high" | "medium" | "low" }]
+}`;
+
+/**
+ * LLM-as-Judge Prompt - stored in Opik Prompt Library
+ * Evaluates AI-generated discharge assessments for quality
+ */
+const LLM_JUDGE_PROMPT = `You are an expert medical quality assurance reviewer evaluating AI-generated discharge readiness assessments.
+
+Your role is to critically evaluate the assessment on four dimensions:
+
+1. SAFETY (Weight: 40%)
+   - Does the assessment identify all critical risks that could harm the patient?
+   - Are drug interactions properly flagged?
+   - Are contraindications mentioned?
+   - Would acting on this assessment put the patient at risk?
+
+2. ACCURACY (Weight: 25%)
+   - Does the score match the clinical picture?
+   - Are the risk factors correctly categorized by severity?
+   - Is the status (ready/caution/not_ready) appropriate given the findings?
+
+3. ACTIONABILITY (Weight: 20%)
+   - Are recommendations specific and implementable?
+   - Can a clinician act on these recommendations immediately?
+   - Are next steps clear?
+
+4. COMPLETENESS (Weight: 15%)
+   - Are all relevant patient factors considered?
+   - Are there any obvious gaps in the assessment?
+   - Is important context missing?
+
+For each dimension, provide:
+- A score from 0.0 to 1.0 (where 1.0 is perfect)
+- A brief reasoning (1-2 sentences)
+
+Respond with ONLY valid JSON in this exact format:
+{
+  "safety": { "score": 0.0, "reasoning": "..." },
+  "accuracy": { "score": 0.0, "reasoning": "..." },
+  "actionability": { "score": 0.0, "reasoning": "..." },
+  "completeness": { "score": 0.0, "reasoning": "..." },
+  "summary": "One sentence overall assessment"
+}`;
 
 /**
  * Discharge Plan Generation Prompt - stored in Opik Prompt Library
@@ -195,6 +280,43 @@ export async function initializeOpikPrompts(): Promise<{
 
     const planVersionInfo = planPrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: discharge-plan (version: ${planVersionInfo})`);
+
+    // Create/update the patient summary prompt
+    const patientSummaryPrompt = await opik.createPrompt({
+      name: "patient-summary",
+      prompt: PATIENT_SUMMARY_PROMPT,
+      description: "Patient-friendly summary generation prompt for TransitionIQ",
+      metadata: {
+        version: "1.0",
+        author: "transitioniq",
+        use_case: "patient_education",
+      },
+      tags: ["patient", "education", "summary", "healthcare", "transitioniq"],
+      changeDescription: "Patient-friendly discharge summary prompt",
+    });
+
+    cachedPatientSummaryPrompt = patientSummaryPrompt;
+    const patientSummaryVersionInfo = patientSummaryPrompt.commit || "initial";
+    console.log(`[Opik] Prompt stored in Prompt Library: patient-summary (version: ${patientSummaryVersionInfo})`);
+
+    // Create/update the LLM judge prompt
+    const llmJudgePrompt = await opik.createPrompt({
+      name: "llm-judge",
+      prompt: LLM_JUDGE_PROMPT,
+      description: "LLM-as-Judge evaluation prompt for TransitionIQ quality assurance",
+      metadata: {
+        version: "1.0",
+        author: "transitioniq",
+        use_case: "quality_assurance",
+      },
+      tags: ["evaluation", "judge", "quality", "healthcare", "transitioniq"],
+      changeDescription: "LLM-as-Judge prompt for discharge assessment evaluation",
+    });
+
+    cachedLLMJudgePrompt = llmJudgePrompt;
+    const llmJudgeVersionInfo = llmJudgePrompt.commit || "initial";
+    console.log(`[Opik] Prompt stored in Prompt Library: llm-judge (version: ${llmJudgeVersionInfo})`);
+
     console.log(`[Opik] View prompts at: https://www.comet.com/opik/prompts`);
 
     return {
@@ -344,7 +466,133 @@ export function formatDischargePlanPrompt(
 export function clearPromptCache(): void {
   cachedPrompt = null;
   cachedPlanPrompt = null;
+  cachedPatientSummaryPrompt = null;
+  cachedLLMJudgePrompt = null;
   console.log("[Opik] Prompt cache cleared");
+}
+
+/**
+ * Get the patient summary prompt from Opik Prompt Library
+ * Falls back to local prompt if Opik unavailable
+ */
+export async function getPatientSummaryPrompt(): Promise<{
+  template: string;
+  commit: string | null;
+  fromOpik: boolean;
+}> {
+  const opik = getOpikClient();
+
+  // Use cached prompt if available
+  if (cachedPatientSummaryPrompt) {
+    return {
+      template: cachedPatientSummaryPrompt.prompt,
+      commit: cachedPatientSummaryPrompt.commit || null,
+      fromOpik: true,
+    };
+  }
+
+  if (opik) {
+    try {
+      // Retrieve the prompt from Opik Prompt Library
+      const prompt = await opik.getPrompt({ name: "patient-summary" });
+      if (prompt) {
+        // Cache for subsequent calls
+        cachedPatientSummaryPrompt = prompt;
+
+        console.log(`[Opik] Using patient-summary prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
+
+        return {
+          template: prompt.prompt,
+          commit: prompt.commit || null,
+          fromOpik: true,
+        };
+      }
+    } catch (error) {
+      console.warn("[Opik] Failed to get patient-summary prompt from Prompt Library, using local template:", error);
+    }
+  }
+
+  // Fallback to local prompt (not stored in Opik)
+  console.log("[Opik] Using local patient-summary prompt template (not versioned in Opik)");
+  return {
+    template: PATIENT_SUMMARY_PROMPT,
+    commit: null,
+    fromOpik: false,
+  };
+}
+
+/**
+ * Get the LLM judge prompt from Opik Prompt Library
+ * Falls back to local prompt if Opik unavailable
+ */
+export async function getLLMJudgePrompt(): Promise<{
+  template: string;
+  commit: string | null;
+  fromOpik: boolean;
+}> {
+  const opik = getOpikClient();
+
+  // Use cached prompt if available
+  if (cachedLLMJudgePrompt) {
+    return {
+      template: cachedLLMJudgePrompt.prompt,
+      commit: cachedLLMJudgePrompt.commit || null,
+      fromOpik: true,
+    };
+  }
+
+  if (opik) {
+    try {
+      // Retrieve the prompt from Opik Prompt Library
+      const prompt = await opik.getPrompt({ name: "llm-judge" });
+      if (prompt) {
+        // Cache for subsequent calls
+        cachedLLMJudgePrompt = prompt;
+
+        console.log(`[Opik] Using llm-judge prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
+
+        return {
+          template: prompt.prompt,
+          commit: prompt.commit || null,
+          fromOpik: true,
+        };
+      }
+    } catch (error) {
+      console.warn("[Opik] Failed to get llm-judge prompt from Prompt Library, using local template:", error);
+    }
+  }
+
+  // Fallback to local prompt (not stored in Opik)
+  console.log("[Opik] Using local llm-judge prompt template (not versioned in Opik)");
+  return {
+    template: LLM_JUDGE_PROMPT,
+    commit: null,
+    fromOpik: false,
+  };
+}
+
+/**
+ * Format the patient summary prompt with patient data
+ */
+export function formatPatientSummaryPrompt(
+  template: string,
+  data: {
+    patientName: string;
+    patientAge: number;
+    score: number;
+    status: string;
+    riskFactors: string;
+    medications: string;
+  }
+): string {
+  let formatted = template;
+
+  // Replace all mustache variables
+  for (const [key, value] of Object.entries(data)) {
+    formatted = formatted.replace(new RegExp(`{{${key}}}`, "g"), String(value));
+  }
+
+  return formatted;
 }
 
 /**

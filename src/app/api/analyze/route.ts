@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
+import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
 import { traceDataSourceCall } from "@/lib/integrations/opik";
 import { getActiveModelId, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
@@ -90,8 +91,16 @@ export async function POST(request: NextRequest) {
     // Get unmet care gaps for analysis
     const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
 
-    // Build cost estimates from patient medications (simplified)
-    const costEstimates = estimateMedicationCosts(patient);
+    // Build cost estimates using CMS pricing API with Opik tracing
+    const costEstimatesResult = await traceDataSourceCall("CMS", patientId, async () => {
+      const estimates = await estimateCMSMedicationCosts(patient.medications);
+      return estimates.map((e) => ({
+        medication: e.drugName,
+        monthlyOOP: e.estimatedMonthlyOOP,
+        covered: e.coveredByMedicarePartD,
+      }));
+    });
+    const costEstimates = costEstimatesResult.result;
 
     // REQUIRED: Use real LLM for analysis - no fallback
     // Check if any LLM API key is configured (supports multiple providers)
@@ -211,38 +220,6 @@ function getKnownInteractionsForPatient(patient: Patient): DrugInteraction[] {
   return interactions;
 }
 
-/**
- * Estimate medication costs (simplified - would use real CMS pricing API in production)
- */
-function estimateMedicationCosts(patient: Patient): Array<{ medication: string; monthlyOOP: number; covered: boolean }> {
-  const highCostMeds = [
-    { pattern: "eliquis", cost: 500 },
-    { pattern: "xarelto", cost: 450 },
-    { pattern: "entresto", cost: 550 },
-    { pattern: "jardiance", cost: 450 },
-    { pattern: "ozempic", cost: 900 },
-    { pattern: "humira", cost: 1200 },
-    { pattern: "spiriva", cost: 350 },
-  ];
-
-  return patient.medications.map((med) => {
-    const medNameLower = med.name.toLowerCase();
-    const highCost = highCostMeds.find((hc) => medNameLower.includes(hc.pattern));
-
-    if (highCost) {
-      return {
-        medication: med.name,
-        monthlyOOP: highCost.cost,
-        covered: false,
-      };
-    }
-
-    // Default: assume generic/low cost
-    return {
-      medication: med.name,
-      monthlyOOP: 10,
-      covered: true,
-    };
-  });
-}
+// Note: Medication cost estimation now uses the CMS client (cms-client.ts)
+// which provides real Medicare Part D pricing data via CMS Open Data APIs
 

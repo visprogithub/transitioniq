@@ -19,6 +19,11 @@ import {
   initializeOpikPrompts,
 } from "./opik-prompts";
 import { createLLMProvider, getActiveModelId, type LLMProvider } from "./llm-provider";
+import {
+  applyInputGuardrails,
+  applyOutputGuardrails,
+  recordGuardrailStats,
+} from "../guardrails";
 
 // Note: API key validation is now handled by LLMProvider
 // Multiple providers are supported (Gemini, OpenAI, Anthropic, HuggingFace)
@@ -142,17 +147,46 @@ export async function analyzeDischargeReadiness(
         : "No recent labs available",
   });
 
+  // Apply input guardrails - check for PII in prompt before sending to LLM
+  const inputGuardrail = applyInputGuardrails(prompt, {
+    sanitizePII: true,
+    usePlaceholders: true,
+    blockCriticalPII: true,
+    logToOpik: true,
+    traceName: "guardrail-discharge-analysis-input",
+  });
+  recordGuardrailStats(inputGuardrail);
+
+  // If critical PII was detected and blocked, return an error
+  if (inputGuardrail.wasBlocked) {
+    throw new Error(`Analysis blocked: ${inputGuardrail.error}`);
+  }
+
+  // Use sanitized prompt if PII was detected
+  const sanitizedPrompt = inputGuardrail.wasSanitized ? inputGuardrail.output : prompt;
+
   // Call LLM via provider - NO TRY/CATCH - let errors propagate
   const provider = getLLMProvider();
-  const llmResponse = await provider.generate(prompt, {
+  const llmResponse = await provider.generate(sanitizedPrompt, {
     spanName: "discharge-analysis",
     metadata: {
       patient_id: patient.id,
       prompt_commit: commit,
       prompt_from_opik: fromOpik,
+      pii_sanitized: inputGuardrail.wasSanitized,
     },
   });
-  const responseText = llmResponse.content;
+
+  // Apply output guardrails - check LLM response for any leaked PII
+  const outputGuardrail = applyOutputGuardrails(llmResponse.content, {
+    sanitizePII: true,
+    usePlaceholders: true,
+    logToOpik: true,
+    traceName: "guardrail-discharge-analysis-output",
+  });
+  recordGuardrailStats(outputGuardrail);
+
+  const responseText = outputGuardrail.wasSanitized ? outputGuardrail.output : llmResponse.content;
   const latencyMs = llmResponse.latencyMs;
 
   // Parse response - strict parsing, no fallback
@@ -273,8 +307,24 @@ export async function generateDischargePlan(
       : "None identified",
   });
 
+  // Apply input guardrails
+  const inputGuardrail = applyInputGuardrails(prompt, {
+    sanitizePII: true,
+    usePlaceholders: true,
+    blockCriticalPII: true,
+    logToOpik: true,
+    traceName: "guardrail-discharge-plan-input",
+  });
+  recordGuardrailStats(inputGuardrail);
+
+  if (inputGuardrail.wasBlocked) {
+    throw new Error(`Plan generation blocked: ${inputGuardrail.error}`);
+  }
+
+  const sanitizedPrompt = inputGuardrail.wasSanitized ? inputGuardrail.output : prompt;
+
   const provider = getLLMProvider();
-  const response = await provider.generate(prompt, {
+  const response = await provider.generate(sanitizedPrompt, {
     spanName: "discharge-plan-generation",
     metadata: {
       patient_id: patient.id,
@@ -283,10 +333,20 @@ export async function generateDischargePlan(
       prompt_name: "discharge-plan",
       prompt_commit: commit,
       prompt_from_opik: fromOpik,
+      pii_sanitized: inputGuardrail.wasSanitized,
     },
   });
 
+  // Apply output guardrails
+  const outputGuardrail = applyOutputGuardrails(response.content, {
+    sanitizePII: true,
+    usePlaceholders: true,
+    logToOpik: true,
+    traceName: "guardrail-discharge-plan-output",
+  });
+  recordGuardrailStats(outputGuardrail);
+
   console.log(`[Analysis] Discharge plan generated using prompt version: ${commit || "local"} (from Opik: ${fromOpik})`);
 
-  return response.content;
+  return outputGuardrail.wasSanitized ? outputGuardrail.output : response.content;
 }

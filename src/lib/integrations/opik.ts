@@ -3,7 +3,7 @@ import type { DischargeAnalysis } from "../types/analysis";
 
 let opikClient: Opik | null = null;
 
-function getOpikClient(): Opik | null {
+export function getOpikClient(): Opik | null {
   if (!process.env.OPIK_API_KEY) {
     console.warn("OPIK_API_KEY not set - tracing disabled");
     return null;
@@ -250,7 +250,8 @@ export async function traceLLMCall<T>(
     // Extract token usage from result if available
     const tokenUsage = (result as { tokenUsage?: TokenUsage }).tokenUsage || llmOptions.usage;
 
-    // Update span with token usage (OpenAI format for Opik)
+    // Update span with token usage (snake_case format required for Opik metrics dashboard)
+    // See: https://www.comet.com/docs/opik/tracing/cost_tracking
     span.update({
       usage: tokenUsage ? {
         prompt_tokens: tokenUsage.promptTokens,
@@ -258,6 +259,8 @@ export async function traceLLMCall<T>(
         total_tokens: tokenUsage.totalTokens,
       } : undefined,
       totalEstimatedCost: llmOptions.totalCost,
+      model: llmOptions.model,
+      provider: providerMap[llmOptions.provider] || llmOptions.provider,
       metadata: {
         duration_ms: duration,
         success: true,
