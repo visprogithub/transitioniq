@@ -12,6 +12,7 @@ import { SafetyDisclaimer, MedicalCaveats, ResponsibleAIBadge } from "@/componen
 import { ModelSelector } from "@/components/ModelSelector";
 import { DischargePlan } from "@/components/DischargePlan";
 import { Tooltip } from "@/components/Tooltip";
+import { JudgeScoreBadge, type JudgeEvaluation } from "@/components/JudgeScoreBadge";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 
@@ -75,6 +76,9 @@ export default function DashboardPage() {
     provider: string;
     availableModels: string[];
   } | null>(null);
+  const [judgeEvaluation, setJudgeEvaluation] = useState<JudgeEvaluation | null>(null);
+  const [isRunningJudge, setIsRunningJudge] = useState(false);
+  const [judgeError, setJudgeError] = useState<string | null>(null);
 
   // Load patient data when selection changes
   useEffect(() => {
@@ -85,6 +89,8 @@ export default function DashboardPage() {
       setError(null);
       setAnalysis(null);
       setDischargePlan(null);
+      setJudgeEvaluation(null);
+      setJudgeError(null);
 
       try {
         const response = await fetch(`/api/patient/${selectedPatientId}`);
@@ -143,10 +149,43 @@ export default function DashboardPage() {
           .map((rf: RiskFactor) => rf.id)
       );
       setExpandedRiskFactors(highRiskIds);
+
+      // Auto-trigger LLM-as-Judge evaluation (in background)
+      runJudgeEvaluation(patient.id, data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analysis failed");
     } finally {
       setIsAnalyzing(false);
+    }
+  }
+
+  // Run LLM-as-Judge evaluation on the analysis
+  async function runJudgeEvaluation(patientId: string, analysisToJudge: DischargeAnalysis) {
+    setIsRunningJudge(true);
+    setJudgeError(null);
+    setJudgeEvaluation(null);
+
+    try {
+      const response = await fetch("/api/evaluate/judge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          patientId,
+          analysis: analysisToJudge,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Judge evaluation failed");
+      }
+
+      const data = await response.json();
+      setJudgeEvaluation(data.evaluation);
+    } catch (err) {
+      setJudgeError(err instanceof Error ? err.message : "Judge evaluation failed");
+    } finally {
+      setIsRunningJudge(false);
     }
   }
 
@@ -263,6 +302,8 @@ export default function DashboardPage() {
                   if (analysis) {
                     setAnalysis(null);
                     setDischargePlan(null);
+                    setJudgeEvaluation(null);
+                    setJudgeError(null);
                   }
                 }}
               />
@@ -527,6 +568,15 @@ export default function DashboardPage() {
                           )}
                         </motion.div>
                       )}
+
+                      {/* LLM-as-Judge Quality Score */}
+                      <div className="mt-4">
+                        <JudgeScoreBadge
+                          evaluation={judgeEvaluation}
+                          isLoading={isRunningJudge}
+                          error={judgeError}
+                        />
+                      </div>
                     </>
                   )}
 
