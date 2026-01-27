@@ -278,7 +278,7 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
       role: "assistant",
       content: response.message,
       metadata: {
-        toolCalls: toolsUsed.map((tc) => ({ tool: tc.tool, success: tc.success })),
+        toolCalls: toolsUsed.map((tc) => ({ tool: tc.tool, success: tc.success ?? false })),
         analysisScore: analysis?.score,
         model: getActiveModelId(),
       },

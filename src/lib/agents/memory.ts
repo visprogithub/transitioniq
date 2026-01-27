@@ -38,7 +38,7 @@ export interface ConversationTurn {
   };
 }
 
-export interface PatientContext {
+export interface PatientMemoryContext {
   id: string;
   name: string;
   age: number;
@@ -63,7 +63,7 @@ export interface AssessmentHistory {
 export interface ShortTermMemory {
   sessionId: string;
   conversationHistory: ConversationTurn[];
-  currentPatient?: PatientContext;
+  currentPatient?: PatientMemoryContext;
   toolResults: Record<string, unknown>;
   workingState: {
     currentGoal: string;
