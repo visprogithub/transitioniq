@@ -48,9 +48,15 @@ export async function POST(request: NextRequest) {
     const costEstimates = estimateMedicationCosts(patient);
 
     // REQUIRED: Use real LLM for analysis - no fallback
-    if (!process.env.GEMINI_API_KEY) {
+    // Check if any LLM API key is configured (supports multiple providers)
+    const hasLLMKey = process.env.GEMINI_API_KEY ||
+                      process.env.GROQ_API_KEY ||
+                      process.env.OPENAI_API_KEY ||
+                      process.env.ANTHROPIC_API_KEY ||
+                      process.env.HF_API_KEY;
+    if (!hasLLMKey) {
       return NextResponse.json(
-        { error: "GEMINI_API_KEY is required. Configure it in environment variables." },
+        { error: "No LLM API key configured. Set GEMINI_API_KEY, GROQ_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or HF_API_KEY." },
         { status: 500 }
       );
     }

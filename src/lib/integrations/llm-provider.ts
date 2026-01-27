@@ -39,24 +39,14 @@ export interface LLMResponse {
 }
 
 // Default model configs
-// Includes Gemini, Hugging Face (free), and Groq (free tier)
+// Includes Gemini, Groq (free tier), OpenAI, and Anthropic
+// NOTE: HuggingFace removed due to API changes, Gemini 1.5 removed due to deprecation
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
   // === GEMINI MODELS (requires GEMINI_API_KEY) ===
+  // Only Gemini 2.0 Flash is supported (1.5 models deprecated)
   "gemini-2.0-flash": {
     provider: "gemini",
     modelId: "gemini-2.0-flash",
-    apiKey: process.env.GEMINI_API_KEY || "",
-    temperature: 0.7,
-  },
-  "gemini-1.5-flash": {
-    provider: "gemini",
-    modelId: "gemini-1.5-flash",
-    apiKey: process.env.GEMINI_API_KEY || "",
-    temperature: 0.7,
-  },
-  "gemini-1.5-pro": {
-    provider: "gemini",
-    modelId: "gemini-1.5-pro",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
   },
@@ -83,25 +73,6 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
     apiKey: process.env.GROQ_API_KEY || "",
     temperature: 0.7,
     maxTokens: 4096,
-  },
-
-  // === HUGGING FACE MODELS (requires HF_API_KEY - free tier) ===
-  // Get free API key at: https://huggingface.co/settings/tokens
-  "hf-mistral-7b": {
-    provider: "huggingface",
-    modelId: "mistralai/Mistral-7B-Instruct-v0.3",
-    apiKey: process.env.HF_API_KEY || "",
-    temperature: 0.7,
-    maxTokens: 2048,
-    hfEndpoint: "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3",
-  },
-  "hf-zephyr-7b": {
-    provider: "huggingface",
-    modelId: "HuggingFaceH4/zephyr-7b-beta",
-    apiKey: process.env.HF_API_KEY || "",
-    temperature: 0.7,
-    maxTokens: 2048,
-    hfEndpoint: "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta",
   },
 
   // === OPENAI MODELS (requires OPENAI_API_KEY) ===
@@ -192,7 +163,6 @@ export function getConfiguredProviders(): ModelProvider[] {
   const providers = new Set<ModelProvider>();
   if (process.env.GEMINI_API_KEY) providers.add("gemini");
   if (process.env.GROQ_API_KEY) providers.add("groq");
-  if (process.env.HF_API_KEY) providers.add("huggingface");
   if (process.env.OPENAI_API_KEY) providers.add("openai");
   if (process.env.ANTHROPIC_API_KEY) providers.add("anthropic");
   return Array.from(providers);
@@ -237,6 +207,13 @@ export class LLMProvider {
 
   /**
    * Generate content with full Opik tracing
+   *
+   * Opik expects:
+   * - type: "llm" for LLM spans
+   * - model: the model ID
+   * - provider: the provider name (matches LLMProvider enum)
+   * - usage: { prompt_tokens, completion_tokens, total_tokens } (OpenAI format)
+   * - totalCost: optional manual cost in USD
    */
   async generate(
     prompt: string,
@@ -254,14 +231,27 @@ export class LLMProvider {
       input: {
         prompt_length: prompt.length,
         prompt_preview: prompt.slice(0, 500),
-        model: this.config.modelId,
-        provider: this.config.provider,
-        temperature: this.config.temperature,
       },
       metadata: {
         ...options?.metadata,
         model_id: this.config.modelId,
         provider: this.config.provider,
+      },
+    });
+
+    // Create an LLM span for proper token/cost tracking
+    // Opik requires type: "llm", model, and provider for cost calculation
+    const llmSpan = trace?.span({
+      name: `${this.config.provider}-${this.config.modelId}`,
+      type: "llm",
+      model: this.config.modelId,
+      provider: this.mapProviderToOpik(this.config.provider),
+      input: {
+        prompt: prompt.slice(0, 1000), // Truncate for display
+      },
+      metadata: {
+        temperature: this.config.temperature,
+        max_tokens: this.config.maxTokens,
       },
     });
 
@@ -275,10 +265,6 @@ export class LLMProvider {
         tokenUsage = result.tokenUsage;
       } else if (this.config.provider === "groq") {
         const result = await this.generateGroq(prompt);
-        content = result.content;
-        tokenUsage = result.tokenUsage;
-      } else if (this.config.provider === "huggingface") {
-        const result = await this.generateHuggingFace(prompt);
         content = result.content;
         tokenUsage = result.tokenUsage;
       } else if (this.config.provider === "openai") {
@@ -295,7 +281,33 @@ export class LLMProvider {
 
       const latencyMs = Date.now() - startTime;
 
-      // Log success to Opik
+      // Calculate estimated cost based on token usage
+      const estimatedCost = tokenUsage ? this.estimateCost(tokenUsage) : undefined;
+
+      // Update LLM span with usage data (OpenAI format for Opik)
+      if (llmSpan) {
+        llmSpan.update({
+          output: {
+            response: content.slice(0, 1000), // Truncate for display
+          },
+          // Pass usage in OpenAI format for Opik dashboard
+          // Keys must be: prompt_tokens, completion_tokens, total_tokens
+          usage: tokenUsage ? {
+            prompt_tokens: tokenUsage.promptTokens,
+            completion_tokens: tokenUsage.completionTokens,
+            total_tokens: tokenUsage.totalTokens,
+          } : undefined,
+          // Set total estimated cost if we calculated it
+          totalEstimatedCost: estimatedCost,
+          metadata: {
+            success: true,
+            latency_ms: latencyMs,
+          },
+        });
+        llmSpan.end();
+      }
+
+      // Update trace with summary
       if (trace) {
         trace.update({
           output: {
@@ -303,10 +315,13 @@ export class LLMProvider {
             content_preview: content.slice(0, 500),
             latency_ms: latencyMs,
             token_usage: tokenUsage,
+            estimated_cost_usd: estimatedCost,
           },
           metadata: {
             success: true,
             latency_ms: latencyMs,
+            total_tokens: tokenUsage?.totalTokens,
+            estimated_cost_usd: estimatedCost,
           },
         });
         trace.end();
@@ -327,7 +342,23 @@ export class LLMProvider {
       // Check for rate limit errors
       const isRateLimited = errorMessage.includes("429") || errorMessage.includes("quota") || errorMessage.includes("Too Many Requests");
 
-      // Log error to Opik
+      // Log error to LLM span
+      if (llmSpan) {
+        llmSpan.update({
+          output: {
+            error: errorMessage,
+          },
+          metadata: {
+            success: false,
+            error: true,
+            rate_limited: isRateLimited,
+            latency_ms: latencyMs,
+          },
+        });
+        llmSpan.end();
+      }
+
+      // Log error to trace
       if (trace) {
         trace.update({
           output: {
@@ -351,6 +382,59 @@ export class LLMProvider {
 
       throw error;
     }
+  }
+
+  /**
+   * Map our provider names to Opik's LLMProvider enum values
+   * Opik expects specific provider names for cost calculation
+   */
+  private mapProviderToOpik(provider: ModelProvider): string {
+    const providerMap: Record<ModelProvider, string> = {
+      gemini: "google_ai",
+      groq: "groq",
+      huggingface: "huggingface",
+      openai: "openai",
+      anthropic: "anthropic",
+    };
+    return providerMap[provider] || provider;
+  }
+
+  /**
+   * Estimate cost based on token usage and model
+   * Prices are approximate and in USD per 1K tokens
+   */
+  private estimateCost(usage: NonNullable<LLMResponse["tokenUsage"]>): number {
+    // Pricing per 1K tokens (approximate, as of early 2025)
+    const pricing: Record<string, { input: number; output: number }> = {
+      // Gemini
+      "gemini-2.0-flash": { input: 0.00010, output: 0.00040 },
+      "gemini-1.5-flash": { input: 0.000075, output: 0.00030 },
+      "gemini-1.5-pro": { input: 0.00125, output: 0.00500 },
+      // Groq (very cheap/free tier)
+      "llama-3.3-70b-versatile": { input: 0.00059, output: 0.00079 },
+      "llama-3.1-8b-instant": { input: 0.00005, output: 0.00008 },
+      "mixtral-8x7b-32768": { input: 0.00024, output: 0.00024 },
+      // OpenAI
+      "gpt-4o-mini": { input: 0.00015, output: 0.00060 },
+      "gpt-4o": { input: 0.00250, output: 0.01000 },
+      // Anthropic
+      "claude-3-haiku-20240307": { input: 0.00025, output: 0.00125 },
+      "claude-3-sonnet-20240229": { input: 0.00300, output: 0.01500 },
+      // HuggingFace (free inference API)
+      "mistralai/Mistral-7B-Instruct-v0.3": { input: 0.0, output: 0.0 },
+      "HuggingFaceH4/zephyr-7b-beta": { input: 0.0, output: 0.0 },
+    };
+
+    const modelPricing = pricing[this.config.modelId];
+    if (!modelPricing) {
+      // Default to a small cost for unknown models
+      return (usage.promptTokens * 0.0001 + usage.completionTokens * 0.0002) / 1000;
+    }
+
+    const inputCost = (usage.promptTokens / 1000) * modelPricing.input;
+    const outputCost = (usage.completionTokens / 1000) * modelPricing.output;
+
+    return inputCost + outputCost;
   }
 
   /**
@@ -439,13 +523,14 @@ export class LLMProvider {
   /**
    * Generate using Hugging Face Inference API (free tier available)
    * Docs: https://huggingface.co/docs/api-inference/
+   * NOTE: Uses new router.huggingface.co endpoint (api-inference.huggingface.co is deprecated)
    */
   private async generateHuggingFace(prompt: string): Promise<{
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
     const endpoint = this.config.hfEndpoint ||
-      `https://api-inference.huggingface.co/models/${this.config.modelId}`;
+      `https://router.huggingface.co/hf-inference/models/${this.config.modelId}`;
 
     const response = await fetch(endpoint, {
       method: "POST",

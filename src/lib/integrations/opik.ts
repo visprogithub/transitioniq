@@ -23,10 +23,24 @@ export interface TraceMetadata {
   patientId?: string;
   dataSource?: string;
   model?: string;
+  provider?: string;
   score?: number;
   status?: string;
   riskFactorCount?: number;
   [key: string]: string | number | boolean | undefined;
+}
+
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface LLMTraceOptions {
+  model: string;
+  provider: string;
+  usage?: TokenUsage;
+  totalCost?: number;
 }
 
 export interface SpanResult<T> {
@@ -154,6 +168,7 @@ export async function traceDataSourceCall<T>(
 
 /**
  * Trace Gemini LLM calls with model information
+ * @deprecated Use traceLLMCall instead for proper token/cost tracking
  */
 export async function traceGeminiCall<T>(
   operation: string,
@@ -170,6 +185,113 @@ export async function traceGeminiCall<T>(
     },
     fn
   );
+}
+
+/**
+ * Trace LLM calls with proper token usage and cost tracking for Opik
+ * This creates an "llm" type span which enables Opik's token/cost dashboards
+ */
+export async function traceLLMCall<T>(
+  operation: string,
+  patientId: string,
+  llmOptions: LLMTraceOptions,
+  fn: () => Promise<T & { tokenUsage?: TokenUsage }>
+): Promise<SpanResult<T>> {
+  const opik = getOpikClient();
+  const startTime = Date.now();
+
+  if (!opik) {
+    const result = await fn();
+    return {
+      result,
+      duration: Date.now() - startTime,
+    };
+  }
+
+  // Map provider names to Opik's expected format
+  const providerMap: Record<string, string> = {
+    gemini: "google_ai",
+    groq: "groq",
+    huggingface: "huggingface",
+    openai: "openai",
+    anthropic: "anthropic",
+  };
+
+  let trace: Trace | null = null;
+  let span: Span | null = null;
+
+  try {
+    trace = opik.trace({
+      name: `llm-${operation}`,
+      metadata: {
+        patientId,
+        model: llmOptions.model,
+        provider: llmOptions.provider,
+        category: "llm_call",
+        operation,
+      },
+    });
+
+    // Create LLM-type span for proper token tracking
+    span = trace.span({
+      name: `${llmOptions.provider}-${llmOptions.model}`,
+      type: "llm",
+      model: llmOptions.model,
+      provider: providerMap[llmOptions.provider] || llmOptions.provider,
+      metadata: {
+        patientId,
+        operation,
+      },
+    });
+
+    const result = await fn();
+    const duration = Date.now() - startTime;
+
+    // Extract token usage from result if available
+    const tokenUsage = (result as { tokenUsage?: TokenUsage }).tokenUsage || llmOptions.usage;
+
+    // Update span with token usage (OpenAI format for Opik)
+    span.update({
+      usage: tokenUsage ? {
+        prompt_tokens: tokenUsage.promptTokens,
+        completion_tokens: tokenUsage.completionTokens,
+        total_tokens: tokenUsage.totalTokens,
+      } : undefined,
+      totalEstimatedCost: llmOptions.totalCost,
+      metadata: {
+        duration_ms: duration,
+        success: true,
+        ...extractAnalysisMetrics(result),
+      },
+    });
+    span.end();
+    trace.end();
+
+    await flushTraces();
+
+    return {
+      result,
+      duration,
+      traceId: trace.data.id,
+    };
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+
+    if (span) {
+      span.update({
+        metadata: { duration_ms: duration, success: false, error: errorMessage },
+      });
+      span.end();
+    }
+    if (trace) {
+      trace.end();
+    }
+
+    await flushTraces();
+
+    throw error;
+  }
 }
 
 /**

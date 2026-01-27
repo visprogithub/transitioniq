@@ -17,10 +17,8 @@ import {
 } from "./opik-prompts";
 import { createLLMProvider, getActiveModelId, type LLMProvider } from "./llm-provider";
 
-// Validate API key at module load
-if (!process.env.GEMINI_API_KEY) {
-  console.error("GEMINI_API_KEY is required - no fallback available");
-}
+// Note: API key validation is now handled by LLMProvider
+// Multiple providers are supported (Gemini, Groq, OpenAI, Anthropic, HuggingFace)
 
 // Initialize Opik prompts on first use
 let promptsInitialized = false;
@@ -73,10 +71,7 @@ export async function analyzeDischargeReadiness(
   careGaps: CareGap[],
   costEstimates: CostEstimate[]
 ): Promise<DischargeAnalysis> {
-  // Validate API key
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is required. Configure it in environment variables.");
-  }
+  // Note: API key validation is handled by LLMProvider for the active model
 
   // Initialize Opik prompts if not done
   if (!promptsInitialized) {
@@ -247,9 +242,7 @@ export async function generateDischargePlan(
   patient: Patient,
   analysis: DischargeAnalysis
 ): Promise<string> {
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is required");
-  }
+  // Note: API key validation is handled by LLMProvider for the active model
 
   const prompt = `Based on the discharge analysis for ${patient.name} (score: ${analysis.score}/100, status: ${analysis.status}), generate a detailed discharge checklist.
 
