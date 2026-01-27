@@ -16,6 +16,7 @@ let opikClient: Opik | null = null;
 let cachedPrompt: Prompt | null = null;
 let cachedPatientSummaryPrompt: Prompt | null = null;
 let cachedLLMJudgePrompt: Prompt | null = null;
+let cachedPatientCoachPrompt: Prompt | null = null;
 
 function getOpikClient(): Opik | null {
   if (!process.env.OPIK_API_KEY) {
@@ -82,6 +83,62 @@ Respond with ONLY valid JSON matching this schema:
  * LLM-as-Judge Prompt - stored in Opik Prompt Library
  * Evaluates AI-generated discharge assessments for quality
  */
+/**
+ * Patient Coach Prompt - Agentic multi-turn conversation
+ * Used for the patient-facing recovery coach with tool use
+ */
+const PATIENT_COACH_PROMPT = `You are a friendly, supportive Patient Recovery Coach helping {{patientName}} prepare to go home from the hospital.
+
+## Your Role
+- Explain medical information in simple, everyday language
+- Help the patient understand their medications, symptoms, and follow-up care
+- Use the available tools to provide accurate, patient-specific information
+- Be warm, encouraging, and patient-focused
+
+## Patient Context
+Name: {{patientName}}
+Age: {{patientAge}} years old
+Diagnoses: {{diagnoses}}
+Current Medications: {{medications}}
+Allergies: {{allergies}}
+
+## Communication Guidelines
+1. Use simple, non-medical language whenever possible
+2. Explain terms if you must use them
+3. Be reassuring but honest
+4. Encourage patients to ask their doctor/nurse for clarification
+5. Never diagnose or provide specific medical advice - guide them to appropriate care
+6. Use the tools available to provide accurate information
+
+## Important Guardrails
+⚠️ NEVER:
+- Make specific diagnoses
+- Tell patients to stop or change medications
+- Dismiss serious symptoms
+- Guarantee outcomes or timelines
+- Provide emergency medical guidance (always direct to 911 for emergencies)
+
+✅ ALWAYS:
+- Encourage patients to ask their healthcare team
+- Recommend calling their doctor for concerning symptoms
+- Direct to 911 or emergency room for serious symptoms
+- Use tools to look up accurate medication and symptom information
+- Be supportive and encouraging
+
+## Available Tools
+You can use these tools to help answer questions:
+- lookupMedication: Get information about medications
+- checkSymptom: Assess symptom urgency
+- explainMedicalTerm: Explain medical jargon simply
+- getFollowUpGuidance: Information about appointments
+- getDietaryGuidance: Dietary recommendations
+- getActivityGuidance: Activity and restriction guidance
+
+When you need to use a tool, respond with ONLY a JSON object:
+{"tool_name": "toolName", "arguments": {"paramName": "value"}}
+
+Otherwise, respond conversationally in a friendly, supportive way.`;
+
 const LLM_JUDGE_PROMPT = `You are an expert medical quality assurance reviewer evaluating AI-generated discharge readiness assessments.
 
 Your role is to critically evaluate the assessment on four dimensions:
@@ -317,6 +374,26 @@ export async function initializeOpikPrompts(): Promise<{
     const llmJudgeVersionInfo = llmJudgePrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: llm-judge (version: ${llmJudgeVersionInfo})`);
 
+    // Create/update the patient coach prompt
+    const patientCoachPrompt = await opik.createPrompt({
+      name: "patient-coach",
+      prompt: PATIENT_COACH_PROMPT,
+      description: "Agentic patient recovery coach prompt with multi-turn tool use for TransitionIQ",
+      metadata: {
+        version: "1.0",
+        author: "transitioniq",
+        use_case: "patient_education_agentic",
+        agentic: true,
+        tools: ["lookupMedication", "checkSymptom", "explainMedicalTerm", "getFollowUpGuidance", "getDietaryGuidance", "getActivityGuidance"],
+      },
+      tags: ["patient", "education", "agentic", "chat", "healthcare", "transitioniq"],
+      changeDescription: "Agentic patient coach prompt with tool use support",
+    });
+
+    cachedPatientCoachPrompt = patientCoachPrompt;
+    const patientCoachVersionInfo = patientCoachPrompt.commit || "initial";
+    console.log(`[Opik] Prompt stored in Prompt Library: patient-coach (version: ${patientCoachVersionInfo})`);
+
     console.log(`[Opik] View prompts at: https://www.comet.com/opik/prompts`);
 
     return {
@@ -468,7 +545,81 @@ export function clearPromptCache(): void {
   cachedPlanPrompt = null;
   cachedPatientSummaryPrompt = null;
   cachedLLMJudgePrompt = null;
+  cachedPatientCoachPrompt = null;
   console.log("[Opik] Prompt cache cleared");
+}
+
+/**
+ * Get the patient coach prompt from Opik Prompt Library
+ * Falls back to local prompt if Opik unavailable
+ */
+export async function getPatientCoachPrompt(): Promise<{
+  template: string;
+  commit: string | null;
+  fromOpik: boolean;
+}> {
+  const opik = getOpikClient();
+
+  // Use cached prompt if available
+  if (cachedPatientCoachPrompt) {
+    return {
+      template: cachedPatientCoachPrompt.prompt,
+      commit: cachedPatientCoachPrompt.commit || null,
+      fromOpik: true,
+    };
+  }
+
+  if (opik) {
+    try {
+      // Retrieve the prompt from Opik Prompt Library
+      const prompt = await opik.getPrompt({ name: "patient-coach" });
+      if (prompt) {
+        // Cache for subsequent calls
+        cachedPatientCoachPrompt = prompt;
+
+        console.log(`[Opik] Using patient-coach prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
+
+        return {
+          template: prompt.prompt,
+          commit: prompt.commit || null,
+          fromOpik: true,
+        };
+      }
+    } catch (error) {
+      console.warn("[Opik] Failed to get patient-coach prompt from Prompt Library, using local template:", error);
+    }
+  }
+
+  // Fallback to local prompt (not stored in Opik)
+  console.log("[Opik] Using local patient-coach prompt template (not versioned in Opik)");
+  return {
+    template: PATIENT_COACH_PROMPT,
+    commit: null,
+    fromOpik: false,
+  };
+}
+
+/**
+ * Format the patient coach prompt with patient data
+ */
+export function formatPatientCoachPrompt(
+  template: string,
+  data: {
+    patientName: string;
+    patientAge: number;
+    diagnoses: string;
+    medications: string;
+    allergies: string;
+  }
+): string {
+  let formatted = template;
+
+  // Replace all mustache variables
+  for (const [key, value] of Object.entries(data)) {
+    formatted = formatted.replace(new RegExp(`{{${key}}}`, "g"), String(value));
+  }
+
+  return formatted;
 }
 
 /**

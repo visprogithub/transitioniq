@@ -133,13 +133,14 @@ declare global {
   var __transitioniq_active_model: string | undefined;
 }
 
-// Default model priority: OpenAI > HuggingFace > Anthropic > Gemini (Gemini has strict rate limits on free tier)
+// Default model priority: HuggingFace > OpenAI > Anthropic > Gemini
+// HuggingFace first to conserve paid API credits during testing/demos
 function getDefaultModelId(): string {
   return process.env.LLM_MODEL ||
-    (process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
-     process.env.HF_API_KEY ? "hf-qwen-7b" :
+    (process.env.HF_API_KEY ? "hf-qwen-7b" :
+     process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
      process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" :
-     process.env.GEMINI_API_KEY ? "gemini-2.0-flash-lite" : "openai-gpt-4o-mini");
+     process.env.GEMINI_API_KEY ? "gemini-2.0-flash-lite" : "hf-qwen-7b");
 }
 
 // Initialize globalThis storage if not set
@@ -325,13 +326,13 @@ export class LLMProvider {
       }
 
       // Update LLM span with usage data
-      // IMPORTANT: Opik requires snake_case keys for token metrics to show in dashboard
-      // See: https://www.comet.com/docs/opik/tracing/cost_tracking
+      // Opik TypeScript SDK Usage interface uses camelCase: promptTokens, completionTokens, totalTokens
+      // See: node_modules/opik/dist/*.d.ts - interface Usage
       if (llmSpan) {
         const usagePayload = tokenUsage ? {
-          prompt_tokens: tokenUsage.promptTokens,
-          completion_tokens: tokenUsage.completionTokens,
-          total_tokens: tokenUsage.totalTokens,
+          promptTokens: tokenUsage.promptTokens,
+          completionTokens: tokenUsage.completionTokens,
+          totalTokens: tokenUsage.totalTokens,
         } : undefined;
 
         // Debug log the payload being sent to Opik

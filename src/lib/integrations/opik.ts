@@ -250,13 +250,13 @@ export async function traceLLMCall<T>(
     // Extract token usage from result if available
     const tokenUsage = (result as { tokenUsage?: TokenUsage }).tokenUsage || llmOptions.usage;
 
-    // Update span with token usage (snake_case format required for Opik metrics dashboard)
-    // See: https://www.comet.com/docs/opik/tracing/cost_tracking
+    // Update span with token usage (camelCase to match Opik TypeScript SDK's Usage interface)
+    // See: node_modules/opik/dist/*.d.ts - interface Usage
     span.update({
       usage: tokenUsage ? {
-        prompt_tokens: tokenUsage.promptTokens,
-        completion_tokens: tokenUsage.completionTokens,
-        total_tokens: tokenUsage.totalTokens,
+        promptTokens: tokenUsage.promptTokens,
+        completionTokens: tokenUsage.completionTokens,
+        totalTokens: tokenUsage.totalTokens,
       } : undefined,
       totalEstimatedCost: llmOptions.totalCost,
       model: llmOptions.model,

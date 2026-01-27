@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
+import { PatientChat } from "./PatientChat";
 
 interface PatientRecoveryCoachProps {
   patient: Patient | null;
@@ -685,11 +686,27 @@ export function PatientRecoveryCoach({
         </AnimatePresence>
       </motion.div>
 
-      {/* Help Contact */}
+      {/* AI Recovery Coach Chat */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.5 }}
+      >
+        <div className="mb-4 flex items-center gap-2">
+          <MessageCircle className="w-5 h-5 text-blue-600" />
+          <h3 className="font-semibold text-gray-900">Ask Your Recovery Coach</h3>
+          <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+            AI-Powered
+          </span>
+        </div>
+        <PatientChat patient={patient} analysis={analysis} />
+      </motion.div>
+
+      {/* Help Contact */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.6 }}
         className="bg-gradient-to-r from-blue-500 to-blue-600 rounded-xl p-6 text-white"
       >
         <div className="flex items-center gap-4">
