@@ -23,13 +23,99 @@ import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import { PatientChat } from "./PatientChat";
 
+// ============================================================================
+// LOCAL STORAGE CACHING UTILITIES
+// ============================================================================
+const CACHE_PREFIX = "transitioniq-summary-";
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_CACHE_ENTRIES = 10;
+
+function getCacheKey(patientId: string, analysis: DischargeAnalysis): string {
+  // Create a hash based on patient ID and key analysis characteristics
+  const analysisHash = `${analysis.score}-${analysis.riskFactors.length}-${analysis.status}`;
+  return `${CACHE_PREFIX}${patientId}-${analysisHash}`;
+}
+
+function getCachedSummary(patientId: string, analysis: DischargeAnalysis): PatientSummary | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const key = getCacheKey(patientId, analysis);
+    const cached = localStorage.getItem(key);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      // Check TTL
+      if (Date.now() - parsed.timestamp < CACHE_TTL_MS) {
+        console.log("[Cache] Using cached patient summary for", patientId);
+        return parsed.summary as PatientSummary;
+      }
+      // Expired - remove it
+      localStorage.removeItem(key);
+      console.log("[Cache] Expired cache entry removed for", patientId);
+    }
+  } catch (e) {
+    console.warn("[Cache] Failed to read from localStorage:", e);
+  }
+  return null;
+}
+
+function cacheSummary(patientId: string, analysis: DischargeAnalysis, summary: PatientSummary): void {
+  if (typeof window === "undefined") return;
+  try {
+    const key = getCacheKey(patientId, analysis);
+    localStorage.setItem(
+      key,
+      JSON.stringify({
+        summary,
+        timestamp: Date.now(),
+      })
+    );
+    console.log("[Cache] Saved patient summary to cache for", patientId);
+    // Clean up old entries
+    cleanupOldCacheEntries();
+  } catch (e) {
+    console.warn("[Cache] Failed to write to localStorage:", e);
+  }
+}
+
+function cleanupOldCacheEntries(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const keys = Object.keys(localStorage).filter((k) => k.startsWith(CACHE_PREFIX));
+    if (keys.length > MAX_CACHE_ENTRIES) {
+      // Get entries with timestamps and sort by oldest
+      const entries = keys
+        .map((k) => {
+          try {
+            const data = JSON.parse(localStorage.getItem(k) || "{}");
+            return { key: k, timestamp: data.timestamp || 0 };
+          } catch {
+            return { key: k, timestamp: 0 };
+          }
+        })
+        .sort((a, b) => a.timestamp - b.timestamp);
+
+      // Remove oldest entries to get back to limit
+      const toRemove = entries.slice(0, keys.length - MAX_CACHE_ENTRIES);
+      toRemove.forEach((e) => {
+        localStorage.removeItem(e.key);
+        console.log("[Cache] Removed old entry:", e.key);
+      });
+    }
+  } catch (e) {
+    console.warn("[Cache] Failed to cleanup old entries:", e);
+  }
+}
+// ============================================================================
+
 interface PatientRecoveryCoachProps {
   patient: Patient | null;
   analysis: DischargeAnalysis | null;
   isLoading?: boolean;
+  cachedSummary?: PatientSummary | null;
+  onSummaryGenerated?: (summary: PatientSummary) => void;
 }
 
-interface PatientSummary {
+export interface PatientSummary {
   readinessLevel: "good" | "caution" | "needs_attention";
   readinessMessage: string;
   whatYouNeedToKnow: Array<{
@@ -61,6 +147,8 @@ export function PatientRecoveryCoach({
   patient,
   analysis,
   isLoading = false,
+  cachedSummary,
+  onSummaryGenerated,
 }: PatientRecoveryCoachProps) {
   const [patientSummary, setPatientSummary] = useState<PatientSummary | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -71,11 +159,31 @@ export function PatientRecoveryCoach({
   const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set());
 
   // Generate patient-friendly summary when analysis changes
+  // Uses 3-tier caching: parent state → localStorage → API call
   useEffect(() => {
-    if (analysis && patient && !patientSummary) {
-      generatePatientSummary();
+    if (!analysis || !patient) return;
+
+    // 1. Already have summary from parent state (persists across tab switches)
+    if (cachedSummary) {
+      console.log("[Cache] Using parent-cached summary (tab switch)");
+      setPatientSummary(cachedSummary);
+      return;
     }
-  }, [analysis, patient]);
+
+    // 2. Already have local state (prevents re-render loops)
+    if (patientSummary) return;
+
+    // 3. Check localStorage cache (persists across page refreshes)
+    const localCached = getCachedSummary(patient.id, analysis);
+    if (localCached) {
+      setPatientSummary(localCached);
+      onSummaryGenerated?.(localCached);
+      return;
+    }
+
+    // 4. Generate new summary via API
+    generatePatientSummary();
+  }, [analysis, patient, cachedSummary]);
 
   async function generatePatientSummary() {
     if (!patient || !analysis) return;
@@ -98,11 +206,25 @@ export function PatientRecoveryCoach({
       }
 
       const data = await response.json();
-      setPatientSummary(data.summary);
+      const summary = data.summary as PatientSummary;
+
+      // Update local state
+      setPatientSummary(summary);
+
+      // Cache to localStorage for page refresh persistence
+      cacheSummary(patient.id, analysis, summary);
+
+      // Notify parent for tab switch persistence
+      onSummaryGenerated?.(summary);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate summary");
       // Fallback to a generated summary based on analysis
-      setPatientSummary(generateFallbackSummary(patient, analysis));
+      const fallbackSummary = generateFallbackSummary(patient, analysis);
+      setPatientSummary(fallbackSummary);
+
+      // Also cache the fallback so we don't regenerate on every error
+      cacheSummary(patient.id, analysis, fallbackSummary);
+      onSummaryGenerated?.(fallbackSummary);
     } finally {
       setIsGenerating(false);
     }

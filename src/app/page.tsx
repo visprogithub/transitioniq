@@ -7,7 +7,7 @@ import { PatientHeader } from "@/components/PatientHeader";
 import { DischargeScore } from "@/components/DischargeScore";
 import { RiskFactorCard } from "@/components/RiskFactorCard";
 import { EvaluationDashboard } from "@/components/EvaluationDashboard";
-import { PatientRecoveryCoach } from "@/components/PatientRecoveryCoach";
+import { PatientRecoveryCoach, type PatientSummary } from "@/components/PatientRecoveryCoach";
 import { SafetyDisclaimer, MedicalCaveats, ResponsibleAIBadge } from "@/components/SafetyDisclaimer";
 import { ModelSelector } from "@/components/ModelSelector";
 import { DischargePlan } from "@/components/DischargePlan";
@@ -79,6 +79,8 @@ export default function DashboardPage() {
   const [judgeEvaluation, setJudgeEvaluation] = useState<JudgeEvaluation | null>(null);
   const [isRunningJudge, setIsRunningJudge] = useState(false);
   const [judgeError, setJudgeError] = useState<string | null>(null);
+  // Patient summary state - lifted here to persist across tab switches
+  const [patientSummary, setPatientSummary] = useState<PatientSummary | null>(null);
 
   // Load patient data when selection changes
   useEffect(() => {
@@ -91,6 +93,7 @@ export default function DashboardPage() {
       setDischargePlan(null);
       setJudgeEvaluation(null);
       setJudgeError(null);
+      setPatientSummary(null); // Clear cached summary when patient changes
 
       try {
         const response = await fetch(`/api/patient/${selectedPatientId}`);
@@ -141,6 +144,8 @@ export default function DashboardPage() {
       }
 
       setAnalysis(data);
+      // Clear cached patient summary since analysis changed
+      setPatientSummary(null);
 
       // Auto-expand high-severity risk factors
       const highRiskIds = new Set<string>(
@@ -371,6 +376,8 @@ export default function DashboardPage() {
             patient={patient}
             analysis={analysis}
             isLoading={isLoadingPatient}
+            cachedSummary={patientSummary}
+            onSummaryGenerated={setPatientSummary}
           />
         )}
 
