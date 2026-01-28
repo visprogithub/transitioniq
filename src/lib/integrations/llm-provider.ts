@@ -336,7 +336,7 @@ export class LLMProvider {
         } : undefined;
 
         // Debug log the payload being sent to Opik
-        console.log(`[Opik] Updating span with usage:`, JSON.stringify(usagePayload), `cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
+        console.log(`[Opik] Updating LLM span with usage:`, JSON.stringify(usagePayload), `cost: $${estimatedCost?.toFixed(6) || "N/A"}, model: ${this.config.modelId}, provider: ${this.mapProviderToOpik(this.config.provider)}`);
 
         llmSpan.update({
           output: {
@@ -344,14 +344,21 @@ export class LLMProvider {
           },
           usage: usagePayload,
           model: this.config.modelId,
-          provider: this.config.provider,
+          provider: this.mapProviderToOpik(this.config.provider), // Use mapped provider for Opik
           totalEstimatedCost: estimatedCost,
           metadata: {
             success: true,
             latency_ms: latencyMs,
+            // Also include snake_case for dashboard compatibility
+            prompt_tokens: tokenUsage?.promptTokens,
+            completion_tokens: tokenUsage?.completionTokens,
+            total_tokens: tokenUsage?.totalTokens,
           },
         });
         llmSpan.end();
+
+        // Flush immediately after LLM span ends to ensure usage data is sent
+        await this.opik?.flush();
       }
 
       // Update trace with summary

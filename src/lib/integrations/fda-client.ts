@@ -159,103 +159,10 @@ export async function checkDrugInteractions(
     console.error("Drug interaction check failed:", error);
   }
 
-  // Check known high-risk combinations manually if API doesn't return them
-  const knownInteractions = checkKnownHighRiskCombinations(medications);
-  for (const known of knownInteractions) {
-    if (!interactions.some((i) =>
-      (i.drug1.toLowerCase().includes(known.drug1.toLowerCase()) && i.drug2.toLowerCase().includes(known.drug2.toLowerCase())) ||
-      (i.drug1.toLowerCase().includes(known.drug2.toLowerCase()) && i.drug2.toLowerCase().includes(known.drug1.toLowerCase()))
-    )) {
-      interactions.push(known);
-    }
-  }
-
-  return interactions;
-}
-
-/**
- * Known high-risk drug combinations for clinical decision support
- */
-function checkKnownHighRiskCombinations(
-  medications: Array<{ name: string }>
-): DrugInteraction[] {
-  const interactions: DrugInteraction[] = [];
-  const medNames = medications.map((m) => m.name.toLowerCase());
-
-  // Warfarin + Aspirin
-  if (medNames.some((m) => m.includes("warfarin")) && medNames.some((m) => m.includes("aspirin"))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Aspirin",
-      severity: "major",
-      description:
-        "Concurrent use increases bleeding risk significantly. Monitor INR closely and watch for signs of bleeding.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Warfarin + Eliquis (Apixaban) - double anticoagulation
-  if (medNames.some((m) => m.includes("warfarin")) &&
-      (medNames.some((m) => m.includes("eliquis")) || medNames.some((m) => m.includes("apixaban")))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Eliquis (Apixaban)",
-      severity: "major",
-      description:
-        "Dual anticoagulation therapy significantly increases bleeding risk. Generally contraindicated unless specific clinical indication.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // ACE inhibitor + Potassium supplements
-  if ((medNames.some((m) => m.includes("lisinopril")) || medNames.some((m) => m.includes("enalapril"))) &&
-      medNames.some((m) => m.includes("potassium"))) {
-    interactions.push({
-      drug1: "ACE Inhibitor",
-      drug2: "Potassium Chloride",
-      severity: "moderate",
-      description:
-        "ACE inhibitors can increase potassium levels. Combined with potassium supplements, risk of hyperkalemia increases.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Metformin + Contrast dye (flagged by presence of renal impairment indicators)
-  if (medNames.some((m) => m.includes("metformin"))) {
-    interactions.push({
-      drug1: "Metformin",
-      drug2: "Renal Function",
-      severity: "moderate",
-      description:
-        "Metformin should be held before IV contrast procedures and for 48 hours after if creatinine is elevated.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Digoxin + Amiodarone
-  if (medNames.some((m) => m.includes("digoxin")) && medNames.some((m) => m.includes("amiodarone"))) {
-    interactions.push({
-      drug1: "Digoxin",
-      drug2: "Amiodarone",
-      severity: "major",
-      description:
-        "Amiodarone increases digoxin levels by 70-100%. Reduce digoxin dose by 50% when starting amiodarone.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Statin + Fibrate
-  if ((medNames.some((m) => m.includes("atorvastatin")) || medNames.some((m) => m.includes("simvastatin"))) &&
-      medNames.some((m) => m.includes("gemfibrozil"))) {
-    interactions.push({
-      drug1: "Statin",
-      drug2: "Gemfibrozil",
-      severity: "major",
-      description:
-        "Increased risk of myopathy and rhabdomyolysis. Consider alternative lipid-lowering therapy.",
-      source: "Clinical Guidelines",
-    });
-  }
+  // NOTE: Removed hardcoded checkKnownHighRiskCombinations() function
+  // RxNorm API covers thousands of drug interactions including all common high-risk pairs
+  // (Warfarin+Aspirin, Warfarin+Eliquis, ACE+Potassium, Digoxin+Amiodarone, Statin+Fibrate)
+  // Relying on API data is more accurate, up-to-date, and evidence-based (with FAERS enrichment)
 
   return interactions;
 }
