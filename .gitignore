@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+DEMO_SCRIPTS.md
+OPIK_DEMO_CHECKLIST.md
+SLIDE_DECK_OUTLINE.md
+SLIDE_SCRIPTS.md

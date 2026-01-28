@@ -232,68 +232,68 @@ export default function DashboardPage() {
 
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-6">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center">
-                  <Activity className="w-6 h-6 text-white" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h1 className="text-xl font-bold text-gray-900">TransitionIQ</h1>
-                    <ResponsibleAIBadge />
-                  </div>
-                  <p className="text-xs text-gray-500">Discharge Readiness Assessment</p>
-                </div>
+        <div className="max-w-7xl mx-auto px-2 sm:px-4 lg:px-8">
+          {/* Mobile: Stack vertically, Desktop: Single row */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between py-2 sm:py-0 sm:h-16 gap-2 sm:gap-4">
+            {/* Logo - Hidden on mobile to save space */}
+            <div className="hidden sm:flex items-center gap-3 flex-shrink-0">
+              <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center">
+                <Activity className="w-6 h-6 text-white" />
               </div>
-
-              {/* Tab Navigation */}
-              <nav className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
-                <Tooltip content="Clinical discharge readiness assessment" position="bottom">
-                  <button
-                    onClick={() => setActiveTab("dashboard")}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                      activeTab === "dashboard"
-                        ? "bg-white text-gray-900 shadow-sm"
-                        : "text-gray-600 hover:text-gray-900"
-                    }`}
-                  >
-                    <LayoutDashboard className="w-4 h-4" />
-                    Clinical
-                  </button>
-                </Tooltip>
-                <Tooltip content="Patient-friendly recovery guidance" position="bottom">
-                  <button
-                    onClick={() => setActiveTab("patient")}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                      activeTab === "patient"
-                        ? "bg-white text-gray-900 shadow-sm"
-                        : "text-gray-600 hover:text-gray-900"
-                    }`}
-                  >
-                    <Heart className="w-4 h-4" />
-                    Patient View
-                  </button>
-                </Tooltip>
-                <Tooltip content="Test and compare AI models" position="bottom">
-                  <button
-                    onClick={() => setActiveTab("evaluation")}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                      activeTab === "evaluation"
-                        ? "bg-white text-gray-900 shadow-sm"
-                        : "text-gray-600 hover:text-gray-900"
-                    }`}
-                  >
-                    <FlaskConical className="w-4 h-4" />
-                    Evaluation
-                  </button>
-                </Tooltip>
-              </nav>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-xl font-bold text-gray-900">TransitionIQ</h1>
+                  <ResponsibleAIBadge />
+                </div>
+                <p className="text-xs text-gray-500">Discharge Readiness Assessment</p>
+              </div>
             </div>
 
-            {/* Model Selector and Patient Selector */}
-            <div className="flex items-center gap-3">
+            {/* Tab Navigation - Full width on mobile */}
+            <nav className="flex items-center justify-center gap-1 bg-gray-100 rounded-lg p-1 w-full sm:w-auto">
+              <Tooltip content="Clinical discharge readiness assessment" position="bottom">
+                <button
+                  onClick={() => setActiveTab("dashboard")}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors flex-1 sm:flex-none justify-center ${
+                    activeTab === "dashboard"
+                      ? "bg-white text-gray-900 shadow-sm"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  <LayoutDashboard className="w-4 h-4" />
+                  <span className="hidden xs:inline">Clinical</span>
+                </button>
+              </Tooltip>
+              <Tooltip content="Patient-friendly recovery guidance" position="bottom">
+                <button
+                  onClick={() => setActiveTab("patient")}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors flex-1 sm:flex-none justify-center whitespace-nowrap ${
+                    activeTab === "patient"
+                      ? "bg-white text-gray-900 shadow-sm"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  <Heart className="w-4 h-4" />
+                  <span className="text-xs sm:text-sm">Patient View</span>
+                </button>
+              </Tooltip>
+              <Tooltip content="Test and compare AI models" position="bottom">
+                <button
+                  onClick={() => setActiveTab("evaluation")}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors flex-1 sm:flex-none justify-center ${
+                    activeTab === "evaluation"
+                      ? "bg-white text-gray-900 shadow-sm"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  <FlaskConical className="w-4 h-4" />
+                  <span className="hidden xs:inline">Evaluation</span>
+                </button>
+              </Tooltip>
+            </nav>
+
+            {/* Model Selector and Patient Selector - Row on mobile */}
+            <div className="flex items-center justify-center gap-2 sm:gap-3 w-full sm:w-auto">
               {/* Model Selector - always visible */}
               <ModelSelector
                 onModelChange={(modelId) => {
@@ -314,13 +314,13 @@ export default function DashboardPage() {
                   <Tooltip content="Select a demo patient to analyze" position="bottom">
                     <button
                       onClick={() => setShowPatientDropdown(!showPatientDropdown)}
-                      className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                      className="flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                     >
                       <Users className="w-4 h-4 text-gray-600" />
-                      <span className="text-sm font-medium text-gray-700">
+                      <span className="text-sm font-medium text-gray-700 max-w-[100px] sm:max-w-none truncate">
                         {patient ? patient.name : "Select Patient"}
                       </span>
-                      <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showPatientDropdown ? "rotate-180" : ""}`} />
+                      <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform flex-shrink-0 ${showPatientDropdown ? "rotate-180" : ""}`} />
                     </button>
                   </Tooltip>
 
@@ -330,7 +330,7 @@ export default function DashboardPage() {
                         initial={{ opacity: 0, y: -10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -10 }}
-                        className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50"
+                        className="absolute right-0 mt-2 w-[calc(100vw-1rem)] sm:w-80 max-w-80 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50 max-h-[60vh] overflow-y-auto"
                       >
                         <div className="p-2">
                           <p className="text-xs font-medium text-gray-500 px-3 py-2">Demo Patients</p>

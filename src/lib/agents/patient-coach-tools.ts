@@ -3,10 +3,33 @@
  *
  * These tools enable multi-turn reasoning for patient questions about their discharge.
  * Each tool call is traced in Opik for observability.
+ *
+ * Data Sources (in priority order):
+ * 1. Local Knowledge Base - Serverless-compatible, FDB-style clinical data
+ * 2. External APIs - FDA DailyMed, MedlinePlus, MeSH
+ * 3. LLM Fallback - For unknown items not in knowledge base or APIs
  */
 
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
+import { createLLMProvider } from "@/lib/integrations/llm-provider";
+
+// Import knowledge base modules
+import {
+  getDrugMonograph,
+  getPatientDrugInfo,
+  checkDrugInteraction,
+  checkMultipleDrugInteractions,
+  getPatientFriendlyInteraction,
+  getSymptomTriage,
+  assessSymptomUrgency,
+  getMedicalTermDefinition,
+  getPatientFriendlyExplanation,
+} from "@/lib/knowledge-base";
+
+// Import external API clients
+import { getPatientFriendlyDrugInfo as getDailyMedDrugInfo } from "@/lib/integrations/dailymed-client";
+import { getPatientSymptomAssessment } from "@/lib/integrations/medlineplus-client";
 
 export interface PatientCoachToolDefinition {
   name: string;
@@ -129,309 +152,14 @@ export const PATIENT_COACH_TOOLS: PatientCoachToolDefinition[] = [
   },
 ];
 
-/**
- * Medication knowledge base for the lookupMedication tool
- */
-const MEDICATION_INFO: Record<
-  string,
-  {
-    purpose: string;
-    sideEffects: string[];
-    warnings: string[];
-    patientTips: string[];
-  }
-> = {
-  warfarin: {
-    purpose: "This is a blood thinner that helps prevent blood clots.",
-    sideEffects: [
-      "Bruising more easily than usual",
-      "Bleeding that takes longer to stop",
-      "Tiredness",
-    ],
-    warnings: [
-      "⚠️ Avoid vitamin K-rich foods like leafy greens in large amounts",
-      "⚠️ Tell any doctor or dentist that you take this medication",
-      "⚠️ Avoid aspirin and ibuprofen unless your doctor approves",
-    ],
-    patientTips: [
-      "Take it at the same time every day",
-      "Don't skip doses or double up",
-      "Get your blood tests (INR) as scheduled",
-    ],
-  },
-  lisinopril: {
-    purpose: "This medication helps lower your blood pressure and protects your heart.",
-    sideEffects: ["Dry cough (common)", "Dizziness when standing up quickly", "Headache"],
-    warnings: [
-      "⚠️ Get up slowly from sitting or lying down to prevent dizziness",
-      "⚠️ Tell your doctor if you develop swelling of face, lips, or tongue",
-    ],
-    patientTips: [
-      "Drink plenty of water",
-      "Limit salt in your diet",
-      "Don't stop taking this suddenly without talking to your doctor",
-    ],
-  },
-  metformin: {
-    purpose: "This medication helps control your blood sugar levels for diabetes.",
-    sideEffects: ["Upset stomach", "Diarrhea (usually gets better with time)", "Metallic taste"],
-    warnings: [
-      "⚠️ Take with food to reduce stomach upset",
-      "⚠️ Don't drink too much alcohol while taking this",
-    ],
-    patientTips: [
-      "Check your blood sugar as directed",
-      "The stomach side effects usually improve after a few weeks",
-      "Stay hydrated",
-    ],
-  },
-  amlodipine: {
-    purpose: "This medication helps lower your blood pressure by relaxing blood vessels.",
-    sideEffects: ["Swelling in ankles or feet", "Feeling flushed", "Headache"],
-    warnings: ["⚠️ Avoid grapefruit and grapefruit juice", "⚠️ Tell your doctor about ankle swelling"],
-    patientTips: [
-      "Take it at the same time each day",
-      "Elevate your feet if you notice swelling",
-      "Don't stop taking it suddenly",
-    ],
-  },
-  metoprolol: {
-    purpose: "This medication slows your heart rate and lowers blood pressure.",
-    sideEffects: ["Feeling tired", "Cold hands and feet", "Slow heartbeat"],
-    warnings: [
-      "⚠️ Don't stop taking this suddenly - it must be tapered slowly",
-      "⚠️ Tell your doctor if you feel very dizzy or faint",
-    ],
-    patientTips: [
-      "Take with or right after a meal",
-      "Check your pulse regularly if your doctor advises",
-      "Be careful when exercising - your heart rate may not increase as much",
-    ],
-  },
-  aspirin: {
-    purpose: "Low-dose aspirin helps prevent blood clots and protects your heart.",
-    sideEffects: ["Stomach upset", "Heartburn", "Bruising more easily"],
-    warnings: [
-      "⚠️ Take with food to protect your stomach",
-      "⚠️ Watch for signs of bleeding like black stools or blood in urine",
-    ],
-    patientTips: [
-      "Don't chew the coated tablets",
-      "Avoid alcohol which can increase stomach bleeding risk",
-      "Tell any doctor or dentist you take aspirin",
-    ],
-  },
-  furosemide: {
-    purpose: "This is a water pill that helps remove extra fluid from your body.",
-    sideEffects: [
-      "Needing to urinate more often",
-      "Feeling thirsty",
-      "Dizziness",
-      "Muscle cramps",
-    ],
-    warnings: [
-      "⚠️ Take in the morning so you're not up all night going to the bathroom",
-      "⚠️ You may need to eat foods high in potassium like bananas",
-    ],
-    patientTips: [
-      "Weigh yourself daily - report sudden weight gain to your doctor",
-      "Get up slowly to prevent dizziness",
-      "Keep track of how often you're urinating",
-    ],
-  },
-  atorvastatin: {
-    purpose: "This medication helps lower your cholesterol and protects your heart.",
-    sideEffects: ["Muscle aches", "Headache", "Stomach upset"],
-    warnings: [
-      "⚠️ Report unexplained muscle pain or weakness to your doctor right away",
-      "⚠️ Avoid grapefruit and grapefruit juice",
-    ],
-    patientTips: [
-      "Take it at the same time every day (often at bedtime)",
-      "Continue eating a heart-healthy diet",
-      "Get your cholesterol checked as directed",
-    ],
-  },
-  insulin: {
-    purpose: "This helps control your blood sugar when your body doesn't make enough insulin.",
-    sideEffects: ["Low blood sugar (feeling shaky, sweaty, confused)", "Weight gain"],
-    warnings: [
-      "⚠️ Always carry a fast-acting sugar source in case of low blood sugar",
-      "⚠️ Know the signs of low blood sugar: shakiness, sweating, confusion",
-      "⚠️ Store insulin properly (usually in the refrigerator)",
-    ],
-    patientTips: [
-      "Rotate injection sites",
-      "Check your blood sugar as directed",
-      "Don't skip meals when taking insulin",
-    ],
-  },
-  eliquis: {
-    purpose: "This is a blood thinner that helps prevent blood clots and strokes.",
-    sideEffects: ["Bruising more easily", "Minor bleeding", "Nausea"],
-    warnings: [
-      "⚠️ Take exactly as prescribed - twice daily, about 12 hours apart",
-      "⚠️ Don't stop taking without talking to your doctor",
-      "⚠️ Tell all healthcare providers you take this blood thinner",
-    ],
-    patientTips: [
-      "Set reminders to take both doses",
-      "Keep a consistent routine",
-      "If you miss a dose, take it as soon as you remember (same day), then resume your normal schedule",
-    ],
-  },
-};
+// Note: Medication knowledge is now in @/lib/knowledge-base/drug-monographs.ts
+// with fallback to FDA DailyMed API and LLM for unknown medications
 
-/**
- * Symptom urgency guidelines
- */
-const SYMPTOM_URGENCY: Record<
-  string,
-  {
-    urgencyLevel: "emergency" | "call_doctor_today" | "call_doctor_soon" | "monitor";
-    message: string;
-    actions: string[];
-  }
-> = {
-  "chest pain": {
-    urgencyLevel: "emergency",
-    message:
-      "Chest pain can be a sign of a heart attack. This needs immediate attention.",
-    actions: [
-      "🚨 Call 911 immediately",
-      "Chew an aspirin if you're not allergic",
-      "Don't drive yourself to the hospital",
-    ],
-  },
-  "difficulty breathing": {
-    urgencyLevel: "emergency",
-    message: "Trouble breathing is a serious symptom that needs immediate attention.",
-    actions: [
-      "🚨 Call 911 immediately",
-      "Sit upright to help breathing",
-      "Don't lie flat",
-    ],
-  },
-  "shortness of breath": {
-    urgencyLevel: "call_doctor_today",
-    message:
-      "Shortness of breath could indicate your heart or lungs need attention.",
-    actions: [
-      "📞 Call your doctor's office today",
-      "Rest in a comfortable position",
-      "If it gets worse or you feel chest pain, call 911",
-    ],
-  },
-  dizziness: {
-    urgencyLevel: "call_doctor_soon",
-    message:
-      "Dizziness can be a side effect of medications or a sign you need fluids.",
-    actions: [
-      "Sit or lie down until it passes",
-      "Drink water",
-      "Get up slowly from sitting or lying down",
-      "📞 Call your doctor if it continues or happens often",
-    ],
-  },
-  "swelling in legs": {
-    urgencyLevel: "call_doctor_today",
-    message: "Swelling can be a sign of fluid buildup that may need treatment.",
-    actions: [
-      "📞 Call your doctor today",
-      "Elevate your legs when sitting",
-      "Weigh yourself and report any sudden gain (more than 2-3 lbs overnight)",
-    ],
-  },
-  nausea: {
-    urgencyLevel: "monitor",
-    message:
-      "Nausea is often a side effect of medications that may improve over time.",
-    actions: [
-      "Take medications with food if allowed",
-      "Eat small, frequent meals",
-      "Stay hydrated",
-      "📞 Call your doctor if you can't keep food or medications down",
-    ],
-  },
-  headache: {
-    urgencyLevel: "monitor",
-    message: "Headaches can be a side effect of some medications.",
-    actions: [
-      "Rest in a quiet, dark room",
-      "Stay hydrated",
-      "Try acetaminophen (Tylenol) if not restricted",
-      "📞 Call your doctor if severe or not improving",
-    ],
-  },
-  bleeding: {
-    urgencyLevel: "call_doctor_today",
-    message:
-      "If you're on blood thinners, it's important to monitor any bleeding.",
-    actions: [
-      "Apply gentle pressure to minor cuts",
-      "📞 Call your doctor today",
-      "🚨 Call 911 if bleeding is severe or won't stop",
-    ],
-  },
-  fever: {
-    urgencyLevel: "call_doctor_today",
-    message: "Fever after a hospital stay could indicate an infection.",
-    actions: [
-      "Take your temperature",
-      "📞 Call your doctor if temp is over 100.4°F (38°C)",
-      "Rest and stay hydrated",
-    ],
-  },
-  confusion: {
-    urgencyLevel: "call_doctor_today",
-    message:
-      "Confusion can be a sign of medication effects or other issues that need attention.",
-    actions: [
-      "Have someone stay with you",
-      "📞 Call your doctor today",
-      "Check blood sugar if diabetic",
-      "Review all medications with your doctor",
-    ],
-  },
-};
+// Note: Symptom triage data is now in @/lib/knowledge-base/symptom-triage.ts
+// with fallback to MedlinePlus API and LLM for unknown symptoms
 
-/**
- * Medical term explanations
- */
-const MEDICAL_TERMS: Record<string, string> = {
-  hypertension:
-    "This is the medical word for high blood pressure. It means the force of blood pushing against your artery walls is too high.",
-  diabetes:
-    "A condition where your body has trouble controlling blood sugar levels. This can be managed with diet, exercise, and medication.",
-  "heart failure":
-    "This doesn't mean your heart has stopped working. It means your heart isn't pumping as well as it should, and may need help from medications.",
-  atrial_fibrillation:
-    "Sometimes called 'AFib' - this means your heart beats with an irregular rhythm. It can increase risk of blood clots, which is why blood thinners may be prescribed.",
-  inr: "This stands for International Normalized Ratio. It's a blood test that shows how well your blood clots, important if you take blood thinners like Warfarin.",
-  edema: "This is the medical term for swelling, usually in the legs and feet, caused by fluid buildup.",
-  anticoagulant:
-    "This is another word for blood thinner - a medication that helps prevent blood clots.",
-  diuretic:
-    "This is a 'water pill' - a medication that helps your body get rid of extra fluid through urination.",
-  "beta blocker":
-    "A type of medication that slows your heart rate and lowers blood pressure. Examples include metoprolol and atenolol.",
-  "ace inhibitor":
-    "A type of blood pressure medication that relaxes blood vessels. Examples include lisinopril and enalapril.",
-  echocardiogram:
-    "An ultrasound of your heart. It uses sound waves to create a picture of how your heart is pumping.",
-  ejection_fraction:
-    "A measurement of how much blood your heart pumps out with each beat. Normal is usually 55-70%.",
-  creatinine:
-    "A blood test that shows how well your kidneys are working. Higher numbers may mean your kidneys need attention.",
-  hemoglobin_a1c:
-    "A blood test that shows your average blood sugar over the past 2-3 months. It's used to monitor diabetes control.",
-  prognosis:
-    "This is your doctor's prediction about how your condition will progress and what to expect.",
-  chronic: "This means a condition that lasts a long time or keeps coming back. It doesn't mean it can't be managed!",
-  acute: "This means something that comes on suddenly or is severe but usually short-term.",
-  benign: "This means not harmful or cancerous. Good news!",
-  malignant: "This usually refers to cancer that can spread. Your doctor will explain treatment options.",
-};
+// Note: Medical terminology is now in @/lib/knowledge-base/medical-terminology.ts
+// with LLM fallback for unknown terms
 
 /**
  * Execute a patient coach tool
@@ -501,6 +229,10 @@ export async function executePatientCoachTool(
 
 /**
  * Look up medication information
+ * Priority order:
+ * 1. Local knowledge base (FDB-style, fast, always available)
+ * 2. FDA DailyMed API (real drug labels)
+ * 3. LLM fallback (for unknown medications)
  */
 async function executeLookupMedication(
   medicationName: string,
@@ -515,20 +247,21 @@ async function executeLookupMedication(
       normalizedName.includes(m.name.toLowerCase())
   );
 
-  // Look up in our knowledge base
-  let info = MEDICATION_INFO[normalizedName];
+  // STEP 1: Try local knowledge base first (fastest, no network)
+  const kbInfo = getPatientDrugInfo(normalizedName);
+  if (kbInfo) {
+    console.log(`[Patient Coach] Found ${medicationName} in local knowledge base`);
 
-  // Try partial matches
-  if (!info) {
-    for (const [key, value] of Object.entries(MEDICATION_INFO)) {
-      if (normalizedName.includes(key) || key.includes(normalizedName)) {
-        info = value;
-        break;
-      }
-    }
-  }
+    // Also check for drug interactions with patient's other medications
+    const allMeds = [
+      normalizedName,
+      ...patient.medications
+        .filter((m) => m.name.toLowerCase() !== normalizedName)
+        .map((m) => m.name),
+    ];
+    const interactions = checkMultipleDrugInteractions(allMeds);
+    const interactionWarnings = interactions.map((i) => getPatientFriendlyInteraction(i));
 
-  if (info) {
     return {
       toolName: "lookupMedication",
       result: {
@@ -536,13 +269,115 @@ async function executeLookupMedication(
         isPatientMedication: !!patientMed,
         patientDose: patientMed?.dose,
         patientFrequency: patientMed?.frequency,
-        ...info,
+        purpose: kbInfo.purpose,
+        sideEffects: kbInfo.sideEffects,
+        warnings: [
+          ...kbInfo.warnings,
+          ...interactionWarnings.map((iw) => `${iw.severity}: ${iw.message}`),
+        ],
+        patientTips: kbInfo.patientTips,
+        interactions: interactionWarnings.length > 0 ? interactionWarnings : undefined,
+        source: "KNOWLEDGE_BASE",
       },
       success: true,
     };
   }
 
-  // Medication not in our knowledge base - return generic info
+  // STEP 2: Try FDA DailyMed API
+  try {
+    console.log(`[Patient Coach] Trying FDA DailyMed for ${medicationName}`);
+    const fdaInfo = await getDailyMedDrugInfo(medicationName);
+    if (fdaInfo) {
+      return {
+        toolName: "lookupMedication",
+        result: {
+          medicationName,
+          isPatientMedication: !!patientMed,
+          patientDose: patientMed?.dose,
+          patientFrequency: patientMed?.frequency,
+          purpose: fdaInfo.purpose,
+          sideEffects: fdaInfo.sideEffects.slice(0, 5), // Limit to top 5
+          warnings: fdaInfo.warnings.slice(0, 3).map((w) => `⚠️ ${w}`),
+          patientTips: fdaInfo.patientTips,
+          source: "FDA_DAILYMED",
+        },
+        success: true,
+      };
+    }
+  } catch (error) {
+    console.error("[Patient Coach] FDA DailyMed lookup failed:", error);
+  }
+
+  // STEP 3: Use LLM as final fallback
+  try {
+    console.log(`[Patient Coach] Using LLM fallback for ${medicationName}`);
+    const provider = createLLMProvider();
+    const prompt = `You are a helpful pharmacist assistant. Provide patient-friendly information about the medication "${medicationName}".
+
+Respond ONLY with a valid JSON object (no other text):
+{
+  "purpose": "A simple 1-sentence explanation of what this medication does",
+  "sideEffects": ["Side effect 1", "Side effect 2", "Side effect 3"],
+  "warnings": ["Warning 1", "Warning 2"],
+  "patientTips": ["Tip 1", "Tip 2", "Tip 3"]
+}
+
+Use simple, patient-friendly language. If this is not a real medication, respond with:
+{"error": "unknown medication"}`;
+
+    const response = await provider.generate(prompt, {
+      spanName: "medication-lookup-llm",
+      metadata: { medication: medicationName, fallback: true },
+    });
+
+    const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      if (parsed.error) {
+        return {
+          toolName: "lookupMedication",
+          result: {
+            medicationName,
+            isPatientMedication: !!patientMed,
+            patientDose: patientMed?.dose,
+            patientFrequency: patientMed?.frequency,
+            purpose: "I don't have specific information about this medication. Please ask your pharmacist or doctor for details.",
+            sideEffects: ["Ask your pharmacist about potential side effects"],
+            warnings: ["⚠️ Always take medications exactly as prescribed"],
+            patientTips: [
+              "Read the information that came with your prescription",
+              "Ask your pharmacist if you have questions",
+            ],
+            source: "FALLBACK",
+          },
+          success: true,
+        };
+      }
+
+      return {
+        toolName: "lookupMedication",
+        result: {
+          medicationName,
+          isPatientMedication: !!patientMed,
+          patientDose: patientMed?.dose,
+          patientFrequency: patientMed?.frequency,
+          purpose: parsed.purpose || "This medication was prescribed by your doctor.",
+          sideEffects: parsed.sideEffects || ["Ask your pharmacist about side effects"],
+          warnings: (parsed.warnings || ["Take exactly as prescribed"]).map((w: string) =>
+            w.startsWith("⚠️") ? w : `⚠️ ${w}`
+          ),
+          patientTips: parsed.patientTips || ["Follow your doctor's instructions"],
+          source: "LLM_GENERATED",
+        },
+        success: true,
+      };
+    }
+  } catch (error) {
+    console.error("[Patient Coach] LLM medication lookup failed:", error);
+  }
+
+  // Final fallback if everything fails
   return {
     toolName: "lookupMedication",
     result: {
@@ -558,6 +393,7 @@ async function executeLookupMedication(
         "Ask your pharmacist if you have questions",
         "Keep a list of all your medications to show your doctors",
       ],
+      source: "FALLBACK",
     },
     success: true,
   };
@@ -565,6 +401,10 @@ async function executeLookupMedication(
 
 /**
  * Check symptom urgency
+ * Priority order:
+ * 1. Local knowledge base (Schmitt-Thompson style triage protocols)
+ * 2. MedlinePlus API (health topic information)
+ * 3. LLM fallback (for unknown symptoms)
  */
 async function executeCheckSymptom(
   symptom: string,
@@ -574,26 +414,24 @@ async function executeCheckSymptom(
 ): Promise<ToolCallResult> {
   const normalizedSymptom = symptom.toLowerCase().trim();
 
-  // Check for exact or partial matches in urgency guidelines
-  let urgencyInfo = SYMPTOM_URGENCY[normalizedSymptom];
-
-  if (!urgencyInfo) {
-    for (const [key, value] of Object.entries(SYMPTOM_URGENCY)) {
-      if (normalizedSymptom.includes(key) || key.includes(normalizedSymptom)) {
-        urgencyInfo = value;
-        break;
-      }
-    }
-  }
-
   // Check if symptom could be related to patient's medications
   const possibleMedicationCause = patient.medications.find((m) => {
     const medName = m.name.toLowerCase();
-    // Check for common medication-symptom relationships
+    // Check medication monographs for this symptom as a side effect
+    const monograph = getDrugMonograph(medName);
+    if (monograph) {
+      const sideEffects = monograph.adverseReactions
+        .map((ar) => ar.reaction.toLowerCase())
+        .join(" ");
+      if (sideEffects.includes(normalizedSymptom.split(" ")[0])) {
+        return true;
+      }
+    }
+    // Fallback to common medication-symptom relationships
     if (normalizedSymptom.includes("dizz") && ["lisinopril", "metoprolol", "amlodipine", "furosemide"].some((d) => medName.includes(d))) {
       return true;
     }
-    if (normalizedSymptom.includes("bleed") && ["warfarin", "aspirin", "eliquis", "plavix"].some((d) => medName.includes(d))) {
+    if (normalizedSymptom.includes("bleed") && ["warfarin", "aspirin", "eliquis", "apixaban", "plavix"].some((d) => medName.includes(d))) {
       return true;
     }
     if (normalizedSymptom.includes("nausea") && ["metformin"].some((d) => medName.includes(d))) {
@@ -602,22 +440,43 @@ async function executeCheckSymptom(
     return false;
   });
 
-  // Elevate urgency for severe symptoms
-  if (severity === "severe" && urgencyInfo) {
-    if (urgencyInfo.urgencyLevel === "monitor") {
-      urgencyInfo = { ...urgencyInfo, urgencyLevel: "call_doctor_today" };
-    } else if (urgencyInfo.urgencyLevel === "call_doctor_soon") {
-      urgencyInfo = { ...urgencyInfo, urgencyLevel: "call_doctor_today" };
+  // STEP 1: Try local knowledge base first (Schmitt-Thompson style triage)
+  const patientMeds = patient.medications.map((m) => m.name);
+  const patientConditions = patient.diagnoses.map((d) => d.display);
+  const kbAssessment = assessSymptomUrgency(
+    normalizedSymptom,
+    severity as "mild" | "moderate" | "severe",
+    {
+      medications: patientMeds,
+      conditions: patientConditions,
     }
-  }
+  );
 
-  if (urgencyInfo) {
+  // The knowledge base always returns a result (with defaults for unknown symptoms)
+  console.log(`[Patient Coach] Symptom assessment for ${symptom} from knowledge base`);
+
+  // Map triage level to urgency level for UI consistency
+  const urgencyMap: Record<string, "emergency" | "call_doctor_today" | "call_doctor_soon" | "monitor"> = {
+    emergency: "emergency",
+    urgent: "call_doctor_today",
+    same_day: "call_doctor_today",
+    routine: "call_doctor_soon",
+    self_care: "monitor",
+  };
+
+  // Check if we got a specific symptom from the knowledge base (not default)
+  const protocol = getSymptomTriage(normalizedSymptom);
+  if (protocol) {
     return {
       toolName: "checkSymptom",
       result: {
         symptom,
         severity,
-        ...urgencyInfo,
+        urgencyLevel: urgencyMap[kbAssessment.urgencyLevel] || "call_doctor_soon",
+        message: kbAssessment.message,
+        actions: kbAssessment.actions,
+        seekCareIf: kbAssessment.seekCareIf,
+        selfCare: kbAssessment.selfCare,
         possibleMedicationRelated: possibleMedicationCause?.name || null,
         relatedRiskFactors:
           analysis?.riskFactors
@@ -627,12 +486,106 @@ async function executeCheckSymptom(
                 normalizedSymptom.includes(rf.title.toLowerCase())
             )
             .map((rf) => rf.title) || [],
+        source: "KNOWLEDGE_BASE",
       },
       success: true,
     };
   }
 
-  // Unknown symptom - default guidance
+  // STEP 2: Try MedlinePlus API
+  try {
+    console.log(`[Patient Coach] Trying MedlinePlus for ${symptom}`);
+    const medlinePlusInfo = await getPatientSymptomAssessment(symptom, severity as "mild" | "moderate" | "severe");
+    if (medlinePlusInfo) {
+      return {
+        toolName: "checkSymptom",
+        result: {
+          symptom,
+          severity,
+          urgencyLevel: medlinePlusInfo.urgencyLevel,
+          message: medlinePlusInfo.message,
+          actions: medlinePlusInfo.actions,
+          medicalInfo: medlinePlusInfo.medicalInfo,
+          possibleMedicationRelated: possibleMedicationCause?.name || null,
+          relatedRiskFactors:
+            analysis?.riskFactors
+              .filter(
+                (rf) =>
+                  rf.description.toLowerCase().includes(normalizedSymptom) ||
+                  normalizedSymptom.includes(rf.title.toLowerCase())
+              )
+              .map((rf) => rf.title) || [],
+          source: "MEDLINEPLUS",
+        },
+        success: true,
+      };
+    }
+  } catch (error) {
+    console.error("[Patient Coach] MedlinePlus lookup failed:", error);
+  }
+
+  // STEP 3: Use LLM as final fallback
+  try {
+    console.log(`[Patient Coach] Using LLM fallback for ${symptom}`);
+    const provider = createLLMProvider();
+    const medicationContext = patient.medications.length > 0
+      ? `The patient is taking: ${patient.medications.map(m => m.name).join(", ")}`
+      : "No medications documented";
+
+    const prompt = `A patient is asking about the symptom: "${symptom}" (severity: ${severity})
+
+${medicationContext}
+
+Provide guidance in JSON format:
+{
+  "urgencyLevel": "emergency" | "call_doctor_today" | "call_doctor_soon" | "monitor",
+  "message": "Brief explanation of this symptom and when to be concerned",
+  "actions": ["Action 1", "Action 2", "Action 3"],
+  "selfCare": ["Self care tip 1", "Self care tip 2"],
+  "possibleMedicationRelated": true | false
+}
+
+Rules:
+- For ANY chest pain, difficulty breathing, or signs of stroke: urgencyLevel = "emergency"
+- For severe pain, high fever, or bleeding: urgencyLevel = "call_doctor_today"
+- Always include appropriate action for emergency situations
+- Use patient-friendly language
+- Consider if the symptom could be a medication side effect
+
+Respond ONLY with the JSON object.`;
+
+    const response = await provider.generate(prompt, {
+      spanName: "symptom-check-llm",
+      metadata: { symptom, severity, fallback: true },
+    });
+
+    const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return {
+        toolName: "checkSymptom",
+        result: {
+          symptom,
+          severity,
+          urgencyLevel: parsed.urgencyLevel || (severity === "severe" ? "call_doctor_today" : "monitor"),
+          message: parsed.message || "Here's guidance for your symptom.",
+          actions: parsed.actions || [
+            "Monitor the symptom",
+            "📞 Call your doctor if it continues or worsens",
+            "🚨 Call 911 for any emergency",
+          ],
+          selfCare: parsed.selfCare,
+          possibleMedicationRelated: parsed.possibleMedicationRelated ? possibleMedicationCause?.name : null,
+          source: "LLM_GENERATED",
+        },
+        success: true,
+      };
+    }
+  } catch (error) {
+    console.error("[Patient Coach] LLM symptom check failed:", error);
+  }
+
+  // Final fallback if everything fails
   return {
     toolName: "checkSymptom",
     result: {
@@ -648,7 +601,8 @@ async function executeCheckSymptom(
           : "📞 Mention this symptom at your next appointment or call if it gets worse",
         "🚨 If you feel like something is seriously wrong, call 911 or go to the ER",
       ],
-      possibleMedicationRelated: null,
+      possibleMedicationRelated: possibleMedicationCause?.name || null,
+      source: "FALLBACK",
     },
     success: true,
   };
@@ -656,43 +610,72 @@ async function executeCheckSymptom(
 
 /**
  * Explain a medical term
+ * Priority order:
+ * 1. Local knowledge base (MeSH-style medical terminology)
+ * 2. LLM fallback (for unknown terms)
  */
 async function executeExplainMedicalTerm(term: string): Promise<ToolCallResult> {
-  const normalizedTerm = term.toLowerCase().trim().replace(/[^a-z0-9]/g, "_");
+  const normalizedTerm = term.toLowerCase().trim();
 
-  let explanation = MEDICAL_TERMS[normalizedTerm];
+  // STEP 1: Try local knowledge base first
+  const kbExplanation = getPatientFriendlyExplanation(normalizedTerm);
+  if (kbExplanation) {
+    console.log(`[Patient Coach] Found ${term} in local knowledge base`);
 
-  // Try partial matches
-  if (!explanation) {
-    for (const [key, value] of Object.entries(MEDICAL_TERMS)) {
-      if (
-        normalizedTerm.includes(key.replace(/_/g, "")) ||
-        key.replace(/_/g, "").includes(normalizedTerm.replace(/_/g, ""))
-      ) {
-        explanation = value;
-        break;
-      }
-    }
-  }
+    // Also get the full term definition for additional context
+    const termDef = getMedicalTermDefinition(normalizedTerm);
 
-  if (explanation) {
     return {
       toolName: "explainMedicalTerm",
       result: {
         term,
-        explanation,
+        explanation: kbExplanation,
+        category: termDef?.category,
+        relatedTerms: termDef?.relatedTerms,
+        source: "KNOWLEDGE_BASE",
       },
       success: true,
     };
   }
 
-  // Term not found
+  // STEP 2: Use LLM as fallback
+  try {
+    console.log(`[Patient Coach] Using LLM fallback for medical term: ${term}`);
+    const provider = createLLMProvider();
+    const prompt = `Explain the medical term "${term}" in simple, everyday language that a patient without medical training would understand.
+
+Keep your explanation to 2-3 sentences maximum. Don't use other medical jargon in your explanation.
+
+If this is not a medical term or you're not sure what it means, say "I'm not sure about this term - please ask your nurse or doctor to explain it."
+
+Respond with ONLY the explanation, no other text.`;
+
+    const response = await provider.generate(prompt, {
+      spanName: "medical-term-llm",
+      metadata: { term, fallback: true },
+    });
+
+    return {
+      toolName: "explainMedicalTerm",
+      result: {
+        term,
+        explanation: response.content.trim(),
+        source: "LLM_GENERATED",
+      },
+      success: true,
+    };
+  } catch (error) {
+    console.error("[Patient Coach] LLM term explanation failed:", error);
+  }
+
+  // Final fallback if LLM fails
   return {
     toolName: "explainMedicalTerm",
     result: {
       term,
       explanation:
-        "I don't have a simple explanation for this term in my knowledge base. Please ask your nurse or doctor to explain it in simple words - they're happy to help!",
+        "I don't have a simple explanation for this term. Please ask your nurse or doctor to explain it in simple words - they're happy to help!",
+      source: "FALLBACK",
     },
     success: true,
   };

@@ -354,15 +354,38 @@ function detectRequiredTool(message: string): { name: string; arguments: Record<
   // Medication keywords - use lookupMedication
   const medicationKeywords = [
     "medication", "medicine", "pill", "drug", "dose", "prescription",
-    "warfarin", "aspirin", "lisinopril", "metformin", "what does", "side effect"
+    "warfarin", "aspirin", "lisinopril", "metformin", "what does", "side effect",
+    "take", "taking"
   ];
   for (const keyword of medicationKeywords) {
     if (lowerMsg.includes(keyword)) {
-      // Try to extract medication name
-      const medMatch = lowerMsg.match(/(?:what (?:is|does)|about|taking)\s+(\w+)/);
+      // Try to extract medication name - improved to capture multi-word medication names
+      // Patterns to try in order of specificity
+      const patterns = [
+        // "what is/does [medication name]" - capture up to 3 words
+        /(?:what (?:is|does)|tell me about|about)\s+([a-z]+(?:\s+[a-z]+){0,2}?)(?:\s*\?|$|\s+(?:do|for|used|help|work))/i,
+        // "[medication] medication/medicine/pill"
+        /([a-z]+(?:\s+[a-z]+)?)\s+(?:medication|medicine|pill|drug)/i,
+        // "taking [medication]"
+        /taking\s+([a-z]+(?:\s+[a-z]+)?)/i,
+        // "my [medication]"
+        /my\s+([a-z]+(?:\s+[a-z]+)?)\s+(?:medication|medicine|pill|dose)/i,
+        // Just capture any known medication names directly
+        /(warfarin|coumadin|aspirin|lisinopril|metformin|glucophage|amlodipine|norvasc|metoprolol|lopressor|furosemide|lasix|atorvastatin|lipitor|eliquis|apixaban|insulin|omeprazole|prilosec|pantoprazole|protonix|gabapentin|neurontin|hydrochlorothiazide|hctz|losartan|cozaar|levothyroxine|synthroid|alendronate|fosamax|calcium\s*carbonate|tums|carvedilol|coreg|clopidogrel|plavix|digoxin|lanoxin)/i,
+      ];
+
+      let medicationName = "medication";
+      for (const pattern of patterns) {
+        const match = lowerMsg.match(pattern);
+        if (match && match[1]) {
+          medicationName = match[1].trim();
+          break;
+        }
+      }
+
       return {
         name: "lookupMedication",
-        arguments: { medicationName: medMatch?.[1] || "medication" }
+        arguments: { medicationName }
       };
     }
   }

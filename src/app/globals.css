@@ -10,6 +10,8 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  /* Custom breakpoint for extra-small screens */
+  --breakpoint-xs: 480px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -19,8 +21,36 @@
   }
 }
 
+html {
+  /* Prevent horizontal overflow on mobile */
+  overflow-x: hidden;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  /* Ensure body doesn't overflow */
+  overflow-x: hidden;
+  min-width: 320px;
+}
+
+/* Custom utility for xs breakpoint */
+@media (min-width: 480px) {
+  .xs\:inline {
+    display: inline !important;
+  }
+  .xs\:hidden {
+    display: none !important;
+  }
+  .xs\:flex {
+    display: flex !important;
+  }
+}
+
+/* Ensure dropdowns don't overflow viewport */
+.dropdown-constrained {
+  max-width: calc(100vw - 1rem);
+  max-height: 60vh;
+  overflow-y: auto;
 }
