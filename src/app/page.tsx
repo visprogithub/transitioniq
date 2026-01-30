@@ -663,7 +663,7 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Right Column - Risk Factors */}
-                <div className="bg-white rounded-xl shadow-sm p-6">
+                <div className="bg-white rounded-xl shadow-sm p-6 self-start">
                   <h3 className="text-lg font-semibold text-gray-900 mb-4">Risk Factors</h3>
 
                   {!analysis && !isAnalyzing && (
@@ -681,7 +681,7 @@ export default function DashboardPage() {
                   )}
 
                   {analysis && (
-                    <div className="space-y-3 max-h-[500px] overflow-y-auto">
+                    <div className="space-y-3 max-h-[800px] overflow-y-auto">
                       {analysis.riskFactors.length === 0 ? (
                         <div className="text-center py-8">
                           <CheckCircle className="w-12 h-12 text-emerald-500 mx-auto mb-2" />

@@ -278,6 +278,13 @@ Respond in this exact JSON format:
   "recommendations": ["<recommendation 1>", "<recommendation 2>", ...]
 }
 
+IMPORTANT SOURCE LABELING RULES:
+- Drug interactions from FDA/RxNorm data → "FDA"
+- Lab abnormalities related to medication monitoring (e.g., INR for warfarin, drug levels, creatinine/renal function affecting drug dosing) → "FDA"
+- General lab abnormalities not tied to medications → "FHIR"
+- Care gaps from clinical guidelines → "Guidelines"
+- Cost/affordability barriers → "CMS"
+
 Be conservative - if there are major drug interactions or unmet Grade A guidelines, the score should reflect significant risk.`;
 
 /**
