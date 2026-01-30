@@ -810,13 +810,33 @@ export async function logPromptUsage(
   input: Record<string, unknown>,
   output: Record<string, unknown>,
   latencyMs: number,
-  modelId?: string
+  modelId?: string,
+  tokenUsage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  },
+  estimatedCost?: number
 ): Promise<void> {
   const opik = getOpikClient();
   if (!opik) return;
 
   // Get actual model ID being used
   const activeModel = modelId || (input.model_id as string) || "unknown";
+
+  // Map model to Opik provider string
+  const providerMap: Record<string, string> = {
+    gemini: "google_ai",
+    openai: "openai",
+    anthropic: "anthropic",
+    huggingface: "huggingface",
+  };
+  const provider = Object.entries(providerMap).find(([key]) =>
+    activeModel.toLowerCase().startsWith(key)
+  )?.[1] || "unknown";
+
+  // Debug: log token usage being sent to Opik
+  console.log(`[Opik] logPromptUsage tokenUsage:`, JSON.stringify(tokenUsage), `cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
 
   try {
     const trace = opik.trace({
@@ -842,10 +862,20 @@ export async function logPromptUsage(
       },
     });
 
+    // Create LLM span with token usage — this is what Opik uses for token/cost charts
     const span = trace.span({
       name: "llm-generation",
+      type: "llm",
       input: { prompt_length: JSON.stringify(input).length },
       output: { response_length: JSON.stringify(output).length },
+      usage: tokenUsage ? {
+        promptTokens: tokenUsage.promptTokens,
+        completionTokens: tokenUsage.completionTokens,
+        totalTokens: tokenUsage.totalTokens,
+      } : undefined,
+      model: activeModel,
+      provider,
+      totalEstimatedCost: estimatedCost,
       metadata: {
         model: activeModel,
         latency_ms: latencyMs,

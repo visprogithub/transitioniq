@@ -62,7 +62,7 @@ export function isModelLimitError(error: unknown): error is RateLimitError {
 }
 
 // Default model configs
-// Includes Gemini 2.0 Flash, HuggingFace, OpenAI GPT-4o Mini, and Anthropic
+// Includes Gemini 2.5 Flash, HuggingFace Qwen3, and OpenAI GPT-4o Mini
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
   // === GEMINI MODELS (requires GEMINI_API_KEY) ===
   // Works with Google AI Studio free trial ($300 credits)
@@ -109,23 +109,6 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
     temperature: 0.7,
     maxTokens: 4096,
   },
-
-  // === ANTHROPIC MODELS (requires ANTHROPIC_API_KEY) ===
-  // Uses cheapest model by default (claude-3-haiku)
-  "claude-3-haiku": {
-    provider: "anthropic",
-    modelId: "claude-3-haiku-20240307",
-    apiKey: process.env.ANTHROPIC_API_KEY || "",
-    temperature: 0.7,
-    maxTokens: 4096,
-  },
-  "claude-3-sonnet": {
-    provider: "anthropic",
-    modelId: "claude-3-sonnet-20240229",
-    apiKey: process.env.ANTHROPIC_API_KEY || "",
-    temperature: 0.7,
-    maxTokens: 4096,
-  },
 };
 
 // Active model storage using globalThis to persist across Next.js module reloads
@@ -135,13 +118,12 @@ declare global {
   var __transitioniq_active_model: string | undefined;
 }
 
-// Default model priority: HuggingFace > OpenAI > Anthropic > Gemini
+// Default model priority: HuggingFace > OpenAI > Gemini
 // HuggingFace first to conserve paid API credits during testing/demos
 function getDefaultModelId(): string {
   return process.env.LLM_MODEL ||
     (process.env.HF_API_KEY ? "hf-qwen3-8b" :
      process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
-     process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" :
      process.env.GEMINI_API_KEY ? "gemini-2.5-flash-lite" : "hf-qwen3-8b");
 }
 

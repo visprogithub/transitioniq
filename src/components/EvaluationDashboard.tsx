@@ -70,10 +70,8 @@ interface ModelsInfo {
   testPatients: string[];
   apiKeyStatus: {
     gemini: boolean;
-    groq: boolean;
     huggingface: boolean;
     openai: boolean;
-    anthropic: boolean;
   };
 }
 
@@ -153,7 +151,13 @@ export function EvaluationDashboard() {
       if (!response.ok) throw new Error("Failed to load models info");
       const data = await response.json();
       setModelsInfo(data);
-      setSelectedModels(data.availableModels);
+      // Default to just openai-gpt-4o-mini if available, otherwise first available model
+      const defaultModel = data.availableModels.includes("openai-gpt-4o-mini")
+        ? ["openai-gpt-4o-mini"]
+        : data.availableModels.length > 0
+          ? [data.availableModels[0]]
+          : [];
+      setSelectedModels(defaultModel);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load models");
     } finally {
@@ -167,6 +171,9 @@ export function EvaluationDashboard() {
     setError(null);
     setEvalResults(null);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120_000); // 2 min timeout
+
     try {
       const response = await fetch("/api/evaluate/models", {
         method: "POST",
@@ -175,7 +182,9 @@ export function EvaluationDashboard() {
           models: selectedModels.length > 0 ? selectedModels : undefined,
           experimentName: experimentName || undefined,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorData = await response.json();
@@ -185,7 +194,12 @@ export function EvaluationDashboard() {
       const data = await response.json();
       setEvalResults(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Evaluation failed");
+      clearTimeout(timeoutId);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setError("Evaluation timed out after 2 minutes. Try selecting fewer models.");
+      } else {
+        setError(err instanceof Error ? err.message : "Evaluation failed");
+      }
     } finally {
       setIsRunningEval(false);
     }
@@ -346,14 +360,10 @@ export function EvaluationDashboard() {
     switch (provider) {
       case "gemini":
         return { bg: "bg-blue-100", text: "text-blue-700", label: "Gemini" };
-      case "groq":
-        return { bg: "bg-orange-100", text: "text-orange-700", label: "Groq" };
       case "huggingface":
         return { bg: "bg-yellow-100", text: "text-yellow-700", label: "HF" };
       case "openai":
         return { bg: "bg-green-100", text: "text-green-700", label: "OpenAI" };
-      case "anthropic":
-        return { bg: "bg-purple-100", text: "text-purple-700", label: "Claude" };
       default:
         return { bg: "bg-gray-100", text: "text-gray-700", label: provider };
     }
@@ -503,7 +513,7 @@ export function EvaluationDashboard() {
               </div>
               {modelsInfo.availableModels.length === 0 && (
                 <p className="text-sm text-amber-600 mt-2">
-                  No API keys configured. Add at least one of: GEMINI_API_KEY, GROQ_API_KEY, HF_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY
+                  No API keys configured. Add at least one of: OPENAI_API_KEY, GEMINI_API_KEY, or HF_API_KEY
                 </p>
               )}
             </div>

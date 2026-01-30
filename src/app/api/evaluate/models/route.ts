@@ -61,10 +61,8 @@ export async function GET() {
     expectedOutcomes: EXPECTED_OUTCOMES,
     apiKeyStatus: {
       gemini: !!process.env.GEMINI_API_KEY,
-      groq: !!process.env.GROQ_API_KEY,
       huggingface: !!process.env.HF_API_KEY,
       openai: !!process.env.OPENAI_API_KEY,
-      anthropic: !!process.env.ANTHROPIC_API_KEY,
     },
   });
 }
@@ -82,8 +80,8 @@ export async function POST(request: NextRequest) {
   if (availableModels.length === 0) {
     return NextResponse.json(
       {
-        error: "No LLM API keys configured. Set at least one of: GEMINI_API_KEY, GROQ_API_KEY, or HF_API_KEY",
-        hint: "GROQ_API_KEY is recommended - free tier at https://console.groq.com/",
+        error: "No LLM API keys configured. Set at least one of: OPENAI_API_KEY, GEMINI_API_KEY, or HF_API_KEY",
+        hint: "OPENAI_API_KEY is recommended for best results",
       },
       { status: 500 }
     );
@@ -130,7 +128,7 @@ export async function POST(request: NextRequest) {
     } | null;
   }> = [];
 
-  // Run evaluation for each model and patient combination
+  // Run evaluation for each model, with patients in parallel per model
   for (const modelId of modelsToEval) {
     // Set the active model
     try {
@@ -141,119 +139,128 @@ export async function POST(request: NextRequest) {
       continue;
     }
 
-    for (const patientId of patientsToEval) {
-      const startTime = Date.now();
+    // Run all patients in parallel for this model
+    const patientResults = await Promise.all(
+      patientsToEval.map(async (patientId: string) => {
+        const startTime = Date.now();
 
-      // Create span for this evaluation
-      const evalSpan = experimentTrace?.span({
-        name: `eval-${modelId}-${patientId}`,
-        input: {
-          model: modelId,
-          patient_id: patientId,
-          expected: EXPECTED_OUTCOMES[patientId],
-        },
-        metadata: {
-          model_id: modelId,
-          patient_id: patientId,
-        },
-      });
-
-      try {
-        // Get patient data
-        const patient = getPatient(patientId);
-        if (!patient) {
-          throw new Error(`Patient ${patientId} not found`);
-        }
-
-        // Get supporting data
-        const [interactions, careGaps] = await Promise.all([
-          checkDrugInteractions(patient.medications).catch(() => []),
-          Promise.resolve(evaluateCareGaps(patient)),
-        ]);
-
-        const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
-        const costEstimates = patient.medications.map((m) => ({
-          medication: m.name,
-          monthlyOOP: 10,
-          covered: true,
-        }));
-
-        // Run analysis with current model
-        const analysis = await analyzeDischargeReadiness(
-          patient,
-          interactions,
-          unmetCareGaps.map((g) => ({
-            guideline: g.guideline,
-            recommendation: g.recommendation,
-            grade: g.grade,
-            status: g.status,
-          })),
-          costEstimates
-        );
-
-        const latencyMs = Date.now() - startTime;
-
-        // Calculate scores
-        const expected = EXPECTED_OUTCOMES[patientId];
-        const scoreInRange = analysis.score >= expected.scoreRange[0] && analysis.score <= expected.scoreRange[1];
-        const statusMatch = analysis.status === expected.status;
-        const scoreAccuracy = scoreInRange ? 1.0 : Math.max(0, 1 - Math.abs(analysis.score - (expected.scoreRange[0] + expected.scoreRange[1]) / 2) / 50);
-        const overall = (scoreAccuracy * 0.5) + (statusMatch ? 0.5 : 0);
-
-        // Update span with results
-        evalSpan?.update({
-          output: {
-            score: analysis.score,
-            status: analysis.status,
-            risk_factor_count: analysis.riskFactors.length,
-            recommendations: analysis.recommendations,
+        // Create span for this evaluation
+        const evalSpan = experimentTrace?.span({
+          name: `eval-${modelId}-${patientId}`,
+          input: {
+            model: modelId,
+            patient_id: patientId,
+            expected: EXPECTED_OUTCOMES[patientId],
           },
           metadata: {
-            latency_ms: latencyMs,
-            score_accuracy: scoreAccuracy,
-            status_match: statusMatch,
-            overall_score: overall,
-            passed: overall >= 0.7,
+            model_id: modelId,
+            patient_id: patientId,
           },
         });
-        evalSpan?.end();
 
-        results.push({
-          model: modelId,
-          patient: patientId,
-          analysis,
-          latencyMs,
-          scores: {
-            scoreAccuracy,
-            statusMatch,
-            overall,
-          },
-        });
-      } catch (error) {
-        const latencyMs = Date.now() - startTime;
+        try {
+          // Get patient data
+          const patient = getPatient(patientId);
+          if (!patient) {
+            throw new Error(`Patient ${patientId} not found`);
+          }
 
-        evalSpan?.update({
-          output: {
+          // Get supporting data
+          const [interactions, careGaps] = await Promise.all([
+            checkDrugInteractions(patient.medications).catch(() => []),
+            Promise.resolve(evaluateCareGaps(patient)),
+          ]);
+
+          const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
+          const costEstimates = patient.medications.map((m) => ({
+            medication: m.name,
+            monthlyOOP: 10,
+            covered: true,
+          }));
+
+          // Run analysis with current model
+          const analysis = await analyzeDischargeReadiness(
+            patient,
+            interactions,
+            unmetCareGaps.map((g) => ({
+              guideline: g.guideline,
+              recommendation: g.recommendation,
+              grade: g.grade,
+              status: g.status,
+            })),
+            costEstimates
+          );
+
+          const latencyMs = Date.now() - startTime;
+
+          // Calculate scores
+          const expected = EXPECTED_OUTCOMES[patientId];
+          const scoreInRange = analysis.score >= expected.scoreRange[0] && analysis.score <= expected.scoreRange[1];
+          const statusMatch = analysis.status === expected.status;
+          const scoreAccuracy = scoreInRange ? 1.0 : Math.max(0, 1 - Math.abs(analysis.score - (expected.scoreRange[0] + expected.scoreRange[1]) / 2) / 50);
+          const overall = (scoreAccuracy * 0.5) + (statusMatch ? 0.5 : 0);
+
+          // Update span with results
+          evalSpan?.update({
+            output: {
+              score: analysis.score,
+              status: analysis.status,
+              risk_factor_count: analysis.riskFactors.length,
+              recommendations: analysis.recommendations,
+            },
+            metadata: {
+              latency_ms: latencyMs,
+              score_accuracy: scoreAccuracy,
+              status_match: statusMatch,
+              overall_score: overall,
+              passed: overall >= 0.7,
+            },
+          });
+          evalSpan?.end();
+
+          return {
+            model: modelId,
+            patient: patientId,
+            analysis,
+            latencyMs,
+            scores: {
+              scoreAccuracy,
+              statusMatch,
+              overall,
+            },
+          };
+        } catch (error) {
+          const latencyMs = Date.now() - startTime;
+
+          evalSpan?.update({
+            output: {
+              error: error instanceof Error ? error.message : "Unknown error",
+            },
+            metadata: {
+              success: false,
+              error: true,
+              latency_ms: latencyMs,
+            },
+          });
+          evalSpan?.end();
+
+          return {
+            model: modelId,
+            patient: patientId,
+            analysis: null as DischargeAnalysis | null,
             error: error instanceof Error ? error.message : "Unknown error",
-          },
-          metadata: {
-            success: false,
-            error: true,
-            latency_ms: latencyMs,
-          },
-        });
-        evalSpan?.end();
+            latencyMs,
+            scores: null as {
+              scoreAccuracy: number;
+              statusMatch: boolean;
+              overall: number;
+            } | null,
+          };
+        }
+      })
+    );
 
-        results.push({
-          model: modelId,
-          patient: patientId,
-          analysis: null,
-          error: error instanceof Error ? error.message : "Unknown error",
-          latencyMs,
-          scores: null,
-        });
-      }
-    }
+    results.push(...patientResults);
   }
 
   // Calculate summary statistics per model
@@ -295,9 +302,16 @@ export async function POST(request: NextRequest) {
   });
   experimentTrace?.end();
 
-  // Flush Opik data
+  // Flush Opik data with timeout to prevent hanging
   if (opik) {
-    await opik.flush();
+    try {
+      await Promise.race([
+        opik.flush(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Opik flush timeout")), 5000)),
+      ]);
+    } catch (e) {
+      console.error("[Eval] Opik flush failed (non-fatal):", e instanceof Error ? e.message : e);
+    }
   }
 
   return NextResponse.json({

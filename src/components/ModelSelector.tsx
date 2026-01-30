@@ -20,10 +20,8 @@ interface ModelSelectorProps {
 // Provider styling
 const PROVIDER_STYLES: Record<string, { bg: string; text: string; label: string }> = {
   gemini: { bg: "bg-blue-100", text: "text-blue-700", label: "Gemini" },
-  groq: { bg: "bg-orange-100", text: "text-orange-700", label: "Groq" },
   huggingface: { bg: "bg-yellow-100", text: "text-yellow-700", label: "HF" },
   openai: { bg: "bg-green-100", text: "text-green-700", label: "OpenAI" },
-  anthropic: { bg: "bg-purple-100", text: "text-purple-700", label: "Claude" },
 };
 
 export function ModelSelector({ onModelChange, compact = false }: ModelSelectorProps) {

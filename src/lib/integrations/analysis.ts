@@ -29,6 +29,30 @@ import { extractJsonObject } from "../utils/llm-json";
 // Note: API key validation is now handled by LLMProvider
 // Multiple providers are supported (Gemini, OpenAI, Anthropic, HuggingFace)
 
+/**
+ * Estimate token cost for Opik tracking.
+ * Approximate pricing per 1K tokens (USD).
+ */
+function estimateTokenCost(
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number },
+  modelId: string
+): number {
+  const pricing: Record<string, { input: number; output: number }> = {
+    "gemini-2.5-flash": { input: 0.00015, output: 0.00060 },
+    "gemini-2.5-flash-lite": { input: 0.000075, output: 0.00030 },
+    "openai-gpt-4o-mini": { input: 0.00015, output: 0.00060 },
+    "hf-qwen3-8b": { input: 0.0001, output: 0.0002 },
+    "hf-qwen3-30b-a3b": { input: 0.0001, output: 0.0002 },
+    "claude-3-haiku-20240307": { input: 0.00025, output: 0.00125 },
+    "claude-3-sonnet-20240229": { input: 0.00300, output: 0.01500 },
+  };
+  const p = pricing[modelId];
+  if (!p) {
+    return (usage.promptTokens * 0.0001 + usage.completionTokens * 0.0002) / 1000;
+  }
+  return (usage.promptTokens * p.input + usage.completionTokens * p.output) / 1000;
+}
+
 // Initialize Opik prompts on first use
 let promptsInitialized = false;
 
@@ -193,7 +217,7 @@ export async function analyzeDischargeReadiness(
   // Parse response - strict parsing, no fallback
   const analysis = parseAnalysisResponse(patient.id, responseText);
 
-  // Log to Opik with prompt commit tracking and model info
+  // Log to Opik with prompt commit tracking, model info, AND token usage
   const modelId = getActiveModelId();
   await logPromptUsage(
     patient.id,
@@ -213,7 +237,9 @@ export async function analyzeDischargeReadiness(
       recommendations: analysis.recommendations,
     },
     latencyMs,
-    modelId
+    modelId,
+    llmResponse.tokenUsage,
+    llmResponse.tokenUsage ? estimateTokenCost(llmResponse.tokenUsage, modelId) : undefined
   );
 
   // Include which model actually produced this analysis
