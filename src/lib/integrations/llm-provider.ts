@@ -183,7 +183,6 @@ export function getConfiguredProviders(): ModelProvider[] {
   if (process.env.GEMINI_API_KEY) providers.add("gemini");
   if (process.env.HF_API_KEY) providers.add("huggingface");
   if (process.env.OPENAI_API_KEY) providers.add("openai");
-  if (process.env.ANTHROPIC_API_KEY) providers.add("anthropic");
   return Array.from(providers);
 }
 

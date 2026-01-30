@@ -10,16 +10,10 @@ import {
   Clock,
   Zap,
   BarChart3,
-  ExternalLink,
   ChevronDown,
   ChevronRight,
   Cloud,
   FlaskConical,
-  Scale,
-  ShieldCheck,
-  Target,
-  CheckSquare,
-  FileCheck,
 } from "lucide-react";
 
 interface ModelSummary {
@@ -103,28 +97,6 @@ interface OpikExperimentResult {
   }>;
 }
 
-interface LLMJudgeResult {
-  mode: "batch";
-  totalEvaluated: number;
-  results: Array<{
-    patientId: string;
-    evaluation: {
-      safety: { score: number; reasoning: string };
-      accuracy: { score: number; reasoning: string };
-      actionability: { score: number; reasoning: string };
-      completeness: { score: number; reasoning: string };
-      overall: number;
-    };
-    passesSafetyThreshold: boolean;
-  }>;
-  aggregates: {
-    avgOverall: number;
-    avgSafety: number;
-    passingSafetyThreshold: number;
-  };
-  evaluatedAt: string;
-}
-
 export function EvaluationDashboard() {
   const [modelsInfo, setModelsInfo] = useState<ModelsInfo | null>(null);
   const [isLoadingInfo, setIsLoadingInfo] = useState(false);
@@ -137,10 +109,6 @@ export function EvaluationDashboard() {
   const [isRunningOpikExperiment, setIsRunningOpikExperiment] = useState(false);
   const [opikExperimentResult, setOpikExperimentResult] = useState<OpikExperimentResult | null>(null);
   const [opikError, setOpikError] = useState<string | null>(null);
-  const [isRunningJudge, setIsRunningJudge] = useState(false);
-  const [judgeResult, setJudgeResult] = useState<LLMJudgeResult | null>(null);
-  const [judgeError, setJudgeError] = useState<string | null>(null);
-  const [expandedJudgeResults, setExpandedJudgeResults] = useState<Set<string>>(new Set());
 
   // Load available models
   async function loadModelsInfo() {
@@ -235,83 +203,6 @@ export function EvaluationDashboard() {
     }
   }
 
-  // Run LLM-as-Judge evaluation on recent results
-  async function runLLMJudge() {
-    if (!opikExperimentResult && !evalResults) {
-      setJudgeError("Run an evaluation or Opik experiment first to have results to judge");
-      return;
-    }
-
-    setIsRunningJudge(true);
-    setJudgeError(null);
-    setJudgeResult(null);
-
-    try {
-      // Build evaluations from either Opik results or local eval results
-      const evaluations = opikExperimentResult
-        ? opikExperimentResult.results.map((r) => ({
-            patientId: r.patientId,
-            analysis: {
-              score: r.score,
-              status: r.status,
-              riskFactors: [], // Opik results don't include full risk factors
-              recommendations: [],
-              summary: "",
-            },
-          }))
-        : evalResults?.results
-            .filter((r) => r.analysis)
-            .map((r) => ({
-              patientId: r.patient,
-              analysis: {
-                score: r.analysis!.score,
-                status: r.analysis!.status,
-                riskFactors: r.analysis!.riskFactors,
-                recommendations: [],
-                summary: "",
-              },
-            })) || [];
-
-      if (evaluations.length === 0) {
-        throw new Error("No valid analysis results to judge");
-      }
-
-      const response = await fetch("/api/evaluate/judge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          evaluations,
-          modelId: selectedModels.length > 0 ? selectedModels[0] : undefined,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "LLM Judge evaluation failed");
-      }
-
-      const data = await response.json();
-      setJudgeResult(data);
-    } catch (err) {
-      setJudgeError(err instanceof Error ? err.message : "LLM Judge evaluation failed");
-    } finally {
-      setIsRunningJudge(false);
-    }
-  }
-
-  // Toggle judge result expansion
-  function toggleJudgeResult(patientId: string) {
-    setExpandedJudgeResults((prev) => {
-      const next = new Set(prev);
-      if (next.has(patientId)) {
-        next.delete(patientId);
-      } else {
-        next.add(patientId);
-      }
-      return next;
-    });
-  }
-
   // Toggle model selection
   function toggleModel(modelId: string) {
     setSelectedModels((prev) =>
@@ -381,12 +272,10 @@ export function EvaluationDashboard() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Model Evaluation</h2>
-          <p className="text-gray-500 mt-1">
+          <p className="text-gray-600 mt-1">
             Compare LLM models and track results in Opik
           </p>
         </div>
-        {/* Note: Opik dashboard URL links to generic experiments page, not specific experiment
-            Hiding for now - users should navigate to Opik dashboard manually */}
       </div>
 
       {/* Error Banner */}
@@ -439,7 +328,7 @@ export function EvaluationDashboard() {
                 value={experimentName}
                 onChange={(e) => setExperimentName(e.target.value)}
                 placeholder="e.g., model-comparison-v1"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full px-3 py-2 border border-gray-300 text-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
             </div>
 
@@ -457,7 +346,7 @@ export function EvaluationDashboard() {
                       className={`px-3 py-1 rounded-lg text-sm font-medium flex items-center gap-1.5 ${
                         isConfigured
                           ? `${style.bg} ${style.text}`
-                          : "bg-gray-100 text-gray-400"
+                          : "bg-gray-100 text-gray-600"
                       }`}
                     >
                       {isConfigured ? (
@@ -487,7 +376,7 @@ export function EvaluationDashboard() {
                       className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
                         selectedModels.includes(model)
                           ? "bg-blue-50 border-blue-300 text-blue-700"
-                          : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
+                          : "bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100"
                       }`}
                     >
                       <input
@@ -527,7 +416,7 @@ export function EvaluationDashboard() {
                 {modelsInfo.testPatients.map((patient) => (
                   <span
                     key={patient}
-                    className="px-3 py-1 bg-gray-100 text-gray-600 rounded-lg text-sm"
+                    className="px-3 py-1 bg-gray-200 text-gray-800 rounded-lg text-sm"
                   >
                     {patient}
                   </span>
@@ -565,20 +454,6 @@ export function EvaluationDashboard() {
                   )}
                   {isRunningOpikExperiment ? "Running Opik Experiment..." : "Run Opik Cloud Experiment"}
                 </button>
-
-                {/* LLM-as-Judge Button */}
-                <button
-                  onClick={runLLMJudge}
-                  disabled={isRunningJudge || (!opikExperimentResult && !evalResults)}
-                  className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-amber-500 to-orange-600 text-white rounded-lg font-medium hover:from-amber-600 hover:to-orange-700 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isRunningJudge ? (
-                    <RefreshCw className="w-5 h-5 animate-spin" />
-                  ) : (
-                    <Scale className="w-5 h-5" />
-                  )}
-                  {isRunningJudge ? "Running LLM Judge..." : "Run LLM-as-Judge"}
-                </button>
               </div>
 
               {selectedModels.length === 0 && (
@@ -609,8 +484,6 @@ export function EvaluationDashboard() {
                         Opik Cloud Experiment Complete
                       </span>
                     </div>
-                    {/* Note: Opik dashboard URL links to generic experiments page, not specific experiment
-                        Users should navigate to comet.com/opik manually to see detailed experiment results */}
                     <span className="text-xs text-blue-600 italic">
                       View detailed results at comet.com/opik
                     </span>
@@ -649,10 +522,10 @@ export function EvaluationDashboard() {
                               result.passed ? "bg-green-50" : "bg-red-50"
                             }`}
                           >
-                            <span className="text-sm font-medium">{result.patientId}</span>
+                            <span className="text-sm font-medium text-gray-900">{result.patientId}</span>
                             <div className="flex items-center gap-4 text-sm">
-                              <span>Score: {result.score}</span>
-                              <span>Status: {result.status}</span>
+                              <span className="text-gray-800">Score: {result.score}</span>
+                              <span className="text-gray-800">Status: {result.status}</span>
                               <span className={result.passed ? "text-green-600" : "text-red-600"}>
                                 {result.passed ? "✓ PASS" : "✗ FAIL"}
                               </span>
@@ -662,174 +535,6 @@ export function EvaluationDashboard() {
                       </div>
                     </div>
                   )}
-                </motion.div>
-              )}
-
-              {/* Judge Error */}
-              {judgeError && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-                  <p className="font-medium">LLM Judge Error</p>
-                  <p>{judgeError}</p>
-                </div>
-              )}
-
-              {/* LLM Judge Results */}
-              {judgeResult && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-xl"
-                >
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      <Scale className="w-5 h-5 text-amber-600" />
-                      <span className="font-semibold text-amber-900">
-                        LLM-as-Judge Evaluation Complete
-                      </span>
-                    </div>
-                    <span className="text-xs text-amber-600">
-                      {judgeResult.totalEvaluated} analyses evaluated
-                    </span>
-                  </div>
-
-                  {/* Aggregate Scores */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mb-4">
-                    <div className="bg-white/50 rounded-lg p-3">
-                      <div className="flex items-center gap-2 text-amber-700 mb-1">
-                        <ShieldCheck className="w-4 h-4" />
-                        <span className="font-medium">Safety</span>
-                      </div>
-                      <p className={`text-xl font-bold ${getScoreColor(judgeResult.aggregates.avgSafety)}`}>
-                        {(judgeResult.aggregates.avgSafety * 100).toFixed(0)}%
-                      </p>
-                    </div>
-                    <div className="bg-white/50 rounded-lg p-3">
-                      <div className="flex items-center gap-2 text-amber-700 mb-1">
-                        <Target className="w-4 h-4" />
-                        <span className="font-medium">Overall</span>
-                      </div>
-                      <p className={`text-xl font-bold ${getScoreColor(judgeResult.aggregates.avgOverall)}`}>
-                        {(judgeResult.aggregates.avgOverall * 100).toFixed(0)}%
-                      </p>
-                    </div>
-                    <div className="bg-white/50 rounded-lg p-3">
-                      <div className="flex items-center gap-2 text-amber-700 mb-1">
-                        <CheckSquare className="w-4 h-4" />
-                        <span className="font-medium">Pass Safety</span>
-                      </div>
-                      <p className="text-xl font-bold text-amber-900">
-                        {judgeResult.aggregates.passingSafetyThreshold}/{judgeResult.totalEvaluated}
-                      </p>
-                    </div>
-                    <div className="bg-white/50 rounded-lg p-3">
-                      <div className="flex items-center gap-2 text-amber-700 mb-1">
-                        <FileCheck className="w-4 h-4" />
-                        <span className="font-medium">Pass Rate</span>
-                      </div>
-                      <p className={`text-xl font-bold ${getScoreColor(judgeResult.aggregates.passingSafetyThreshold / judgeResult.totalEvaluated)}`}>
-                        {((judgeResult.aggregates.passingSafetyThreshold / judgeResult.totalEvaluated) * 100).toFixed(0)}%
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Individual Judge Results */}
-                  <div className="space-y-2">
-                    <p className="text-amber-700 font-medium text-sm">Individual Evaluations:</p>
-                    {judgeResult.results.map((result) => (
-                      <div key={result.patientId} className="bg-white/70 rounded-lg overflow-hidden">
-                        <button
-                          onClick={() => toggleJudgeResult(result.patientId)}
-                          className="w-full flex items-center justify-between p-3 hover:bg-white/90 transition-colors"
-                        >
-                          <div className="flex items-center gap-3">
-                            {expandedJudgeResults.has(result.patientId) ? (
-                              <ChevronDown className="w-4 h-4 text-amber-500" />
-                            ) : (
-                              <ChevronRight className="w-4 h-4 text-amber-500" />
-                            )}
-                            <span className="font-medium text-amber-900">{result.patientId}</span>
-                          </div>
-                          <div className="flex items-center gap-4 text-sm">
-                            <span className={`font-bold ${getScoreColor(result.evaluation.overall)}`}>
-                              {(result.evaluation.overall * 100).toFixed(0)}%
-                            </span>
-                            {result.passesSafetyThreshold ? (
-                              <span className="flex items-center gap-1 text-green-600">
-                                <CheckCircle className="w-4 h-4" />
-                                Safe
-                              </span>
-                            ) : (
-                              <span className="flex items-center gap-1 text-red-600">
-                                <XCircle className="w-4 h-4" />
-                                Unsafe
-                              </span>
-                            )}
-                          </div>
-                        </button>
-
-                        <AnimatePresence>
-                          {expandedJudgeResults.has(result.patientId) && (
-                            <motion.div
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: "auto", opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              className="border-t border-amber-200"
-                            >
-                              <div className="p-4 space-y-3">
-                                {/* Dimension Scores */}
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                  <div>
-                                    <p className="text-xs text-gray-500 flex items-center gap-1">
-                                      <ShieldCheck className="w-3 h-3" /> Safety (40%)
-                                    </p>
-                                    <p className={`font-bold ${getScoreColor(result.evaluation.safety.score)}`}>
-                                      {(result.evaluation.safety.score * 100).toFixed(0)}%
-                                    </p>
-                                  </div>
-                                  <div>
-                                    <p className="text-xs text-gray-500 flex items-center gap-1">
-                                      <Target className="w-3 h-3" /> Accuracy (25%)
-                                    </p>
-                                    <p className={`font-bold ${getScoreColor(result.evaluation.accuracy.score)}`}>
-                                      {(result.evaluation.accuracy.score * 100).toFixed(0)}%
-                                    </p>
-                                  </div>
-                                  <div>
-                                    <p className="text-xs text-gray-500 flex items-center gap-1">
-                                      <CheckSquare className="w-3 h-3" /> Actionable (20%)
-                                    </p>
-                                    <p className={`font-bold ${getScoreColor(result.evaluation.actionability.score)}`}>
-                                      {(result.evaluation.actionability.score * 100).toFixed(0)}%
-                                    </p>
-                                  </div>
-                                  <div>
-                                    <p className="text-xs text-gray-500 flex items-center gap-1">
-                                      <FileCheck className="w-3 h-3" /> Complete (15%)
-                                    </p>
-                                    <p className={`font-bold ${getScoreColor(result.evaluation.completeness.score)}`}>
-                                      {(result.evaluation.completeness.score * 100).toFixed(0)}%
-                                    </p>
-                                  </div>
-                                </div>
-
-                                {/* Reasoning */}
-                                <div className="space-y-2 text-xs">
-                                  <div className="bg-gray-50 rounded p-2">
-                                    <p className="font-medium text-gray-700">Safety Reasoning:</p>
-                                    <p className="text-gray-600">{result.evaluation.safety.reasoning}</p>
-                                  </div>
-                                  <div className="bg-gray-50 rounded p-2">
-                                    <p className="font-medium text-gray-700">Accuracy Reasoning:</p>
-                                    <p className="text-gray-600">{result.evaluation.accuracy.reasoning}</p>
-                                  </div>
-                                </div>
-                              </div>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-                      </div>
-                    ))}
-                  </div>
                 </motion.div>
               )}
             </div>
@@ -867,7 +572,7 @@ export function EvaluationDashboard() {
                   </div>
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-gray-500 text-sm">Avg Score</span>
+                      <span className="text-gray-600 text-sm">Avg Score</span>
                       <span
                         className={`font-bold ${getScoreColor(summary.avgScore)}`}
                       >
@@ -875,7 +580,7 @@ export function EvaluationDashboard() {
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-gray-500 text-sm">Pass Rate</span>
+                      <span className="text-gray-600 text-sm">Pass Rate</span>
                       <span
                         className={`font-bold ${getScoreColor(summary.passRate)}`}
                       >
@@ -883,14 +588,14 @@ export function EvaluationDashboard() {
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-gray-500 text-sm">Avg Latency</span>
+                      <span className="text-gray-600 text-sm">Avg Latency</span>
                       <span className="font-medium text-gray-700">
                         {summary.avgLatency.toFixed(0)}ms
                       </span>
                     </div>
                     {summary.errorCount > 0 && (
                       <div className="flex items-center justify-between">
-                        <span className="text-gray-500 text-sm">Errors</span>
+                        <span className="text-gray-600 text-sm">Errors</span>
                         <span className="font-medium text-red-600">
                           {summary.errorCount}
                         </span>
@@ -940,8 +645,8 @@ export function EvaluationDashboard() {
                           <span className="font-medium text-gray-900">
                             {result.model}
                           </span>
-                          <span className="mx-1 text-gray-400">→</span>
-                          <span className="text-gray-600">{result.patient}</span>
+                          <span className="mx-1 text-gray-500">→</span>
+                          <span className="text-gray-700">{result.patient}</span>
                         </div>
                       </div>
                       <div className="flex items-center gap-4">
@@ -969,7 +674,7 @@ export function EvaluationDashboard() {
                             )}
                           </>
                         ) : null}
-                        <span className="flex items-center gap-1 text-gray-500 text-sm">
+                        <span className="flex items-center gap-1 text-gray-600 text-sm">
                           <Clock className="w-4 h-4" />
                           {result.latencyMs}ms
                         </span>
@@ -995,7 +700,7 @@ export function EvaluationDashboard() {
                                 {/* Analysis Score */}
                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                   <div>
-                                    <p className="text-xs text-gray-500">
+                                    <p className="text-xs text-gray-600">
                                       Discharge Score
                                     </p>
                                     <p className="text-lg font-bold text-gray-900">
@@ -1003,7 +708,7 @@ export function EvaluationDashboard() {
                                     </p>
                                   </div>
                                   <div>
-                                    <p className="text-xs text-gray-500">
+                                    <p className="text-xs text-gray-600">
                                       Score Accuracy
                                     </p>
                                     <p
@@ -1013,7 +718,7 @@ export function EvaluationDashboard() {
                                     </p>
                                   </div>
                                   <div>
-                                    <p className="text-xs text-gray-500">
+                                    <p className="text-xs text-gray-600">
                                       Status Match
                                     </p>
                                     <p className="text-lg font-bold">
@@ -1025,7 +730,7 @@ export function EvaluationDashboard() {
                                     </p>
                                   </div>
                                   <div>
-                                    <p className="text-xs text-gray-500">
+                                    <p className="text-xs text-gray-600">
                                       Risk Factors
                                     </p>
                                     <p className="text-lg font-bold text-gray-900">
@@ -1073,7 +778,7 @@ export function EvaluationDashboard() {
           </div>
 
           {/* Experiment Info */}
-          <div className="bg-gray-100 rounded-xl p-4 text-sm text-gray-600">
+          <div className="bg-gray-200 rounded-xl p-4 text-sm text-gray-700">
             <div className="flex items-center gap-2">
               <BarChart3 className="w-4 h-4" />
               <span>

@@ -43,8 +43,6 @@ function estimateTokenCost(
     "openai-gpt-4o-mini": { input: 0.00015, output: 0.00060 },
     "hf-qwen3-8b": { input: 0.0001, output: 0.0002 },
     "hf-qwen3-30b-a3b": { input: 0.0001, output: 0.0002 },
-    "claude-3-haiku-20240307": { input: 0.00025, output: 0.00125 },
-    "claude-3-sonnet-20240229": { input: 0.00300, output: 0.01500 },
   };
   const p = pricing[modelId];
   if (!p) {

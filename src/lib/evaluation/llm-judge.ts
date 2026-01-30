@@ -23,7 +23,7 @@ function getJudgeModelId(): string {
   if (!active.startsWith("hf-")) return active;
 
   // HF models struggle with strict JSON — find a commercial alternative
-  const preferred = ["openai-gpt-4o-mini", "gemini-2.5-flash", "gemini-2.5-flash-lite", "claude-3-haiku"];
+  const preferred = ["openai-gpt-4o-mini", "gemini-2.5-flash", "gemini-2.5-flash-lite"];
   const available = getAvailableModels();
   for (const id of preferred) {
     if (available.includes(id)) return id;
