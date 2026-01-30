@@ -4,6 +4,7 @@ import { getOpikClient } from "@/lib/integrations/opik";
 import { getPatientSummaryPrompt, formatPatientSummaryPrompt } from "@/lib/integrations/opik-prompts";
 import { getPatient } from "@/lib/data/demo-patients";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
+import { extractJsonObject } from "@/lib/utils/llm-json";
 
 interface PatientSummaryRequest {
   patientId: string;
@@ -102,15 +103,10 @@ export async function POST(request: NextRequest) {
     });
     llmSpan?.end();
 
-    // Parse the response
+    // Parse the response (handles Qwen3 thinking tokens, trailing commas, etc.)
     let summary: PatientSummary;
     try {
-      // Extract JSON from response
-      const jsonMatch = response.content.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        throw new Error("No JSON found in response");
-      }
-      summary = JSON.parse(jsonMatch[0]);
+      summary = extractJsonObject<PatientSummary>(response.content);
     } catch (parseError) {
       console.error("[Patient Summary] Failed to parse LLM response:", parseError);
       // Generate fallback summary

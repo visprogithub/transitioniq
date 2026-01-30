@@ -136,7 +136,7 @@ export async function runExperimentVariant(
         name: `variant-${variant.name}`,
         metadata: {
           prompt_version: variant.promptVersion,
-          model: variant.model || "gemini-2.0-flash",
+          model: variant.model || "gemini-2.5-flash",
         },
       });
 

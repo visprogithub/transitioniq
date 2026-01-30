@@ -30,6 +30,7 @@ import {
 // Import external API clients
 import { getPatientFriendlyDrugInfo as getDailyMedDrugInfo } from "@/lib/integrations/dailymed-client";
 import { getPatientSymptomAssessment } from "@/lib/integrations/medlineplus-client";
+import { extractJsonObject } from "@/lib/utils/llm-json";
 
 export interface PatientCoachToolDefinition {
   name: string;
@@ -330,31 +331,15 @@ Use simple, patient-friendly language. If this is not a real medication, respond
       metadata: { medication: medicationName, fallback: true },
     });
 
-    const jsonMatch = response.content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
+    const parsed = extractJsonObject<{
+      error?: string;
+      purpose?: string;
+      sideEffects?: string[];
+      warnings?: string[];
+      patientTips?: string[];
+    }>(response.content);
 
-      if (parsed.error) {
-        return {
-          toolName: "lookupMedication",
-          result: {
-            medicationName,
-            isPatientMedication: !!patientMed,
-            patientDose: patientMed?.dose,
-            patientFrequency: patientMed?.frequency,
-            purpose: "I don't have specific information about this medication. Please ask your pharmacist or doctor for details.",
-            sideEffects: ["Ask your pharmacist about potential side effects"],
-            warnings: ["⚠️ Always take medications exactly as prescribed"],
-            patientTips: [
-              "Read the information that came with your prescription",
-              "Ask your pharmacist if you have questions",
-            ],
-            source: "FALLBACK",
-          },
-          success: true,
-        };
-      }
-
+    if (parsed.error) {
       return {
         toolName: "lookupMedication",
         result: {
@@ -362,17 +347,36 @@ Use simple, patient-friendly language. If this is not a real medication, respond
           isPatientMedication: !!patientMed,
           patientDose: patientMed?.dose,
           patientFrequency: patientMed?.frequency,
-          purpose: parsed.purpose || "This medication was prescribed by your doctor.",
-          sideEffects: parsed.sideEffects || ["Ask your pharmacist about side effects"],
-          warnings: (parsed.warnings || ["Take exactly as prescribed"]).map((w: string) =>
-            w.startsWith("⚠️") ? w : `⚠️ ${w}`
-          ),
-          patientTips: parsed.patientTips || ["Follow your doctor's instructions"],
-          source: "LLM_GENERATED",
+          purpose: "I don't have specific information about this medication. Please ask your pharmacist or doctor for details.",
+          sideEffects: ["Ask your pharmacist about potential side effects"],
+          warnings: ["⚠️ Always take medications exactly as prescribed"],
+          patientTips: [
+            "Read the information that came with your prescription",
+            "Ask your pharmacist if you have questions",
+          ],
+          source: "FALLBACK",
         },
         success: true,
       };
     }
+
+    return {
+      toolName: "lookupMedication",
+      result: {
+        medicationName,
+        isPatientMedication: !!patientMed,
+        patientDose: patientMed?.dose,
+        patientFrequency: patientMed?.frequency,
+        purpose: parsed.purpose || "This medication was prescribed by your doctor.",
+        sideEffects: parsed.sideEffects || ["Ask your pharmacist about side effects"],
+        warnings: (parsed.warnings || ["Take exactly as prescribed"]).map((w: string) =>
+          w.startsWith("⚠️") ? w : `⚠️ ${w}`
+        ),
+        patientTips: parsed.patientTips || ["Follow your doctor's instructions"],
+        source: "LLM_GENERATED",
+      },
+      success: true,
+    };
   } catch (error) {
     console.error("[Patient Coach] LLM medication lookup failed:", error);
   }
@@ -559,28 +563,31 @@ Respond ONLY with the JSON object.`;
       metadata: { symptom, severity, fallback: true },
     });
 
-    const jsonMatch = response.content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        toolName: "checkSymptom",
-        result: {
-          symptom,
-          severity,
-          urgencyLevel: parsed.urgencyLevel || (severity === "severe" ? "call_doctor_today" : "monitor"),
-          message: parsed.message || "Here's guidance for your symptom.",
-          actions: parsed.actions || [
-            "Monitor the symptom",
-            "📞 Call your doctor if it continues or worsens",
-            "🚨 Call 911 for any emergency",
-          ],
-          selfCare: parsed.selfCare,
-          possibleMedicationRelated: parsed.possibleMedicationRelated ? possibleMedicationCause?.name : null,
-          source: "LLM_GENERATED",
-        },
-        success: true,
-      };
-    }
+    const parsed = extractJsonObject<{
+      urgencyLevel?: string;
+      message?: string;
+      actions?: string[];
+      selfCare?: string;
+      possibleMedicationRelated?: boolean;
+    }>(response.content);
+    return {
+      toolName: "checkSymptom",
+      result: {
+        symptom,
+        severity,
+        urgencyLevel: parsed.urgencyLevel || (severity === "severe" ? "call_doctor_today" : "monitor"),
+        message: parsed.message || "Here's guidance for your symptom.",
+        actions: parsed.actions || [
+          "Monitor the symptom",
+          "📞 Call your doctor if it continues or worsens",
+          "🚨 Call 911 for any emergency",
+        ],
+        selfCare: parsed.selfCare,
+        possibleMedicationRelated: parsed.possibleMedicationRelated ? possibleMedicationCause?.name : null,
+        source: "LLM_GENERATED",
+      },
+      success: true,
+    };
   } catch (error) {
     console.error("[Patient Coach] LLM symptom check failed:", error);
   }

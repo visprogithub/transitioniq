@@ -264,8 +264,10 @@ function formatToolsForLLM(tools: PatientCoachToolDefinition[]): Array<{
  * Parse tool calls from LLM response
  */
 function parseToolCalls(
-  content: string
+  rawContent: string
 ): Array<{ name: string; arguments: Record<string, unknown> }> | null {
+  // Strip Qwen3 thinking tokens before parsing tool calls
+  const content = rawContent.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
   // Look for tool calls in various formats the LLM might use
   const toolCallPatterns = [
     // JSON tool call format

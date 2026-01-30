@@ -24,6 +24,7 @@ import {
   applyOutputGuardrails,
   recordGuardrailStats,
 } from "../guardrails";
+import { extractJsonObject } from "../utils/llm-json";
 
 // Note: API key validation is now handled by LLMProvider
 // Multiple providers are supported (Gemini, OpenAI, Anthropic, HuggingFace)
@@ -215,6 +216,9 @@ export async function analyzeDischargeReadiness(
     modelId
   );
 
+  // Include which model actually produced this analysis
+  analysis.modelUsed = llmResponse.model;
+
   return analysis;
 }
 
@@ -222,18 +226,8 @@ export async function analyzeDischargeReadiness(
  * Parse LLM response - strict parsing, throws on failure
  */
 function parseAnalysisResponse(patientId: string, responseText: string): DischargeAnalysis {
-  // Extract JSON from response
-  const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new Error("LLM response did not contain valid JSON. Raw response: " + responseText.slice(0, 500));
-  }
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(jsonMatch[0]);
-  } catch (e) {
-    throw new Error("Failed to parse LLM JSON response: " + (e as Error).message);
-  }
+  // Extract JSON from response (handles Qwen3 thinking tokens, trailing commas, etc.)
+  const parsed = extractJsonObject<Record<string, unknown>>(responseText);
 
   // Validate required fields
   if (typeof parsed.score !== "number") {

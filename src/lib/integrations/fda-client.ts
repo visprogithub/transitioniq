@@ -112,7 +112,14 @@ export async function checkDrugInteractions(
     const rxcuiList = rxCuis.join("+");
     const url = `${RXNORM_BASE}/interaction/list.json?rxcuis=${rxcuiList}`;
     const response = await fetch(url);
-    const data: RxNormInteractionResponse = await response.json();
+    if (!response.ok) {
+      return interactions;
+    }
+    const text = await response.text();
+    if (!text || text === "Not found" || !text.startsWith("{")) {
+      return interactions; // RxNorm returns plain text "Not found" when no interactions exist
+    }
+    const data: RxNormInteractionResponse = JSON.parse(text);
 
     if (data.fullInteractionTypeGroup) {
       for (const group of data.fullInteractionTypeGroup) {

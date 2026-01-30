@@ -141,7 +141,7 @@ async function analyzePatient(patientId: string): Promise<DischargeAnalysis> {
       category: "drug_interaction",
       title: `${interaction.drug1} + ${interaction.drug2}`,
       description: interaction.description,
-      source: "FDA",
+      source: (interaction.source as "FDA" | "CMS" | "Guidelines" | "FHIR" | "Internal") || "FDA",
       actionable: true,
     });
   }

@@ -24,6 +24,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Patient not found" }, { status: 404 });
     }
 
+    // Track whether agent fallback occurs
+    let agentFallbackOccurred = false;
+    let agentFallbackError: string | undefined;
+
     // Use the TypeScript agent orchestrator for multi-turn analysis
     if (useAgent) {
       console.log("[Analyze] Using multi-turn agent orchestrator");
@@ -39,18 +43,46 @@ export async function POST(request: NextRequest) {
         // Get session for additional context
         const session = getSession(agentResponse.sessionId);
 
+        // Check if agent produced a valid analysis
+        if (!agentResponse.analysis || agentResponse.analysis.score === undefined) {
+          // Agent ran but did not produce analysis — likely LLM error
+          // Find which tools failed
+          const failedTools = agentResponse.toolsUsed
+            .filter(t => !t.success)
+            .map(t => `${t.tool}: ${t.error || "unknown error"}`);
+          const errorDetail = failedTools.length > 0
+            ? `Tool failures: ${failedTools.join("; ")}`
+            : agentResponse.message || "Agent did not produce analysis results";
+
+          console.error(`[Analyze] Agent completed without analysis. ${errorDetail}`);
+
+          return NextResponse.json(
+            {
+              error: `Analysis failed with ${getActiveModelId()}: ${errorDetail}`,
+              modelUsed: getActiveModelId(),
+              agentUsed: true,
+              toolsUsed: agentResponse.toolsUsed,
+              agentGraph: agentResponse.agentGraph,
+              sessionId: agentResponse.sessionId,
+            },
+            { status: 502 }
+          );
+        }
+
         // Return agent response with full context
         return NextResponse.json({
           // Analysis results
-          score: agentResponse.analysis?.score,
-          status: agentResponse.analysis?.status,
-          riskFactors: agentResponse.analysis?.riskFactors || [],
-          recommendations: agentResponse.analysis?.recommendations || [],
+          score: agentResponse.analysis.score,
+          status: agentResponse.analysis.status,
+          riskFactors: agentResponse.analysis.riskFactors || [],
+          recommendations: agentResponse.analysis.recommendations || [],
           analyzedAt: new Date().toISOString(),
 
           // Agent execution metadata
-          modelUsed: getActiveModelId(),
+          modelUsed: agentResponse.analysis.modelUsed || getActiveModelId(),
+          modelRequested: getActiveModelId(),
           agentUsed: true,
+          agentFallbackUsed: false,
           sessionId: agentResponse.sessionId,
           message: agentResponse.message,
           toolsUsed: agentResponse.toolsUsed,
@@ -62,7 +94,9 @@ export async function POST(request: NextRequest) {
           conversationHistory: session?.context.conversationHistory || [],
         });
       } catch (agentError) {
-        console.warn("[Analyze] Agent error, falling back to direct LLM:", agentError);
+        agentFallbackOccurred = true;
+        agentFallbackError = agentError instanceof Error ? agentError.message : String(agentError);
+        console.warn("[Analyze] Agent error, falling back to direct LLM:", agentFallbackError);
         // Fall through to direct LLM implementation
       }
     }
@@ -128,11 +162,14 @@ export async function POST(request: NextRequest) {
       costEstimates
     );
 
-    // Include model info in response
+    // Include model info in response with fallback transparency
     return NextResponse.json({
       ...analysis,
-      modelUsed: getActiveModelId(),
+      modelUsed: analysis.modelUsed || getActiveModelId(),
+      modelRequested: getActiveModelId(),
       agentUsed: false,
+      agentFallbackUsed: agentFallbackOccurred,
+      agentFallbackReason: agentFallbackError,
     });
   } catch (error) {
     console.error("Analysis error:", error);

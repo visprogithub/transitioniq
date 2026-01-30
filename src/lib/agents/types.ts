@@ -114,6 +114,7 @@ export interface AgentResponse {
     status: string;
     riskFactors: unknown[];
     recommendations: string[];
+    modelUsed?: string;
   };
   plan?: string;
   agentGraph: AgentGraph;

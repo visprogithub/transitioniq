@@ -65,34 +65,36 @@ export function isModelLimitError(error: unknown): error is RateLimitError {
 // Includes Gemini 2.0 Flash, HuggingFace, OpenAI GPT-4o Mini, and Anthropic
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
   // === GEMINI MODELS (requires GEMINI_API_KEY) ===
-  // Free tier: 5 RPM for flash, 15 RPM for flash-lite
-  "gemini-2.0-flash": {
+  // Works with Google AI Studio free trial ($300 credits)
+  // gemini-2.0-flash deprecated March 31 2026 — use 2.5 series
+  "gemini-2.5-flash": {
     provider: "gemini",
-    modelId: "gemini-2.0-flash",
+    modelId: "gemini-2.5-flash",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
   },
-  // Flash-Lite has higher free tier limits (15 RPM vs 5 RPM)
-  "gemini-2.0-flash-lite": {
+  // Flash-Lite: faster & cheaper, good for cost-sensitive calls
+  "gemini-2.5-flash-lite": {
     provider: "gemini",
-    modelId: "gemini-2.0-flash-lite",
+    modelId: "gemini-2.5-flash-lite",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
   },
 
-  // === HUGGING FACE MODELS (requires HF_API_KEY - free tier) ===
-  // Get free API key at: https://huggingface.co/settings/tokens
+  // === HUGGING FACE MODELS (requires HF_API_KEY) ===
   // Uses router.huggingface.co/v1/chat/completions (OpenAI-compatible endpoint)
-  "hf-qwen-7b": {
+  // Qwen3-8B: strong tool-calling, medical reasoning, fast
+  "hf-qwen3-8b": {
     provider: "huggingface",
-    modelId: "Qwen/Qwen2.5-7B-Instruct",
+    modelId: "Qwen/Qwen3-8B",
     apiKey: process.env.HF_API_KEY || "",
     temperature: 0.7,
     maxTokens: 2048,
   },
-  "hf-llama-3.2-3b": {
+  // Qwen3-30B-A3B: MoE (30B total, 3B active) — high quality at low cost
+  "hf-qwen3-30b-a3b": {
     provider: "huggingface",
-    modelId: "meta-llama/Llama-3.2-3B-Instruct",
+    modelId: "Qwen/Qwen3-30B-A3B",
     apiKey: process.env.HF_API_KEY || "",
     temperature: 0.7,
     maxTokens: 2048,
@@ -137,10 +139,10 @@ declare global {
 // HuggingFace first to conserve paid API credits during testing/demos
 function getDefaultModelId(): string {
   return process.env.LLM_MODEL ||
-    (process.env.HF_API_KEY ? "hf-qwen-7b" :
+    (process.env.HF_API_KEY ? "hf-qwen3-8b" :
      process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
      process.env.ANTHROPIC_API_KEY ? "claude-3-haiku" :
-     process.env.GEMINI_API_KEY ? "gemini-2.0-flash-lite" : "hf-qwen-7b");
+     process.env.GEMINI_API_KEY ? "gemini-2.5-flash-lite" : "hf-qwen3-8b");
 }
 
 // Initialize globalThis storage if not set
@@ -326,8 +328,8 @@ export class LLMProvider {
       }
 
       // Update LLM span with usage data
-      // Opik TypeScript SDK Usage interface uses camelCase: promptTokens, completionTokens, totalTokens
-      // See: node_modules/opik/dist/*.d.ts - interface Usage
+      // Opik TypeScript SDK expects camelCase usage keys only.
+      // Mixing snake_case + camelCase causes schema validation issues.
       if (llmSpan) {
         const usagePayload = tokenUsage ? {
           promptTokens: tokenUsage.promptTokens,
@@ -336,7 +338,7 @@ export class LLMProvider {
         } : undefined;
 
         // Debug log the payload being sent to Opik
-        console.log(`[Opik] Updating LLM span with usage:`, JSON.stringify(usagePayload), `cost: $${estimatedCost?.toFixed(6) || "N/A"}, model: ${this.config.modelId}, provider: ${this.mapProviderToOpik(this.config.provider)}`);
+        console.log(`[Opik] LLM span usage:`, JSON.stringify(usagePayload), `cost: $${estimatedCost?.toFixed(6) || "N/A"}, model: ${this.config.modelId}, provider: ${this.mapProviderToOpik(this.config.provider)}`);
 
         llmSpan.update({
           output: {
@@ -344,21 +346,17 @@ export class LLMProvider {
           },
           usage: usagePayload,
           model: this.config.modelId,
-          provider: this.mapProviderToOpik(this.config.provider), // Use mapped provider for Opik
+          provider: this.mapProviderToOpik(this.config.provider),
           totalEstimatedCost: estimatedCost,
           metadata: {
             success: true,
             latency_ms: latencyMs,
-            // Also include snake_case for dashboard compatibility
-            prompt_tokens: tokenUsage?.promptTokens,
-            completion_tokens: tokenUsage?.completionTokens,
-            total_tokens: tokenUsage?.totalTokens,
           },
         });
         llmSpan.end();
 
         // Flush immediately after LLM span ends to ensure usage data is sent
-        await this.opik?.flush();
+        await this.safeFlush();
       }
 
       // Update trace with summary
@@ -372,14 +370,14 @@ export class LLMProvider {
           metadata: {
             success: true,
             latency_ms: latencyMs,
-            prompt_tokens: tokenUsage?.promptTokens,
-            completion_tokens: tokenUsage?.completionTokens,
-            total_tokens: tokenUsage?.totalTokens,
+            promptTokens: tokenUsage?.promptTokens,
+            completionTokens: tokenUsage?.completionTokens,
+            totalTokens: tokenUsage?.totalTokens,
             estimated_cost_usd: estimatedCost,
           },
         });
         trace.end();
-        await this.opik?.flush();
+        await this.safeFlush();
       }
 
       return {
@@ -392,6 +390,33 @@ export class LLMProvider {
     } catch (error) {
       const latencyMs = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
+
+      // Check for timeout / abort errors
+      const isTimeout = error instanceof Error && (
+        error.name === "AbortError" ||
+        errorMessage.includes("aborted") ||
+        errorMessage.includes("timeout") ||
+        errorMessage.includes("network")
+      );
+
+      if (isTimeout) {
+        console.error(`[LLM] Request to ${this.config.provider}/${this.config.modelId} timed out after 30s`);
+        // Log to Opik before throwing — wrapped to prevent Opik errors from crashing server
+        try {
+          if (llmSpan) {
+            llmSpan.update({ output: { error: "Request timed out" }, metadata: { success: false, timeout: true } });
+            llmSpan.end();
+          }
+          if (trace) {
+            trace.update({ output: { error: "Request timed out" }, metadata: { success: false, timeout: true } });
+            trace.end();
+            await this.safeFlush();
+          }
+        } catch (opikError) {
+          console.error("[Opik] Failed to log timeout trace (non-fatal):", opikError);
+        }
+        throw new Error(`Request to ${this.config.provider}/${this.config.modelId} timed out after 30s. The model may be overloaded — try again or switch models.`);
+      }
 
       // Check for rate limit / quota errors
       const isRateLimited = errorMessage.includes("429") ||
@@ -406,39 +431,37 @@ export class LLMProvider {
         errorMessage.includes("credit") ||
         errorMessage.includes("usage limit");
 
-      // Log error to LLM span
-      if (llmSpan) {
-        llmSpan.update({
-          output: {
-            error: errorMessage,
-          },
-          metadata: {
-            success: false,
-            error: true,
-            rate_limited: isRateLimited,
-            out_of_credits: isOutOfCredits,
-            latency_ms: latencyMs,
-          },
-        });
-        llmSpan.end();
-      }
-
-      // Log error to trace
-      if (trace) {
-        trace.update({
-          output: {
-            error: errorMessage,
-          },
-          metadata: {
-            success: false,
-            error: true,
-            rate_limited: isRateLimited,
-            out_of_credits: isOutOfCredits,
-            latency_ms: latencyMs,
-          },
-        });
-        trace.end();
-        await this.opik?.flush();
+      // Log error to Opik — wrapped to prevent Opik SDK errors from crashing server
+      try {
+        if (llmSpan) {
+          llmSpan.update({
+            output: { error: errorMessage },
+            metadata: {
+              success: false,
+              error: true,
+              rate_limited: isRateLimited,
+              out_of_credits: isOutOfCredits,
+              latency_ms: latencyMs,
+            },
+          });
+          llmSpan.end();
+        }
+        if (trace) {
+          trace.update({
+            output: { error: errorMessage },
+            metadata: {
+              success: false,
+              error: true,
+              rate_limited: isRateLimited,
+              out_of_credits: isOutOfCredits,
+              latency_ms: latencyMs,
+            },
+          });
+          trace.end();
+          await this.safeFlush();
+        }
+      } catch (opikError) {
+        console.error("[Opik] Failed to log error trace (non-fatal):", opikError);
       }
 
       // Provide user-friendly error messages for rate limits and quota issues
@@ -460,6 +483,19 @@ export class LLMProvider {
       }
 
       throw error;
+    }
+  }
+
+  /**
+   * Safe Opik flush — never throws, never crashes the server.
+   * Bare `await this.opik?.flush()` can throw on network/API errors,
+   * which kills the Node.js process if it happens inside a catch block.
+   */
+  private async safeFlush(): Promise<void> {
+    try {
+      await this.opik?.flush();
+    } catch (e) {
+      console.error("[Opik] Flush failed (non-fatal):", e instanceof Error ? e.message : e);
     }
   }
 
@@ -486,12 +522,12 @@ export class LLMProvider {
     // Pricing per 1K tokens (approximate, as of early 2025)
     // HuggingFace uses nominal pricing for Opik dashboard visibility
     const pricing: Record<string, { input: number; output: number }> = {
-      // Gemini
-      "gemini-2.0-flash": { input: 0.00010, output: 0.00040 },
-      "gemini-2.0-flash-lite": { input: 0.000075, output: 0.00030 },
-      // HuggingFace (free tier - using nominal costs for tracking)
-      "Qwen/Qwen2.5-7B-Instruct": { input: 0.00005, output: 0.00010 },
-      "meta-llama/Llama-3.2-3B-Instruct": { input: 0.00003, output: 0.00006 },
+      // Gemini 2.5
+      "gemini-2.5-flash": { input: 0.00015, output: 0.00060 },
+      "gemini-2.5-flash-lite": { input: 0.000075, output: 0.00030 },
+      // HuggingFace (nominal costs for Opik tracking)
+      "Qwen/Qwen3-8B": { input: 0.00005, output: 0.00010 },
+      "Qwen/Qwen3-30B-A3B": { input: 0.00006, output: 0.00012 },
       // OpenAI
       "gpt-4o-mini": { input: 0.00015, output: 0.00060 },
       // Anthropic
@@ -523,8 +559,10 @@ export class LLMProvider {
       model: this.config.modelId,
       generationConfig: {
         temperature: this.config.temperature,
-        maxOutputTokens: this.config.maxTokens,
+        maxOutputTokens: this.config.maxTokens || 4096,
       },
+    }, {
+      timeout: 30_000, // 30s timeout — prevents server hang
     });
 
     const result = await model.generateContent(prompt);
@@ -559,34 +597,58 @@ export class LLMProvider {
     // The model is specified in the request body, not in the URL
     const endpoint = "https://router.huggingface.co/v1/chat/completions";
 
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${this.config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: this.config.modelId,
-        messages: [
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        temperature: this.config.temperature || 0.7,
-        max_tokens: this.config.maxTokens || 2048,
-      }),
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+
+    // Qwen3 models default to thinking mode which wastes tokens on <think> blocks.
+    // Append /no_think to disable thinking when we need structured JSON output.
+    const isQwen3 = this.config.modelId.toLowerCase().includes("qwen3");
+    const effectivePrompt = isQwen3 ? `${prompt}\n/no_think` : prompt;
+
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.config.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: this.config.modelId,
+          messages: [
+            {
+              role: "user",
+              content: effectivePrompt,
+            },
+          ],
+          temperature: this.config.temperature || 0.7,
+          max_tokens: this.config.maxTokens || 2048,
+        }),
+        signal: controller.signal,
+      });
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      throw fetchError;
+    }
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
-      const error = await response.text();
+      const errorText = await response.text();
+      console.error(`[LLM] HuggingFace error ${response.status} for ${this.config.modelId}: ${errorText}`);
       if (response.status === 503) {
         throw new Error(`HuggingFace model is loading. Please try again in a few seconds.`);
       }
       if (response.status === 404) {
         throw new Error(`HuggingFace model not found or not available for inference: ${this.config.modelId}`);
       }
-      throw new Error(`HuggingFace API error: ${response.status} - ${error}`);
+      if (response.status === 429 || response.status === 402) {
+        const rateLimitErr = new Error(`HuggingFace rate limit or quota exceeded for ${this.config.modelId}. Try switching to another model.`) as Error & { code: string; modelId: string; provider: string };
+        rateLimitErr.code = response.status === 402 ? "OUT_OF_CREDITS" : "RATE_LIMITED";
+        rateLimitErr.modelId = this.config.modelId;
+        rateLimitErr.provider = "huggingface";
+        throw rateLimitErr;
+      }
+      throw new Error(`HuggingFace API error (${response.status}) for ${this.config.modelId}: ${errorText.slice(0, 200)}`);
     }
 
     const data = await response.json();
@@ -613,24 +675,35 @@ export class LLMProvider {
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${this.config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: this.config.modelId,
-        messages: [
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        temperature: this.config.temperature || 0.7,
-        max_tokens: this.config.maxTokens || 4096,
-      }),
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+
+    let response: Response;
+    try {
+      response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.config.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: this.config.modelId,
+          messages: [
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+          temperature: this.config.temperature || 0.7,
+          max_tokens: this.config.maxTokens || 4096,
+        }),
+        signal: controller.signal,
+      });
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      throw fetchError;
+    }
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const error = await response.text();
@@ -661,24 +734,35 @@ export class LLMProvider {
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": this.config.apiKey,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: this.config.modelId,
-        max_tokens: this.config.maxTokens || 4096,
-        messages: [
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-      }),
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+
+    let response: Response;
+    try {
+      response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": this.config.apiKey,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: this.config.modelId,
+          max_tokens: this.config.maxTokens || 4096,
+          messages: [
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+        }),
+        signal: controller.signal,
+      });
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      throw fetchError;
+    }
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const error = await response.text();

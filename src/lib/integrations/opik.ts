@@ -179,7 +179,7 @@ export async function traceGeminiCall<T>(
     `llm-gemini-${operation}`,
     {
       patientId,
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       category: "llm_call",
       operation,
     },
@@ -250,8 +250,9 @@ export async function traceLLMCall<T>(
     // Extract token usage from result if available
     const tokenUsage = (result as { tokenUsage?: TokenUsage }).tokenUsage || llmOptions.usage;
 
-    // Update span with token usage (camelCase to match Opik TypeScript SDK's Usage interface)
-    // See: node_modules/opik/dist/*.d.ts - interface Usage
+    // Update span with token usage — clean camelCase only (TypeScript SDK format)
+    // Mixing snake_case + camelCase caused schema validation issues in Opik dashboard
+    console.log(`[Opik] traceLLMCall tokenUsage:`, JSON.stringify(tokenUsage));
     span.update({
       usage: tokenUsage ? {
         promptTokens: tokenUsage.promptTokens,

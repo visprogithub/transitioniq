@@ -19,7 +19,10 @@ import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 // Extended analysis type with model and agent info
 interface AnalysisWithModel extends DischargeAnalysis {
   modelUsed?: string;
+  modelRequested?: string;
   agentUsed?: boolean;
+  agentFallbackUsed?: boolean;
+  agentFallbackReason?: string;
   sessionId?: string;
   message?: string;
   toolsUsed?: Array<{
@@ -519,8 +522,8 @@ export default function DashboardPage() {
                   {(isAnalyzing || analysis) && (
                     <>
                       <DischargeScore
-                        score={analysis?.score || 0}
-                        status={analysis?.status || "caution"}
+                        score={analysis?.score ?? 0}
+                        status={analysis?.status ?? "caution"}
                         isLoading={isAnalyzing}
                       />
                       {/* Show model and agent info */}
@@ -530,7 +533,19 @@ export default function DashboardPage() {
                             <Cpu className="w-4 h-4" />
                             <span>Analyzed with: <span className="font-medium text-gray-700">{analysis.modelUsed}</span></span>
                           </div>
-                          {analysis.agentUsed && (
+                          {analysis.modelRequested && analysis.modelRequested !== analysis.modelUsed && (
+                            <div className="flex items-center justify-center gap-2 text-xs text-amber-600">
+                              <AlertTriangle className="w-3 h-3" />
+                              <span>Requested: {analysis.modelRequested} (different model used)</span>
+                            </div>
+                          )}
+                          {analysis.agentFallbackUsed && (
+                            <div className="flex items-center justify-center gap-2 text-xs text-amber-500">
+                              <AlertTriangle className="w-3 h-3" />
+                              <span>Agent mode failed, used direct LLM{analysis.agentFallbackReason ? `: ${analysis.agentFallbackReason}` : ""}</span>
+                            </div>
+                          )}
+                          {analysis.agentUsed && !analysis.agentFallbackUsed && (
                             <div className="flex items-center justify-center gap-2 text-sm text-emerald-600">
                               <Sparkles className="w-4 h-4" />
                               <span className="font-medium">Multi-turn Agent Workflow</span>
@@ -573,6 +588,34 @@ export default function DashboardPage() {
                               Session: <span className="font-mono">{analysis.sessionId.slice(0, 8)}...</span>
                             </div>
                           )}
+                          {/* Data Sources Summary */}
+                          <div className="mt-3 pt-2 border-t border-gray-200 flex flex-wrap gap-1.5">
+                            <span className="text-xs text-gray-500 mr-1">Data sources:</span>
+                            {[...new Set(analysis.toolsUsed.map((t) => {
+                              const sourceMap: Record<string, string> = {
+                                fetch_patient: "FHIR",
+                                check_drug_interactions: "FDA",
+                                evaluate_care_gaps: "Guidelines",
+                                estimate_costs: "CMS",
+                                analyze_readiness: "LLM",
+                                generate_plan: "LLM",
+                              };
+                              return sourceMap[t.tool] || t.tool;
+                            }))].map((src) => {
+                              const colors: Record<string, string> = {
+                                FHIR: "bg-orange-100 text-orange-700",
+                                FDA: "bg-purple-100 text-purple-700",
+                                Guidelines: "bg-green-100 text-green-700",
+                                CMS: "bg-blue-100 text-blue-700",
+                                LLM: "bg-indigo-100 text-indigo-700",
+                              };
+                              return (
+                                <span key={src} className={`text-xs px-2 py-0.5 rounded-full ${colors[src] || "bg-gray-100 text-gray-700"}`}>
+                                  {src}
+                                </span>
+                              );
+                            })}
+                          </div>
                         </motion.div>
                       )}
 

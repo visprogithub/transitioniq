@@ -75,6 +75,19 @@ export function JudgeScoreBadge({
     return null;
   }
 
+  // Detect failed evaluation (all zeros with error in reasoning)
+  if (evaluation.overall === 0 && evaluation.safety?.reasoning?.startsWith("Evaluation failed")) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+        <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
+        <div className="min-w-0">
+          <span className="text-sm text-amber-700 font-medium">Quality check failed</span>
+          <p className="text-xs text-amber-600 mt-0.5 truncate">{evaluation.safety.reasoning}</p>
+        </div>
+      </div>
+    );
+  }
+
   if (compact) {
     return (
       <div

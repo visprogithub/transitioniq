@@ -6,6 +6,7 @@ export interface DischargeAnalysis {
   recommendations: string[];
   analyzedAt: string;
   tracingId?: string;
+  modelUsed?: string;
 }
 
 export interface RiskFactor {

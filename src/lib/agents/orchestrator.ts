@@ -518,6 +518,7 @@ function generateResponse(
       status: analysis.status,
       riskFactors: analysis.riskFactors,
       recommendations: analysis.recommendations,
+      modelUsed: analysis.modelUsed,
     },
     agentGraph: graph,
     toolsUsed,

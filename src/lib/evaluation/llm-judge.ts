@@ -5,11 +5,31 @@
  * of discharge readiness assessments. Logs scores to Opik for tracking.
  */
 
-import { createLLMProvider, getActiveModelId } from "@/lib/integrations/llm-provider";
+import { createLLMProvider, getActiveModelId, getAvailableModels } from "@/lib/integrations/llm-provider";
 import { getOpikClient } from "@/lib/integrations/opik";
 import { getLLMJudgePrompt } from "@/lib/integrations/opik-prompts";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
+import { extractJsonObject } from "@/lib/utils/llm-json";
+
+/**
+ * Select a reliable model for judging.
+ * Prefers commercial models over HuggingFace since the judge
+ * needs consistent, well-formatted JSON output.
+ */
+function getJudgeModelId(): string {
+  const active = getActiveModelId();
+  // Commercial models handle structured JSON reliably
+  if (!active.startsWith("hf-")) return active;
+
+  // HF models struggle with strict JSON — find a commercial alternative
+  const preferred = ["openai-gpt-4o-mini", "gemini-2.5-flash", "gemini-2.5-flash-lite", "claude-3-haiku"];
+  const available = getAvailableModels();
+  for (const id of preferred) {
+    if (available.includes(id)) return id;
+  }
+  return active; // No commercial model available, use what we have
+}
 
 export interface JudgeScore {
   score: number; // 0-1
@@ -108,7 +128,7 @@ export async function evaluateWithLLMJudge(
       patient_id: patient.id,
       analysis_score: analysis.score,
       analysis_status: analysis.status,
-      judge_model: modelId || getActiveModelId(),
+      judge_model: modelId || getJudgeModelId(),
     },
   });
 
@@ -116,17 +136,23 @@ export async function evaluateWithLLMJudge(
     // Get versioned prompt from Opik Prompt Library
     const promptData = await getLLMJudgePrompt();
 
+    // Use a reliable model for judging (avoids HF models that struggle with JSON)
+    const judgeModel = modelId || getJudgeModelId();
+    console.log(`[LLM Judge] Using model: ${judgeModel} (active: ${getActiveModelId()})`);
+
     const span = trace?.span({
       name: "judge-generation",
       type: "llm",
+      model: judgeModel,
       metadata: {
         prompt_version: promptData.commit || "local",
         prompt_from_opik: promptData.fromOpik,
+        judge_model: judgeModel,
       },
     });
 
     const prompt = buildJudgePrompt(patient, analysis);
-    const provider = createLLMProvider(modelId);
+    const provider = createLLMProvider(judgeModel);
 
     const startTime = Date.now();
     const response = await provider.generate(
@@ -142,19 +168,20 @@ export async function evaluateWithLLMJudge(
     );
     const latencyMs = Date.now() - startTime;
 
-    // Parse the judge response
-    const jsonMatch = response.content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error("Judge LLM did not return valid JSON");
-    }
-
-    const judgeResult = JSON.parse(jsonMatch[0]) as {
+    // Parse the judge response (handles Qwen3 thinking tokens, trailing commas, etc.)
+    let judgeResult: {
       safety: JudgeScore;
       accuracy: JudgeScore;
       actionability: JudgeScore;
       completeness: JudgeScore;
       summary: string;
     };
+    try {
+      judgeResult = extractJsonObject(response.content);
+    } catch (parseError) {
+      console.error(`[LLM Judge] JSON parse failed. Raw (first 300 chars): ${response.content.slice(0, 300)}`);
+      throw new Error(`Judge JSON parse failed: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+    }
 
     // Calculate weighted overall score
     const weights = {
@@ -217,17 +244,20 @@ export async function evaluateWithLLMJudge(
 
     return evaluation;
   } catch (error) {
-    trace?.update({ metadata: { error: String(error) } });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`[LLM Judge] Evaluation failed for patient ${patient.id}: ${errorMessage}`, error);
+
+    trace?.update({ metadata: { error: errorMessage } });
     trace?.end();
 
-    // Return a failed evaluation
+    // Return a failed evaluation with the actual error in reasoning
     return {
-      safety: { score: 0, reasoning: "Evaluation failed" },
-      accuracy: { score: 0, reasoning: "Evaluation failed" },
-      actionability: { score: 0, reasoning: "Evaluation failed" },
-      completeness: { score: 0, reasoning: "Evaluation failed" },
+      safety: { score: 0, reasoning: `Evaluation failed: ${errorMessage}` },
+      accuracy: { score: 0, reasoning: `Evaluation failed: ${errorMessage}` },
+      actionability: { score: 0, reasoning: `Evaluation failed: ${errorMessage}` },
+      completeness: { score: 0, reasoning: `Evaluation failed: ${errorMessage}` },
       overall: 0,
-      summary: `Evaluation failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+      summary: `Evaluation failed: ${errorMessage}`,
       timestamp: new Date().toISOString(),
     };
   }

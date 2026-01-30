@@ -15,6 +15,7 @@ import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import type { ToolResult, ToolName, PatientContext, DrugInteractionContext, CareGapContext, CostContext } from "./types";
+import { extractJsonArray } from "@/lib/utils/llm-json";
 
 /**
  * Tool Registry - Maps tool names to their implementations
@@ -192,13 +193,8 @@ Notes:
       },
     });
 
-    // Parse LLM response
-    const jsonMatch = response.content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      throw new Error("LLM did not return valid JSON array for care gap evaluation");
-    }
-
-    const gaps = JSON.parse(jsonMatch[0]) as CareGapContext[];
+    // Parse LLM response (handles Qwen3 thinking tokens, trailing commas, etc.)
+    const gaps = extractJsonArray<CareGapContext[]>(response.content);
 
     return {
       success: true,
@@ -261,13 +257,8 @@ Respond with ONLY a JSON array, no other text:
       },
     });
 
-    // Parse LLM response
-    const jsonMatch = response.content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      throw new Error("LLM did not return valid JSON array for cost estimation");
-    }
-
-    const costs = JSON.parse(jsonMatch[0]) as CostContext[];
+    // Parse LLM response (handles Qwen3 thinking tokens, trailing commas, etc.)
+    const costs = extractJsonArray<CostContext[]>(response.content);
 
     return {
       success: true,
