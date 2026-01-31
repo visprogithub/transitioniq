@@ -23,6 +23,9 @@ import {
 import { analyzeDischargeReadiness, resetLLMProvider } from "@/lib/integrations/analysis";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
+// 12 patients * ~10s each per model = up to 5 minutes for multi-model
+export const maxDuration = 300;
+
 // Test patients for evaluation (all 12 demo patients)
 const EVAL_PATIENTS = [
   "demo-polypharmacy",

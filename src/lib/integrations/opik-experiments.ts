@@ -261,13 +261,18 @@ class RiskCoverageMetric extends BaseMetric {
 /**
  * Create or get the evaluation dataset in Opik
  */
-export async function getOrCreateOpikDataset(datasetName: string = "discharge-readiness-eval") {
+export async function getOrCreateOpikDataset(
+  datasetName: string = "discharge-readiness-eval",
+  patientSubset?: typeof EXPERIMENT_DATASET,
+) {
   const opik = getOpikClient();
   if (!opik) {
     throw new Error("Opik client not initialized - check OPIK_API_KEY");
   }
 
-  console.log(`[Opik] Creating/getting dataset "${datasetName}" with ${EXPERIMENT_DATASET.length} items...`);
+  const patients = patientSubset || EXPERIMENT_DATASET;
+
+  console.log(`[Opik] Creating/getting dataset "${datasetName}" with ${patients.length} items...`);
   const dataset = await opik.getOrCreateDataset(datasetName);
 
   // Clear and insert fresh test cases
@@ -277,7 +282,7 @@ export async function getOrCreateOpikDataset(datasetName: string = "discharge-re
     console.warn("[Opik] dataset.clear() failed (non-fatal, may be new dataset):", clearErr instanceof Error ? clearErr.message : clearErr);
   }
 
-  const items = EXPERIMENT_DATASET.map((tc) => ({
+  const items = patients.map((tc) => ({
     input: {
       patient_id: tc.patientId,
       patient_name: tc.patientName,
@@ -308,7 +313,7 @@ export async function getOrCreateOpikDataset(datasetName: string = "discharge-re
     console.warn("[Opik] Dataset flush failed (non-fatal):", flushErr instanceof Error ? flushErr.message : flushErr);
   }
 
-  console.log(`[Opik] Dataset "${datasetName}" ready with ${EXPERIMENT_DATASET.length} items`);
+  console.log(`[Opik] Dataset "${datasetName}" ready with ${patients.length} items`);
   return dataset;
 }
 
@@ -396,6 +401,8 @@ export interface OpikExperimentResult {
  * Run an Opik experiment using the proper evaluate() API.
  * This creates a REAL experiment in the Opik dashboard (not just traces).
  *
+ * All 12 patients are evaluated. The route has maxDuration=300 set for timeout.
+ *
  * @param experimentName - Name for the experiment
  * @param modelId - Which LLM model to use for analysis
  */
@@ -419,14 +426,13 @@ export async function runOpikExperiment(
   const projectName = process.env.OPIK_PROJECT_NAME || "transitioniq";
   const opikDashboardUrl = `https://www.comet.com/opik/${projectName}/experiments`;
 
-  // Get or create the dataset
+  // Get or create the dataset with all 12 patients
   const dataset = await getOrCreateOpikDataset();
 
   // Track results locally for our response
   const localResults: OpikExperimentResult["results"] = [];
 
   // Define the evaluation task - this calls the REAL LLM
-  // Capture activeModel in closure so it's always passed explicitly to each LLM call
   const pinnedModel = activeModel;
   const task = async (datasetItem: Record<string, unknown>) => {
     const input = datasetItem.input as { patient_id: string };
@@ -437,14 +443,12 @@ export async function runOpikExperiment(
       const latencyMs = Date.now() - startTime;
       const highRiskCount = analysis.riskFactors.filter((r) => r.severity === "high").length;
 
-      // Store for local tracking
       const expected = datasetItem.reference as {
         expectedScoreRange: { min: number; max: number };
         expectedStatus: string;
         expectedHighRiskCount: { min: number; max: number };
       };
 
-      // Local scoring mirrors the Opik metric classes (25-pt window, 0.3 adjacent, 0.3 under-detect)
       const scoreDist = analysis.score < expected.expectedScoreRange.min
         ? expected.expectedScoreRange.min - analysis.score
         : analysis.score > expected.expectedScoreRange.max
@@ -484,7 +488,6 @@ export async function runOpikExperiment(
       const latencyMs = Date.now() - startTime;
       console.error(`[Opik Experiment] LLM analysis failed for ${input.patient_id}:`, error);
 
-      // Return error result - metrics will score this poorly
       return {
         score: -1,
         status: "error",
@@ -498,7 +501,6 @@ export async function runOpikExperiment(
   };
 
   // Run the experiment using Opik's evaluate() function
-  // This creates a proper experiment in the Opik dashboard
   let experimentId: string | undefined;
   try {
     const evalResult = await evaluate({
@@ -523,8 +525,6 @@ export async function runOpikExperiment(
     console.log(`[Opik] Experiment "${experimentName}-${activeModel}" created with ID: ${experimentId}`);
   } catch (evalError) {
     console.error("[Opik] evaluate() failed, falling back to manual tracing:", evalError);
-
-    // Fallback: use manual tracing if evaluate() fails
     await runManualTracingFallback(opik, experimentName, activeModel, localResults);
   }
 

@@ -16,6 +16,9 @@ import {
 } from "@/lib/integrations/opik-experiments";
 import { getAvailableModels } from "@/lib/integrations/llm-provider";
 
+// 12 patients * ~10s each per model = up to 5 minutes for multi-model
+export const maxDuration = 300;
+
 export async function POST(request: NextRequest) {
   try {
     // Check for Opik API key
