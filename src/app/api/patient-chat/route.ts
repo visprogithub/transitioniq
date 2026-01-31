@@ -43,10 +43,14 @@ const LIMITS = {
  * health, recovery, medications, or discharge-related topics
  */
 const HEALTH_TOPIC_KEYWORDS = [
-  // Medications
+  // Medications (generic terms + common drug suffixes)
   "medication", "medicine", "pill", "drug", "dose", "prescription", "pharmacy",
   "warfarin", "aspirin", "lisinopril", "metformin", "atorvastatin", "omeprazole",
-  "take", "taking", "refill", "side effect",
+  "amoxicillin", "amlodipine", "metoprolol", "furosemide", "insulin", "eliquis",
+  "ibuprofen", "acetaminophen", "tylenol", "advil", "prednisone", "hydrochlorothiazide",
+  "take", "taking", "refill", "side effect", "antibiotic", "antiviral", "antifungal",
+  "painkiller", "blood thinner", "statin", "beta blocker", "ace inhibitor", "diuretic",
+  "supplement", "vitamin", "over the counter", "otc", "generic", "brand",
   // Symptoms & Health
   "symptom", "feel", "feeling", "pain", "dizzy", "dizziness", "nausea", "tired",
   "headache", "fever", "swelling", "bleeding", "vomit", "breathe", "breathing",
@@ -97,12 +101,25 @@ function isOnTopic(message: string): boolean {
   const healthPatterns = [
     /^(can|should|when|what|how|is it|am i|will i|do i)\s+(i|it|safe|okay|normal)/i,
     /^(why|what happens|what should)/i,
+    // "What is X?" questions — very common for asking about drugs and medical terms
+    /^what\s+(is|are|does|do)\b/i,
+    // "Tell me about X" questions
+    /^tell\s+me\s+(about|more)/i,
+    // "How does X work" questions
+    /^how\s+(does|do|should|long|often|much)\b/i,
   ];
 
   for (const pattern of healthPatterns) {
     if (pattern.test(lowerMessage)) {
       return true;
     }
+  }
+
+  // Detect common drug name suffixes (e.g., amoxicillin, metoprolol, furosemide, amlodipine)
+  // This catches drug names we haven't explicitly listed
+  const drugSuffixPattern = /\b\w+(cillin|mycin|cycline|azole|prazole|sartan|pril|olol|dipine|statin|mide|formin|gliptin|parin|xaban|oxacin|zepam|zosin|tadine|lukast|afil|ximab|zumab|tinib)\b/i;
+  if (drugSuffixPattern.test(lowerMessage)) {
+    return true;
   }
 
   return false;
@@ -195,6 +212,17 @@ Allergies: ${patient.allergies.length > 0 ? patient.allergies.join(", ") : "None
 
 Key Concerns Identified:
 ${riskSummary}
+
+## Adaptive Communication Style
+Adjust your language, tone, and explanations based on the patient's age and likely comprehension level. Read the patient's age above and follow these guidelines naturally — do NOT mention that you are adjusting your style.
+
+- **Young children (under ~10):** Use very simple words, short sentences, and friendly comparisons ("Your medicine helps your tummy feel better, kind of like how a bandage helps a cut"). Speak to the child directly but assume a parent/caregiver is present. Offer encouragement ("You're being so brave!").
+- **Older children & teenagers (~10-17):** Use straightforward language but don't talk down to them. Be real and relatable. Explain the "why" behind instructions. You can use light humor or analogies they'd understand. Address them directly — they're old enough to participate in their care.
+- **Adults (~18-64):** Use clear, plain language. Avoid unnecessary jargon but you can use common medical terms with brief explanations. Be direct and informative.
+- **Older adults (~65-79):** Be patient and clear. Use slightly larger conceptual steps — don't rush through complex medication schedules. Emphasize written instructions and remind them to involve family members or caregivers when helpful. Be respectful of their experience and autonomy.
+- **Elderly adults (~80+):** Use short, focused explanations. Repeat key points gently. Strongly encourage involving a family member or caregiver for medication management and follow-up scheduling. Speak with warmth and respect for their dignity.
+
+If the patient has complex medication regimens, cognitive concerns, or limited health literacy (inferred from context), simplify further regardless of age.
 
 ## Communication Guidelines
 1. Use simple, non-medical language whenever possible
@@ -824,8 +852,11 @@ Coach:`;
       }
     }
 
-    // Clean up the response (remove any remaining tool call syntax and JSON artifacts)
+    // Clean up the response (remove thinking tokens, tool call syntax, JSON artifacts)
     finalResponse = finalResponse
+      // Remove Qwen3/LLM thinking tokens (closed and unclosed)
+      .replace(/<think>[\s\S]*?<\/think>/g, "")
+      .replace(/<think>[\s\S]*/g, "")  // Unclosed think block (hit token limit)
       // Remove complete JSON tool calls
       .replace(/\{"tool_name"[\s\S]*?\}/g, "")
       .replace(/\{"name"[\s\S]*?"arguments"[\s\S]*?\}/g, "")

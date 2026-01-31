@@ -72,6 +72,7 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
     modelId: "gemini-2.5-flash",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
+    maxTokens: 8192,
   },
   // Flash-Lite: faster & cheaper, good for cost-sensitive calls
   "gemini-2.5-flash-lite": {
@@ -79,6 +80,7 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
     modelId: "gemini-2.5-flash-lite",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
+    maxTokens: 8192,
   },
 
   // === HUGGING FACE MODELS (requires HF_API_KEY) ===
@@ -118,13 +120,12 @@ declare global {
   var __transitioniq_active_model: string | undefined;
 }
 
-// Default model priority: HuggingFace > OpenAI > Gemini
-// HuggingFace first to conserve paid API credits during testing/demos
+// Default model priority: OpenAI > HuggingFace > Gemini
 function getDefaultModelId(): string {
   return process.env.LLM_MODEL ||
-    (process.env.HF_API_KEY ? "hf-qwen3-8b" :
-     process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
-     process.env.GEMINI_API_KEY ? "gemini-2.5-flash-lite" : "hf-qwen3-8b");
+    (process.env.OPENAI_API_KEY ? "openai-gpt-4o-mini" :
+     process.env.HF_API_KEY ? "hf-qwen3-8b" :
+     process.env.GEMINI_API_KEY ? "gemini-2.5-flash-lite" : "openai-gpt-4o-mini");
 }
 
 // Initialize globalThis storage if not set

@@ -126,7 +126,7 @@ export default function DashboardPage() {
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patientId: patient.id }),
+        body: JSON.stringify({ patientId: patient.id, modelId: currentModel || undefined }),
       });
 
       const data = await response.json();
@@ -208,7 +208,7 @@ export default function DashboardPage() {
       const response = await fetch("/api/generate-plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patientId: patient.id, analysis }),
+        body: JSON.stringify({ patientId: patient.id, analysis, modelId: currentModel || undefined }),
       });
 
       if (!response.ok) throw new Error("Plan generation failed");

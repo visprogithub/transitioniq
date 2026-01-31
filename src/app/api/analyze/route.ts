@@ -5,14 +5,25 @@ import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
 import { traceDataSourceCall } from "@/lib/integrations/opik";
-import { getActiveModelId, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
+import { getActiveModelId, setActiveModel, resetLLMProvider, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
 import { runAgent, getSession } from "@/lib/agents/orchestrator";
 import type { Patient } from "@/lib/types/patient";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { patientId, useAgent = true, sessionId } = body;
+    const { patientId, useAgent = true, sessionId, modelId } = body;
+
+    // Pin the model for this request if explicitly provided
+    if (modelId) {
+      try {
+        setActiveModel(modelId);
+        resetLLMProvider();
+        console.log(`[Analyze] Model pinned to: ${modelId}`);
+      } catch (e) {
+        console.warn(`[Analyze] Failed to set model ${modelId}, using current:`, e);
+      }
+    }
 
     if (!patientId) {
       return NextResponse.json({ error: "patientId required" }, { status: 400 });

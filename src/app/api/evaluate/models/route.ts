@@ -23,14 +23,36 @@ import {
 import { analyzeDischargeReadiness, resetLLMProvider } from "@/lib/integrations/analysis";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
-// Test patients for evaluation
-const EVAL_PATIENTS = ["demo-polypharmacy", "demo-heart-failure", "demo-ready"];
+// Test patients for evaluation (all 12 demo patients)
+const EVAL_PATIENTS = [
+  "demo-polypharmacy",
+  "demo-heart-failure",
+  "demo-ready",
+  "demo-pediatric",
+  "demo-geriatric-fall",
+  "demo-pregnancy-gdm",
+  "demo-renal-dialysis",
+  "demo-psychiatric-bipolar",
+  "demo-oncology-neutropenic",
+  "demo-simple-surgery",
+  "demo-extreme-polypharmacy",
+  "demo-social-risk",
+];
 
-// Expected outcomes for scoring
+// Expected outcomes for scoring (tighter ranges for meaningful pass/fail)
 const EXPECTED_OUTCOMES: Record<string, { scoreRange: [number, number]; status: string }> = {
-  "demo-polypharmacy": { scoreRange: [0, 50], status: "not_ready" },
-  "demo-heart-failure": { scoreRange: [30, 70], status: "caution" },
-  "demo-ready": { scoreRange: [70, 100], status: "ready" },
+  "demo-polypharmacy": { scoreRange: [5, 35], status: "not_ready" },
+  "demo-heart-failure": { scoreRange: [35, 55], status: "caution" },
+  "demo-ready": { scoreRange: [75, 95], status: "ready" },
+  "demo-pediatric": { scoreRange: [85, 100], status: "ready" },
+  "demo-geriatric-fall": { scoreRange: [20, 40], status: "not_ready" },
+  "demo-pregnancy-gdm": { scoreRange: [50, 70], status: "caution" },
+  "demo-renal-dialysis": { scoreRange: [30, 50], status: "not_ready" },
+  "demo-psychiatric-bipolar": { scoreRange: [40, 60], status: "caution" },
+  "demo-oncology-neutropenic": { scoreRange: [30, 50], status: "not_ready" },
+  "demo-simple-surgery": { scoreRange: [85, 100], status: "ready" },
+  "demo-extreme-polypharmacy": { scoreRange: [10, 30], status: "not_ready" },
+  "demo-social-risk": { scoreRange: [20, 50], status: "not_ready" },
 };
 
 /**
@@ -193,11 +215,12 @@ export async function POST(request: NextRequest) {
 
           const latencyMs = Date.now() - startTime;
 
-          // Calculate scores
+          // Calculate scores (25-pt penalty window, stricter pass/fail)
           const expected = EXPECTED_OUTCOMES[patientId];
           const scoreInRange = analysis.score >= expected.scoreRange[0] && analysis.score <= expected.scoreRange[1];
           const statusMatch = analysis.status === expected.status;
-          const scoreAccuracy = scoreInRange ? 1.0 : Math.max(0, 1 - Math.abs(analysis.score - (expected.scoreRange[0] + expected.scoreRange[1]) / 2) / 50);
+          const dist = scoreInRange ? 0 : Math.min(Math.abs(analysis.score - expected.scoreRange[0]), Math.abs(analysis.score - expected.scoreRange[1]));
+          const scoreAccuracy = scoreInRange ? 1.0 : Math.max(0, 1 - dist / 25);
           const overall = (scoreAccuracy * 0.5) + (statusMatch ? 0.5 : 0);
 
           // Update span with results
@@ -213,7 +236,7 @@ export async function POST(request: NextRequest) {
               score_accuracy: scoreAccuracy,
               status_match: statusMatch,
               overall_score: overall,
-              passed: overall >= 0.7,
+              passed: overall >= 0.75,
             },
           });
           evalSpan?.end();

@@ -2,12 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 import { generateDischargePlan } from "@/lib/integrations/analysis";
 import { traceGeminiCall } from "@/lib/integrations/opik";
+import { setActiveModel, resetLLMProvider } from "@/lib/integrations/llm-provider";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { patientId, analysis } = body as { patientId: string; analysis: DischargeAnalysis };
+    const { patientId, analysis, modelId } = body as { patientId: string; analysis: DischargeAnalysis; modelId?: string };
+
+    // Pin the model for this request if explicitly provided
+    if (modelId) {
+      try {
+        setActiveModel(modelId);
+        resetLLMProvider();
+      } catch (e) {
+        console.warn(`[Generate-Plan] Failed to set model ${modelId}:`, e);
+      }
+    }
 
     if (!patientId) {
       return NextResponse.json({ error: "patientId required" }, { status: 400 });

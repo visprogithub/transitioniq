@@ -42,7 +42,7 @@ let cachedPlanPrompt: Prompt | null = null;
  * Patient Summary Prompt - stored in Opik Prompt Library
  * Converts clinical analysis to patient-friendly language
  */
-const PATIENT_SUMMARY_PROMPT = `You are a patient communication specialist. Convert the clinical discharge analysis into simple, friendly language that any patient can understand.
+const PATIENT_SUMMARY_PROMPT = `You are a patient communication specialist. Convert the clinical discharge analysis into language appropriate for the patient's age and likely comprehension level.
 
 Patient: {{patientName}}, {{patientAge}} years old
 Clinical Score: {{score}}/100
@@ -54,20 +54,30 @@ Risk Factors Identified:
 Current Medications:
 {{medications}}
 
-Generate a patient-friendly summary in JSON format. Use simple words, avoid medical jargon, and be encouraging.
+## Adaptive Language
+Adjust all text output based on the patient's age:
+- Children (under ~10): Very simple words, short sentences, friendly tone. Assume a parent is reading along. Use comforting language.
+- Teens (~10-17): Straightforward and relatable. Don't talk down to them but keep medical terms simple.
+- Adults (~18-64): Clear plain language with brief explanations of medical terms where needed.
+- Older adults (~65-79): Patient, clear explanations. Emphasize involving family or caregivers for complex medication schedules.
+- Elderly (~80+): Short focused points. Strongly emphasize caregiver involvement. Warm and respectful tone.
+
+Generate a patient-friendly summary in JSON format. Use simple words appropriate to the patient's age, avoid unnecessary medical jargon, and be encouraging.
 
 Rules:
 1. readinessLevel must be "good" (score >= 70), "caution" (score 40-69), or "needs_attention" (score < 40)
-2. readinessMessage should be warm and reassuring, 1-2 sentences
-3. whatYouNeedToKnow: Convert each significant risk factor to plain English (max 4 items)
+2. readinessMessage should be warm and reassuring, 1-2 sentences, written in language appropriate for the patient's age
+3. whatYouNeedToKnow: Convert each significant risk factor to plain English appropriate for the patient's age (max 4 items)
    - Use "pill" icon for medication issues
    - Use "heart" icon for vital signs / lab issues
    - Use "calendar" icon for follow-up / scheduling
    - Use "alert" icon for general warnings
 4. medicationReminders: Simple instructions for each medication (max 5)
    - Mark blood thinners, insulin, and heart medications as "important"
-5. questionsForDoctor: Generate 3-4 questions the patient should ask (plain English)
-6. nextSteps: 4-5 actionable tasks with priority levels
+   - For children: frame instructions for parent/child together ("Your parent will help you take...")
+   - For elderly: emphasize timing cues and caregiver reminders
+5. questionsForDoctor: Generate 3-4 questions the patient (or their caregiver) should ask (plain English, age-appropriate)
+6. nextSteps: 4-5 actionable tasks with priority levels, phrased appropriately for the patient's age
 
 Respond with ONLY valid JSON matching this schema:
 {
@@ -101,6 +111,17 @@ Age: {{patientAge}} years old
 Diagnoses: {{diagnoses}}
 Current Medications: {{medications}}
 Allergies: {{allergies}}
+
+## Adaptive Communication Style
+Adjust your language, tone, and explanations based on the patient's age and likely comprehension level. Read the patient's age above and follow these guidelines naturally — do NOT mention that you are adjusting your style.
+
+- **Young children (under ~10):** Use very simple words, short sentences, and friendly comparisons ("Your medicine helps your tummy feel better, kind of like how a bandage helps a cut"). Speak to the child directly but assume a parent/caregiver is present. Offer encouragement ("You're being so brave!").
+- **Older children & teenagers (~10-17):** Use straightforward language but don't talk down to them. Be real and relatable. Explain the "why" behind instructions. You can use light humor or analogies they'd understand. Address them directly — they're old enough to participate in their care.
+- **Adults (~18-64):** Use clear, plain language. Avoid unnecessary jargon but you can use common medical terms with brief explanations. Be direct and informative.
+- **Older adults (~65-79):** Be patient and clear. Use slightly larger conceptual steps — don't rush through complex medication schedules. Emphasize written instructions and remind them to involve family members or caregivers when helpful. Be respectful of their experience and autonomy.
+- **Elderly adults (~80+):** Use short, focused explanations. Repeat key points gently. Strongly encourage involving a family member or caregiver for medication management and follow-up scheduling. Speak with warmth and respect for their dignity.
+
+If the patient has complex medication regimens, cognitive concerns, or limited health literacy (inferred from context), simplify further regardless of age.
 
 ## Communication Guidelines
 1. Use simple, non-medical language whenever possible
@@ -180,7 +201,7 @@ Respond with ONLY valid JSON in this exact format:
 /**
  * Discharge Plan Generation Prompt - stored in Opik Prompt Library
  */
-const DISCHARGE_PLAN_PROMPT = `You are generating a discharge checklist for a care team. Generate ONLY actionable task items based on the patient's specific risk factors.
+const DISCHARGE_PLAN_PROMPT = `You are generating a discharge checklist for a care team. Generate ONLY actionable task items based on the patient's specific risk factors. Tailor patient education tasks to the patient's age and likely comprehension level.
 
 Patient: {{patient_name}}, {{patient_age}}yo {{patient_gender}}
 Discharge Readiness Score: {{score}}/100 ({{status}})
@@ -190,6 +211,13 @@ HIGH-SEVERITY RISKS:
 
 MODERATE-SEVERITY RISKS:
 {{moderate_risks}}
+
+## Age-Appropriate Discharge Planning
+Consider the patient's age when generating tasks:
+- Pediatric patients (under 18): Include parent/guardian education tasks. Frame medication tasks around caregiver administration. Include age-appropriate patient education (e.g., coloring sheets for young children, teen-friendly handouts for adolescents).
+- Older adults (65+): Include caregiver coordination tasks. Emphasize medication reconciliation and simplified schedules. Add fall prevention and home safety checks where relevant.
+- Elderly (80+): Prioritize caregiver involvement in every discharge task. Include cognitive assessment follow-up if complex medication regimens exist.
+- Adults (18-64): Standard clinical discharge tasks.
 
 IMPORTANT FORMATTING RULES:
 1. Use ONLY these 5 section headers with ** markers:

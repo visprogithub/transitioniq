@@ -14,6 +14,7 @@ import {
   ChevronRight,
   Cloud,
   FlaskConical,
+  Database,
 } from "lucide-react";
 
 interface ModelSummary {
@@ -69,10 +70,26 @@ interface ModelsInfo {
   };
 }
 
-interface OpikExperimentResult {
-  experimentId: string;
+interface OpikSingleResult {
+  patientId: string;
+  score: number;
+  status: string;
+  riskFactorCount: number;
+  highRiskCount: number;
+  scores: {
+    scoreAccuracy: number;
+    statusCorrectness: number;
+    riskFactorCoverage: number;
+    overall: number;
+  };
+  passed: boolean;
+  latencyMs: number;
+}
+
+interface OpikExperimentEntry {
   experimentName: string;
-  opikDashboardUrl: string;
+  experimentId?: string;
+  modelId: string;
   summary: {
     totalCases: number;
     passedCases: number;
@@ -80,21 +97,24 @@ interface OpikExperimentResult {
     avgScore: number;
     avgLatencyMs: number;
   };
-  results: Array<{
-    patientId: string;
-    score: number;
-    status: string;
-    riskFactorCount: number;
-    highRiskCount: number;
-    scores: {
-      scoreAccuracy: number;
-      statusCorrectness: number;
-      riskFactorCoverage: number;
-      overall: number;
-    };
-    passed: boolean;
-    latencyMs: number;
-  }>;
+  results: OpikSingleResult[];
+}
+
+interface OpikExperimentResult {
+  success: boolean;
+  // Single model response
+  experimentId?: string;
+  experimentName?: string;
+  modelId?: string;
+  opikDashboardUrl?: string;
+  summary?: OpikExperimentEntry["summary"];
+  results?: OpikSingleResult[];
+  // Multi-model response
+  experimentCount?: number;
+  models?: string[];
+  comparison?: Record<string, { avgScore: number; passRate: number; avgLatencyMs: number }>;
+  experiments?: OpikExperimentEntry[];
+  urls?: { experiments: string; traces: string };
 }
 
 export function EvaluationDashboard() {
@@ -109,6 +129,8 @@ export function EvaluationDashboard() {
   const [isRunningOpikExperiment, setIsRunningOpikExperiment] = useState(false);
   const [opikExperimentResult, setOpikExperimentResult] = useState<OpikExperimentResult | null>(null);
   const [opikError, setOpikError] = useState<string | null>(null);
+  const [isPushingDataset, setIsPushingDataset] = useState(false);
+  const [datasetPushResult, setDatasetPushResult] = useState<{ success: boolean; message: string; itemCount?: number } | null>(null);
 
   // Load available models
   async function loadModelsInfo() {
@@ -185,7 +207,7 @@ export function EvaluationDashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           experimentName: experimentName || `opik-experiment-${Date.now()}`,
-          modelId: selectedModels.length > 0 ? selectedModels[0] : undefined,
+          models: selectedModels.length > 0 ? selectedModels : undefined,
         }),
       });
 
@@ -200,6 +222,27 @@ export function EvaluationDashboard() {
       setOpikError(err instanceof Error ? err.message : "Opik experiment failed");
     } finally {
       setIsRunningOpikExperiment(false);
+    }
+  }
+
+  // Push dataset to Opik cloud
+  async function pushDatasetToOpik() {
+    setIsPushingDataset(true);
+    setDatasetPushResult(null);
+    try {
+      const response = await fetch("/api/experiments/opik", {
+        method: "PUT",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setDatasetPushResult({ success: false, message: data.error || "Failed to push dataset" });
+      } else {
+        setDatasetPushResult({ success: true, message: data.message, itemCount: data.itemCount });
+      }
+    } catch (err) {
+      setDatasetPushResult({ success: false, message: err instanceof Error ? err.message : "Failed to push dataset" });
+    } finally {
+      setIsPushingDataset(false);
     }
   }
 
@@ -454,7 +497,31 @@ export function EvaluationDashboard() {
                   )}
                   {isRunningOpikExperiment ? "Running Opik Experiment..." : "Run Opik Cloud Experiment"}
                 </button>
+
+                {/* Push Dataset to Opik Button */}
+                <button
+                  onClick={pushDatasetToOpik}
+                  disabled={isPushingDataset}
+                  className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-teal-600 to-teal-700 text-white rounded-lg font-medium hover:from-teal-700 hover:to-teal-800 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isPushingDataset ? (
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <Database className="w-5 h-5" />
+                  )}
+                  {isPushingDataset ? "Pushing Dataset..." : "Push Dataset to Opik"}
+                </button>
               </div>
+
+              {/* Dataset Push Result */}
+              {datasetPushResult && (
+                <div className={`p-3 rounded-lg text-sm ${datasetPushResult.success ? "bg-teal-50 border border-teal-200 text-teal-800" : "bg-red-50 border border-red-200 text-red-700"}`}>
+                  <div className="flex items-center gap-2">
+                    {datasetPushResult.success ? <CheckCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+                    <span>{datasetPushResult.message}</span>
+                  </div>
+                </div>
+              )}
 
               {selectedModels.length === 0 && (
                 <p className="text-sm text-amber-600">
@@ -482,36 +549,101 @@ export function EvaluationDashboard() {
                       <Cloud className="w-5 h-5 text-blue-600" />
                       <span className="font-semibold text-blue-900">
                         Opik Cloud Experiment Complete
+                        {opikExperimentResult.experimentCount && opikExperimentResult.experimentCount > 1
+                          ? ` (${opikExperimentResult.experimentCount} models)`
+                          : ""}
                       </span>
                     </div>
                     <span className="text-xs text-blue-600 italic">
-                      View detailed results at comet.com/opik
+                      Results available in your Opik account
                     </span>
                   </div>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                    <div>
-                      <p className="text-blue-600 font-medium">Experiment</p>
-                      <p className="text-blue-900">{opikExperimentResult.experimentName}</p>
+
+                  {/* Multi-model comparison table */}
+                  {opikExperimentResult.comparison && Object.keys(opikExperimentResult.comparison).length > 0 && (
+                    <div className="mb-4">
+                      <p className="text-blue-600 font-medium mb-2">Model Comparison:</p>
+                      <div className="grid gap-3">
+                        {Object.entries(opikExperimentResult.comparison).map(([modelId, stats]) => (
+                          <div key={modelId} className="flex items-center justify-between p-3 bg-white/60 rounded-lg">
+                            <span className="text-sm font-semibold text-gray-900">{modelId}</span>
+                            <div className="flex items-center gap-6 text-sm">
+                              <span className={`font-bold ${getScoreColor(stats.passRate)}`}>
+                                {(stats.passRate * 100).toFixed(0)}% pass
+                              </span>
+                              <span className={`font-bold ${getScoreColor(stats.avgScore)}`}>
+                                {(stats.avgScore * 100).toFixed(1)}% score
+                              </span>
+                              <span className="text-gray-600">
+                                {stats.avgLatencyMs.toFixed(0)}ms
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-blue-600 font-medium">Pass Rate</p>
-                      <p className="text-blue-900">{(opikExperimentResult.summary.passRate * 100).toFixed(1)}%</p>
+                  )}
+
+                  {/* Single model summary */}
+                  {opikExperimentResult.summary && !opikExperimentResult.comparison && (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                      <div>
+                        <p className="text-blue-600 font-medium">Model</p>
+                        <p className="text-blue-900">{opikExperimentResult.modelId || "default"}</p>
+                      </div>
+                      <div>
+                        <p className="text-blue-600 font-medium">Pass Rate</p>
+                        <p className="text-blue-900">{(opikExperimentResult.summary.passRate * 100).toFixed(1)}%</p>
+                      </div>
+                      <div>
+                        <p className="text-blue-600 font-medium">Test Cases</p>
+                        <p className="text-blue-900">
+                          {opikExperimentResult.summary.passedCases}/{opikExperimentResult.summary.totalCases} passed
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-blue-600 font-medium">Avg Score</p>
+                        <p className={`font-bold ${getScoreColor(opikExperimentResult.summary.avgScore)}`}>
+                          {(opikExperimentResult.summary.avgScore * 100).toFixed(1)}%
+                        </p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-blue-600 font-medium">Test Cases</p>
-                      <p className="text-blue-900">
-                        {opikExperimentResult.summary.passedCases}/{opikExperimentResult.summary.totalCases} passed
-                      </p>
+                  )}
+
+                  {/* Per-model experiment details (multi-model) */}
+                  {opikExperimentResult.experiments && opikExperimentResult.experiments.length > 0 && (
+                    <div className="mt-4 pt-4 border-t border-blue-200 space-y-4">
+                      {opikExperimentResult.experiments.map((exp) => (
+                        <div key={exp.modelId}>
+                          <p className="text-blue-700 font-medium mb-2">
+                            {exp.modelId}: {exp.summary.passedCases}/{exp.summary.totalCases} passed
+                          </p>
+                          <div className="space-y-1">
+                            {exp.results.map((result) => (
+                              <div
+                                key={`${exp.modelId}-${result.patientId}`}
+                                className={`flex items-center justify-between p-2 rounded-lg ${
+                                  result.passed ? "bg-green-50" : "bg-red-50"
+                                }`}
+                              >
+                                <span className="text-sm font-medium text-gray-900">{result.patientId}</span>
+                                <div className="flex items-center gap-4 text-sm">
+                                  <span className="text-gray-800">Score: {result.score}</span>
+                                  <span className="text-gray-800">Status: {result.status}</span>
+                                  <span className={result.passed ? "text-green-600" : "text-red-600"}>
+                                    {result.passed ? "PASS" : "FAIL"}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    <div>
-                      <p className="text-blue-600 font-medium">Avg Score</p>
-                      <p className={`font-bold ${getScoreColor(opikExperimentResult.summary.avgScore)}`}>
-                        {(opikExperimentResult.summary.avgScore * 100).toFixed(1)}%
-                      </p>
-                    </div>
-                  </div>
-                  {/* Individual Results */}
-                  {opikExperimentResult.results && opikExperimentResult.results.length > 0 && (
+                  )}
+
+                  {/* Single model results */}
+                  {opikExperimentResult.results && opikExperimentResult.results.length > 0 && !opikExperimentResult.experiments && (
                     <div className="mt-4 pt-4 border-t border-blue-200">
                       <p className="text-blue-600 font-medium mb-2">Test Case Results:</p>
                       <div className="space-y-2">
@@ -527,7 +659,7 @@ export function EvaluationDashboard() {
                               <span className="text-gray-800">Score: {result.score}</span>
                               <span className="text-gray-800">Status: {result.status}</span>
                               <span className={result.passed ? "text-green-600" : "text-red-600"}>
-                                {result.passed ? "✓ PASS" : "✗ FAIL"}
+                                {result.passed ? "PASS" : "FAIL"}
                               </span>
                             </div>
                           </div>

@@ -41,9 +41,29 @@ export function stripLLMWrapper(text: string): string {
  */
 export function extractJsonObject<T = Record<string, unknown>>(text: string): T {
   const cleaned = stripLLMWrapper(text);
-  const match = cleaned.match(/\{[\s\S]*\}/);
+  let match = cleaned.match(/\{[\s\S]*\}/);
   if (!match) {
-    throw new Error("No JSON object found in LLM response: " + cleaned.slice(0, 300));
+    // Try to recover truncated objects (LLM hit token limit before closing })
+    const braceStart = cleaned.indexOf("{");
+    if (braceStart !== -1) {
+      let truncated = cleaned.slice(braceStart);
+      // Find the last complete value (ending with ", }, ], number, true, false, null)
+      const lastBrace = truncated.lastIndexOf("}");
+      const lastQuote = truncated.lastIndexOf('"');
+      const lastBracket = truncated.lastIndexOf("]");
+      const cutPoint = Math.max(lastBrace, lastQuote, lastBracket);
+      if (cutPoint !== -1) {
+        truncated = truncated.slice(0, cutPoint + 1);
+        // Remove trailing comma
+        truncated = truncated.replace(/,\s*$/, "");
+        // Close with }
+        truncated = truncated + "}";
+        match = truncated.match(/\{[\s\S]*\}/);
+      }
+    }
+    if (!match) {
+      throw new Error("No JSON object found in LLM response: " + cleaned.slice(0, 300));
+    }
   }
   return parseWithFixup<T>(match[0]);
 }
