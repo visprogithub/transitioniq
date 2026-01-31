@@ -267,33 +267,48 @@ export async function getOrCreateOpikDataset(datasetName: string = "discharge-re
     throw new Error("Opik client not initialized - check OPIK_API_KEY");
   }
 
+  console.log(`[Opik] Creating/getting dataset "${datasetName}" with ${EXPERIMENT_DATASET.length} items...`);
   const dataset = await opik.getOrCreateDataset(datasetName);
 
   // Clear and insert fresh test cases
-  await dataset.clear();
-  await dataset.insert(
-    EXPERIMENT_DATASET.map((tc) => ({
-      input: {
-        patient_id: tc.patientId,
-        patient_name: tc.patientName,
-        scenario: tc.scenario,
-      },
-      expected_output: {
-        score_range: tc.expectedScoreRange,
-        status: tc.expectedStatus,
-        high_risk_count_range: tc.expectedHighRiskCount,
-      },
-      // Store reference data for scoring metrics
-      reference: {
-        expectedScoreRange: tc.expectedScoreRange,
-        expectedStatus: tc.expectedStatus,
-        expectedHighRiskCount: tc.expectedHighRiskCount,
-      },
-    }))
-  );
+  try {
+    await dataset.clear();
+  } catch (clearErr) {
+    console.warn("[Opik] dataset.clear() failed (non-fatal, may be new dataset):", clearErr instanceof Error ? clearErr.message : clearErr);
+  }
 
-  await opik.flush();
-  console.log(`[Opik] Dataset "${datasetName}" created with ${EXPERIMENT_DATASET.length} items`);
+  const items = EXPERIMENT_DATASET.map((tc) => ({
+    input: {
+      patient_id: tc.patientId,
+      patient_name: tc.patientName,
+      scenario: tc.scenario,
+    },
+    expected_output: {
+      score_range: tc.expectedScoreRange,
+      status: tc.expectedStatus,
+      high_risk_count_range: tc.expectedHighRiskCount,
+    },
+    // Store reference data for scoring metrics
+    reference: {
+      expectedScoreRange: tc.expectedScoreRange,
+      expectedStatus: tc.expectedStatus,
+      expectedHighRiskCount: tc.expectedHighRiskCount,
+    },
+  }));
+
+  console.log(`[Opik] Inserting ${items.length} items into dataset...`);
+  await dataset.insert(items);
+
+  try {
+    await Promise.race([
+      opik.flush(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("flush timeout")), 10000)),
+    ]);
+  } catch (flushErr) {
+    console.warn("[Opik] Dataset flush failed (non-fatal):", flushErr instanceof Error ? flushErr.message : flushErr);
+  }
+
+  console.log(`[Opik] Dataset "${datasetName}" ready with ${EXPERIMENT_DATASET.length} items`);
   return dataset;
 }
 

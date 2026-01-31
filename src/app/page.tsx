@@ -533,7 +533,10 @@ export default function DashboardPage() {
                             <Cpu className="w-4 h-4" />
                             <span>Analyzed with: <span className="font-medium text-gray-700">{analysis.modelUsed}</span></span>
                           </div>
-                          {analysis.modelRequested && analysis.modelRequested !== analysis.modelUsed && (
+                          {analysis.modelRequested && analysis.modelUsed &&
+                            analysis.modelRequested !== analysis.modelUsed &&
+                            !analysis.modelRequested.includes(analysis.modelUsed) &&
+                            !analysis.modelUsed.includes(analysis.modelRequested) && (
                             <div className="flex items-center justify-center gap-2 text-xs text-amber-600">
                               <AlertTriangle className="w-3 h-3" />
                               <span>Requested: {analysis.modelRequested} (different model used)</span>

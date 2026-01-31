@@ -201,6 +201,9 @@ export function EvaluationDashboard() {
     setOpikError(null);
     setOpikExperimentResult(null);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300_000); // 5 min timeout for 12 patients
+
     try {
       const response = await fetch("/api/experiments/opik", {
         method: "POST",
@@ -209,17 +212,31 @@ export function EvaluationDashboard() {
           experimentName: experimentName || `opik-experiment-${Date.now()}`,
           models: selectedModels.length > 0 ? selectedModels : undefined,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Opik experiment failed");
+      // Read response as text first, then parse — avoids crash on non-JSON responses
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`Server returned non-JSON response (HTTP ${response.status}). The experiment may have timed out or crashed. Check server logs.`);
       }
 
-      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || data.message || "Opik experiment failed");
+      }
+
       setOpikExperimentResult(data);
     } catch (err) {
-      setOpikError(err instanceof Error ? err.message : "Opik experiment failed");
+      clearTimeout(timeoutId);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setOpikError("Opik experiment timed out after 5 minutes. Try selecting fewer models or patients.");
+      } else {
+        setOpikError(err instanceof Error ? err.message : "Opik experiment failed");
+      }
     } finally {
       setIsRunningOpikExperiment(false);
     }
@@ -233,7 +250,14 @@ export function EvaluationDashboard() {
       const response = await fetch("/api/experiments/opik", {
         method: "PUT",
       });
-      const data = await response.json();
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        setDatasetPushResult({ success: false, message: `Server returned non-JSON response (HTTP ${response.status})` });
+        return;
+      }
       if (!response.ok) {
         setDatasetPushResult({ success: false, message: data.error || "Failed to push dataset" });
       } else {
