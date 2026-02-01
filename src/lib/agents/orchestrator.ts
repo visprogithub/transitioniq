@@ -9,19 +9,16 @@
  */
 
 import { v4 as uuidv4 } from "uuid";
-import { executeTool, listTools, TOOLS } from "./tools";
+import { executeTool } from "./tools";
 import { traceAgentExecution, traceToolCall, logToolCorrectness } from "./tracing";
 import {
   createMemorySession,
-  getMemorySession,
   addConversationTurn,
   setPatientContext,
   storeToolResult,
   addReasoningStep,
   storeAssessment,
   getAssessmentContext,
-  buildContextForLLM,
-  getMemoryStats,
 } from "./memory";
 import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import type {
@@ -33,8 +30,9 @@ import type {
   AgentResponse,
   AgentGraph,
   GraphNode,
-  GraphEdge,
-  ConversationMessage,
+  DrugInteractionContext,
+  CareGapContext,
+  CostContext,
   ToolName,
 } from "./types";
 import type { Patient } from "@/lib/types/patient";
@@ -124,7 +122,7 @@ export async function runAgent(
   // Run the agent loop with tracing
   return await traceAgentExecution(state.sessionId, state.patientId || "unknown", async () => {
     return await agentLoop(state);
-  });
+  }, { threadId: state.sessionId });
 }
 
 /**
@@ -154,6 +152,7 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
     let drugInteractions: unknown[] = [];
     let careGaps: unknown[] = [];
     let costs: unknown[] = [];
+    let knowledgeContext: unknown = undefined;
     let analysis: DischargeAnalysis | undefined;
 
     for (const plannedStep of plan.steps) {
@@ -176,6 +175,7 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
         drugInteractions,
         careGaps,
         costs,
+        knowledgeContext,
         analysis,
       });
 
@@ -211,15 +211,18 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
             break;
           case "check_drug_interactions":
             drugInteractions = toolCall.output as unknown[];
-            state.context.drugInteractions = drugInteractions as any;
+            state.context.drugInteractions = drugInteractions as DrugInteractionContext[];
             break;
           case "evaluate_care_gaps":
             careGaps = toolCall.output as unknown[];
-            state.context.careGaps = careGaps as any;
+            state.context.careGaps = careGaps as CareGapContext[];
             break;
           case "estimate_costs":
             costs = toolCall.output as unknown[];
-            state.context.costEstimates = costs as any;
+            state.context.costEstimates = costs as CostContext[];
+            break;
+          case "retrieve_knowledge":
+            knowledgeContext = toolCall.output;
             break;
           case "analyze_readiness":
             analysis = toolCall.output as DischargeAnalysis;
@@ -314,7 +317,7 @@ async function createPlan(state: AgentState): Promise<AgentPlan> {
     steps.push({
       order: 1,
       tool: "fetch_patient",
-      description: "Fetch patient data from FHIR",
+      description: "Fetch patient data (FHIR-structured synthetic data)",
       dependsOn: [],
       required: true,
     });
@@ -345,16 +348,24 @@ async function createPlan(state: AgentState): Promise<AgentPlan> {
 
     steps.push({
       order: 5,
+      tool: "retrieve_knowledge",
+      description: "Retrieve relevant clinical knowledge via TF-IDF RAG",
+      dependsOn: [1],
+      required: false,
+    });
+
+    steps.push({
+      order: 6,
       tool: "analyze_readiness",
       description: "Compute discharge readiness score",
-      dependsOn: [2, 3, 4],
+      dependsOn: [2, 3, 4, 5],
       required: true,
     });
 
     return {
       goal: state.currentGoal,
       steps,
-      reasoning: `Will assess patient ${state.patientId} by: 1) Fetching FHIR data, 2) Checking FDA drug interactions, 3) Evaluating care gaps, 4) Estimating costs, 5) Computing readiness score`,
+      reasoning: `Will assess patient ${state.patientId} by: 1) Fetching patient data, 2) Checking FDA drug interactions, 3) Evaluating care gaps, 4) Estimating costs, 5) Retrieving clinical knowledge via RAG, 6) Computing readiness score`,
     };
   }
 
@@ -377,6 +388,7 @@ function buildToolInput(
     drugInteractions?: unknown[];
     careGaps?: unknown[];
     costs?: unknown[];
+    knowledgeContext?: unknown;
     analysis?: DischargeAnalysis;
   }
 ): Record<string, unknown> {
@@ -389,12 +401,15 @@ function buildToolInput(
       return { patient: context.patient };
     case "estimate_costs":
       return { medications: context.patient?.medications || [] };
+    case "retrieve_knowledge":
+      return { patient: context.patient };
     case "analyze_readiness":
       return {
         patient: context.patient,
         drugInteractions: context.drugInteractions,
         careGaps: context.careGaps,
         costs: context.costs,
+        knowledgeContext: context.knowledgeContext,
       };
     case "generate_plan":
       return {
@@ -415,11 +430,10 @@ async function executeTracedTool(
   sessionId: string
 ): Promise<ToolCall> {
   const callId = uuidv4();
-  const startTime = Date.now();
 
   const result = await traceToolCall(tool, sessionId, async () => {
     return await executeTool(tool, input);
-  });
+  }, { threadId: sessionId });
 
   return {
     id: callId,
@@ -498,7 +512,6 @@ function generateResponse(
     };
   }
 
-  const statusEmoji = analysis.status === "ready" ? "checkmark" : analysis.status === "caution" ? "warning" : "stop";
   const statusText = analysis.status === "ready"
     ? "Patient is ready for discharge"
     : analysis.status === "caution"

@@ -1,4 +1,12 @@
 /**
+ * @deprecated OBSOLETE — This local prompt registry has been superseded by
+ * `src/lib/integrations/opik-prompts.ts`, which manages all prompt templates
+ * through the Opik Prompt Library with versioning, caching, and fallback.
+ *
+ * This file is retained for reference only. Do not add new prompts here.
+ * All new prompt work should go through opik-prompts.ts.
+ *
+ * Original purpose:
  * Prompt Registry - Versioned prompts for Opik tracking and A/B experiments
  *
  * Each prompt has:

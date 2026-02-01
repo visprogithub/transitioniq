@@ -1,3 +1,11 @@
+/**
+ * SMART on FHIR Client
+ *
+ * This module is ready for SMART on FHIR integration in production but is
+ * currently unused. The demo uses FHIR-structured synthetic patient data
+ * served from `demo-patients.ts` instead. When deployed in a clinical EMR
+ * environment, this client would connect to a real FHIR R4 endpoint.
+ */
 import type { Patient, Diagnosis, Medication, LabResult } from "../types/patient";
 
 const FHIR_BASE_URL = process.env.FHIR_BASE_URL || "https://launch.smarthealthit.org/v/r4/fhir";

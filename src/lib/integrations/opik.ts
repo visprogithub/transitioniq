@@ -1,4 +1,4 @@
-import { Opik, Trace, Span, evaluate, type EvaluationTask } from "opik";
+import { Opik, Trace, Span } from "opik";
 import type { DischargeAnalysis } from "../types/analysis";
 
 let opikClient: Opik | null = null;
@@ -362,7 +362,8 @@ export async function runEvaluation(
   failed: number;
   averageScoreDiff: number;
 }> {
-  const opik = getOpikClient();
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- client initialized for future tracing integration
+  const _opik = getOpikClient();
 
   let passed = 0;
   let failed = 0;
@@ -406,6 +407,58 @@ export async function runEvaluation(
     failed,
     averageScoreDiff: testCases.length > 0 ? totalScoreDiff / testCases.length : 0,
   };
+}
+
+/**
+ * Log an error as an Opik trace for observability
+ *
+ * Lightweight utility for catch blocks — creates a trace + error span,
+ * flushes, and NEVER throws (swallows its own errors so callers aren't affected).
+ *
+ * @param source - Identifier for where the error occurred (e.g. "api-analyze")
+ * @param error  - The caught error (unknown type safe)
+ * @param metadata - Optional extra metadata (patientId, threadId, etc.)
+ */
+export async function traceError(
+  source: string,
+  error: unknown,
+  metadata?: TraceMetadata & { threadId?: string }
+): Promise<void> {
+  try {
+    const opik = getOpikClient();
+    if (!opik) return;
+
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+
+    const trace = opik.trace({
+      name: `error-${source}`,
+      metadata: {
+        category: "error",
+        source,
+        threadId: metadata?.threadId,
+        ...metadata,
+      },
+    });
+
+    const span = trace.span({
+      name: "error-details",
+      metadata: {
+        success: false,
+        error: errorMessage,
+        stack: errorStack,
+        source,
+        timestamp: new Date().toISOString(),
+      },
+    });
+    span.end();
+    trace.end();
+
+    await flushTraces();
+  } catch {
+    // Never throw from error tracing — this is a best-effort utility
+    console.error(`[Opik] Failed to trace error from ${source}:`, error);
+  }
 }
 
 /**

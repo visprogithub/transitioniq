@@ -35,15 +35,6 @@ export interface MedicareDrugSpending {
   year: number;
 }
 
-// Tier-based OOP estimates (typical Medicare Part D)
-const TIER_OOP_ESTIMATES: Record<number, { min: number; max: number; name: string }> = {
-  1: { min: 0, max: 5, name: "Preferred Generic" },
-  2: { min: 5, max: 15, name: "Generic" },
-  3: { min: 30, max: 50, name: "Preferred Brand" },
-  4: { min: 50, max: 100, name: "Non-Preferred Brand" },
-  5: { min: 100, max: 1000, name: "Specialty" },
-};
-
 // Known high-cost medications with tier assignments
 const KNOWN_DRUG_TIERS: Record<string, { tier: number; avgOOP: number; priorAuth?: boolean }> = {
   // Tier 5 - Specialty

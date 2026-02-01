@@ -2,7 +2,7 @@
  * Agent Types for TransitionIQ Discharge Readiness Assessment
  */
 
-export type ToolName = "fetch_patient" | "check_drug_interactions" | "evaluate_care_gaps" | "estimate_costs" | "analyze_readiness" | "generate_plan";
+export type ToolName = "fetch_patient" | "check_drug_interactions" | "evaluate_care_gaps" | "estimate_costs" | "retrieve_knowledge" | "analyze_readiness" | "generate_plan";
 
 export interface ToolCall {
   id: string;

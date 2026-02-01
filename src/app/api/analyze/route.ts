@@ -4,7 +4,7 @@ import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
-import { traceDataSourceCall } from "@/lib/integrations/opik";
+import { traceDataSourceCall, traceError } from "@/lib/integrations/opik";
 import { getActiveModelId, setActiveModel, resetLLMProvider, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
 import { runAgent, getSession } from "@/lib/agents/orchestrator";
 import type { Patient } from "@/lib/types/patient";
@@ -108,6 +108,7 @@ export async function POST(request: NextRequest) {
         agentFallbackOccurred = true;
         agentFallbackError = agentError instanceof Error ? agentError.message : String(agentError);
         console.warn("[Analyze] Agent error, falling back to direct LLM:", agentFallbackError);
+        await traceError("api-analyze-agent-fallback", agentError, { patientId });
         // Fall through to direct LLM implementation
       }
     }
@@ -184,6 +185,7 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Analysis error:", error);
+    await traceError("api-analyze", error);
 
     // Check if this is a rate limit or usage limit error
     // Return a special response so frontend can prompt user to switch models

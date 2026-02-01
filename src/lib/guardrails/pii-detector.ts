@@ -151,21 +151,6 @@ const PII_PATTERNS: Record<PIIType, { pattern: RegExp; confidence: "high" | "med
   },
 };
 
-// PHI-specific patterns (more healthcare focused)
-const PHI_PATTERNS = {
-  // Diagnosis codes (ICD-10)
-  icd10: /\b[A-TV-Z][0-9][0-9AB]\.?[0-9A-TV-Z]{0,4}\b/g,
-
-  // Procedure codes (CPT)
-  cpt: /\b\d{5}(?:-\d{2})?\b/g,
-
-  // Drug prescription (RxNorm-like)
-  rxnorm: /\b(?:NDC|RxNorm|Drug)[:\s#]*(\d{5,11})\b/gi,
-
-  // Lab values with identifiable context
-  labValue: /\b(?:result|value|level)[:\s]*\d+\.?\d*\s*(?:mg\/dL|mmol\/L|U\/L|mEq\/L|%)\b/gi,
-};
-
 /**
  * Detect PII in text
  */

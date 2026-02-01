@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runAgent, continueConversation, getSession } from "@/lib/agents/orchestrator";
 import { logAgentGraph, logConversationMetrics, evaluateTaskCompletion } from "@/lib/agents/tracing";
+import { traceError } from "@/lib/integrations/opik";
 
 export async function POST(request: NextRequest) {
   try {
@@ -79,6 +80,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(response);
   } catch (error) {
     console.error("Agent error:", error);
+    await traceError("api-agent", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Agent execution failed" },
       { status: 500 }

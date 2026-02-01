@@ -39,6 +39,8 @@ export * from "./drug-monographs";
 export * from "./drug-interactions";
 export * from "./symptom-triage";
 export * from "./medical-terminology";
+export * from "./vector-search";
+export * from "./knowledge-index";
 
 // Knowledge base metadata
 export const KNOWLEDGE_BASE_INFO = {

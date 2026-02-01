@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runEvaluation, logEvaluationScore } from "@/lib/integrations/opik";
-import { getPatient, getAllPatients } from "@/lib/data/demo-patients";
+import { logEvaluationScore } from "@/lib/integrations/opik";
+import { getPatient } from "@/lib/data/demo-patients";
 import { checkDrugInteractions } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
@@ -36,7 +36,8 @@ export async function GET() {
   });
 }
 
-export async function POST(request: NextRequest) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function POST(_request: NextRequest) {
   try {
     const results: Array<{
       patientId: string;

@@ -11,13 +11,20 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createLLMProvider, getActiveModelId } from "@/lib/integrations/llm-provider";
-import { getOpikClient } from "@/lib/integrations/opik";
+import { getOpikClient, traceError } from "@/lib/integrations/opik";
 import { getPatient } from "@/lib/data/demo-patients";
 import {
   PATIENT_COACH_TOOLS,
   executePatientCoachTool,
-  type PatientCoachToolDefinition,
 } from "@/lib/agents/patient-coach-tools";
+import {
+  createMemorySession,
+  getMemorySession,
+  addConversationTurn,
+  setPatientContext,
+  storeToolResult,
+  buildContextForLLM,
+} from "@/lib/agents/memory";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
@@ -268,27 +275,6 @@ When you use a tool, incorporate the information naturally into your response in
 }
 
 /**
- * Format tools for the LLM function calling format
- */
-function formatToolsForLLM(tools: PatientCoachToolDefinition[]): Array<{
-  type: "function";
-  function: {
-    name: string;
-    description: string;
-    parameters: object;
-  };
-}> {
-  return tools.map((tool) => ({
-    type: "function" as const,
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    },
-  }));
-}
-
-/**
  * Parse tool calls from LLM response
  */
 function parseToolCalls(
@@ -487,22 +473,6 @@ function compactConversationHistory(history: ChatMessage[]): {
 }
 
 /**
- * Trim conversation history to stay within limits (simpler fallback)
- */
-function trimConversationHistory(history: ChatMessage[]): {
-  trimmed: ChatMessage[];
-  wasTruncated: boolean;
-} {
-  if (history.length <= LIMITS.MAX_HISTORY_MESSAGES) {
-    return { trimmed: history, wasTruncated: false };
-  }
-
-  // Keep only the most recent messages
-  const trimmed = history.slice(-LIMITS.MAX_HISTORY_MESSAGES);
-  return { trimmed, wasTruncated: true };
-}
-
-/**
  * Estimate token count from character count (rough approximation)
  * ~4 characters per token for English text
  */
@@ -517,6 +487,10 @@ export async function POST(request: NextRequest) {
   const opik = getOpikClient();
   const turnId = `turn-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
+  // Hoisted so they're available in the catch block for error tracing
+  let patientId = "";
+  let turnNumber = 0;
+
   const trace = opik?.trace({
     name: "patient-chat-turn",
     metadata: {
@@ -529,7 +503,17 @@ export async function POST(request: NextRequest) {
 
   try {
     const body: PatientChatRequest = await request.json();
-    const { patientId, message, conversationHistory, analysis } = body;
+    const { message, conversationHistory, analysis } = body;
+    patientId = body.patientId;
+
+    // Now that we have patientId, update trace with thread grouping
+    const threadId = `chat-${patientId}`;
+    trace?.update({
+      metadata: {
+        threadId,
+        patientId,
+      },
+    });
 
     // Rate limiting check
     const now = Date.now();
@@ -543,7 +527,7 @@ export async function POST(request: NextRequest) {
     lastRequestTime.set(patientId, now);
 
     // Check conversation turn limit
-    const turnNumber = Math.floor(conversationHistory.length / 2) + 1;
+    turnNumber = Math.floor(conversationHistory.length / 2) + 1;
     let limitWarning: string | undefined;
     if (turnNumber >= LIMITS.MAX_CONVERSATION_TURNS) {
       limitWarning = `You've reached ${turnNumber} messages. Consider starting a new conversation for complex questions.`;
@@ -580,9 +564,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Patient not found" }, { status: 404 });
     }
 
+    // Initialize or retrieve memory session for this patient chat
+    const memorySessionId = `chat-${patientId}`;
+    let memorySession = getMemorySession(memorySessionId);
+    if (!memorySession) {
+      memorySession = createMemorySession(memorySessionId, `Patient chat for ${patientId}`);
+      setPatientContext(memorySessionId, patient);
+    }
+    addConversationTurn(memorySessionId, { role: "user", content: message });
+
     // Compact conversation history (summarize old, keep recent verbatim)
     const {
-      compacted: historySummary,
       recentMessages,
       wasTruncated,
       summary: conversationSummary,
@@ -603,8 +595,17 @@ export async function POST(request: NextRequest) {
     const systemPrompt = buildSystemPrompt(patient, analysis || null);
     const provider = createLLMProvider();
 
-    // Build the full prompt with COMPACTED conversation history
-    let fullPrompt = `${systemPrompt}\n\n## Conversation History\n`;
+    // Build memory context from previous sessions/turns
+    const memoryContext = buildContextForLLM(memorySessionId);
+
+    // Build the full prompt with memory context and COMPACTED conversation history
+    let fullPrompt = `${systemPrompt}\n\n`;
+
+    if (memoryContext) {
+      fullPrompt += `## Memory Context\n${memoryContext}\n\n`;
+    }
+
+    fullPrompt += `## Conversation History\n`;
 
     // Add summary of older messages if conversation was compacted
     if (wasTruncated && conversationSummary) {
@@ -696,6 +697,7 @@ Coach:`;
         name: proactiveTool.name,
         result: toolResult.result,
       });
+      storeToolResult(memorySessionId, proactiveTool.name, toolResult.result);
 
       toolSpan?.update({
         output: {
@@ -797,6 +799,7 @@ Coach:`;
           name: toolCall.name,
           result: toolResult.result,
         });
+        storeToolResult(memorySessionId, toolCall.name, toolResult.result);
 
         toolSpan?.update({
           output: {
@@ -878,6 +881,16 @@ Coach:`;
         "I'd be happy to help you with that! Could you tell me a bit more about what you'd like to know?";
     }
 
+    // Store assistant response in memory
+    addConversationTurn(memorySessionId, {
+      role: "assistant",
+      content: finalResponse,
+      metadata: {
+        toolCalls: toolsUsed.map((t) => ({ tool: t.name, success: true })),
+        model: getActiveModelId(),
+      },
+    });
+
     const responseData: PatientChatResponse = {
       response: finalResponse,
       toolsUsed,
@@ -908,8 +921,24 @@ Coach:`;
     return NextResponse.json(responseData);
   } catch (error) {
     console.error("[Patient Chat] Error:", error);
-    trace?.update({ metadata: { error: String(error) } });
+
+    // Create proper error span on the trace for visibility in Opik
+    const errorSpan = trace?.span({
+      name: "error",
+      metadata: {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      },
+    });
+    errorSpan?.end();
     trace?.end();
+
+    // Also log standalone error trace for aggregation/filtering
+    await traceError("api-patient-chat", error, {
+      patientId,
+      threadId: patientId ? `chat-${patientId}` : undefined,
+    });
 
     return NextResponse.json(
       {

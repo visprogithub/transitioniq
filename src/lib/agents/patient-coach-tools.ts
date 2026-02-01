@@ -18,7 +18,6 @@ import { createLLMProvider } from "@/lib/integrations/llm-provider";
 import {
   getDrugMonograph,
   getPatientDrugInfo,
-  checkDrugInteraction,
   checkMultipleDrugInteractions,
   getPatientFriendlyInteraction,
   getSymptomTriage,

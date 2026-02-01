@@ -25,6 +25,7 @@ export function Tooltip({
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- SSR hydration guard, runs once on mount
     setMounted(true);
     return () => {
       if (timeoutRef.current) {

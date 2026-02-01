@@ -9,9 +9,8 @@
  */
 
 import { Opik } from "opik";
-import { PROMPT_REGISTRY, getPromptVersion, fillPrompt, getPromptMetadata, type PromptVersion } from "./prompts";
+import { getPromptVersion, getPromptMetadata } from "./prompts";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
-import type { Patient } from "@/lib/types/patient";
 
 let opikClient: Opik | null = null;
 
@@ -148,7 +147,7 @@ export async function runExperimentVariant(
       result.metrics = {
         score: analysis.score,
         status: analysis.status,
-        confidence: (analysis as any).confidence, // If using v1.1 prompt
+        confidence: (analysis as DischargeAnalysis & { confidence?: number }).confidence,
         latencyMs: latency,
         riskFactorCount: analysis.riskFactors?.length || 0,
         highRiskCount: analysis.riskFactors?.filter((r) => r.severity === "high").length || 0,
@@ -184,7 +183,7 @@ export async function runExperimentVariant(
       result.metrics = {
         score: analysis.score,
         status: analysis.status,
-        confidence: (analysis as any).confidence,
+        confidence: (analysis as DischargeAnalysis & { confidence?: number }).confidence,
         latencyMs: latency,
         riskFactorCount: analysis.riskFactors?.length || 0,
         highRiskCount: analysis.riskFactors?.filter((r) => r.severity === "high").length || 0,

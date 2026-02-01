@@ -320,7 +320,7 @@ export function getMedicalTermDefinition(term: string): MedicalTerm | null {
   }
 
   // Search by term name and alternatives
-  for (const [key, termData] of Object.entries(MEDICAL_TERMS)) {
+  for (const [, termData] of Object.entries(MEDICAL_TERMS)) {
     const termLower = termData.term.toLowerCase();
     const searchTerm = term.toLowerCase().trim();
 

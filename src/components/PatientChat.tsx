@@ -120,7 +120,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       };
       setMessages([welcomeMessage]);
     }
-  }, [patient.name]);
+  }, [patient.name, messages.length]);
 
   async function sendMessage(messageText: string) {
     if (!messageText.trim() || isLoading) return;

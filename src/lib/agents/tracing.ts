@@ -7,8 +7,9 @@
  * - Multi-turn conversation tracking
  */
 
-import { Opik } from "opik";
+import { Opik, type Trace } from "opik";
 import type { ToolName, AgentGraph, ToolResult } from "./types";
+import { traceError } from "../integrations/opik";
 
 let opikClient: Opik | null = null;
 
@@ -43,12 +44,73 @@ export async function flushTraces(): Promise<void> {
 }
 
 /**
+ * Wrap a request in a conversation-aware trace with thread grouping.
+ *
+ * Creates a top-level trace with `threadId` in metadata so all turns
+ * for the same conversation can be grouped in Opik's dashboard.
+ * The `Trace` object is passed into `fn` so child spans can be attached.
+ *
+ * On error: creates an error span, ends the trace, and logs a standalone
+ * error trace via `traceError()` for aggregation.
+ */
+export async function traceThread<T>(
+  threadId: string,
+  traceName: string,
+  metadata: Record<string, unknown>,
+  fn: (trace: Trace) => Promise<T>
+): Promise<T> {
+  const opik = getOpikClient();
+
+  if (!opik) {
+    // No Opik client — run without tracing
+    // Pass a dummy object that won't be used (fn should null-check if needed)
+    return fn(null as unknown as Trace);
+  }
+
+  const trace = opik.trace({
+    name: traceName,
+    metadata: {
+      threadId,
+      ...metadata,
+    },
+  });
+
+  try {
+    const result = await fn(trace);
+    trace.end();
+    await flushTraces();
+    return result;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // Create error span on the trace for visibility
+    const errorSpan = trace.span({
+      name: "error",
+      metadata: {
+        success: false,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined,
+      },
+    });
+    errorSpan.end();
+    trace.end();
+    await flushTraces();
+
+    // Also log standalone error trace for aggregation
+    await traceError(traceName, error, { threadId });
+
+    throw error;
+  }
+}
+
+/**
  * Trace an entire agent execution as a top-level trace
  */
 export async function traceAgentExecution<T>(
   sessionId: string,
   patientId: string,
-  fn: () => Promise<T>
+  fn: () => Promise<T>,
+  options?: { threadId?: string }
 ): Promise<T> {
   const opik = getOpikClient();
   const startTime = Date.now();
@@ -64,6 +126,7 @@ export async function traceAgentExecution<T>(
       patientId,
       agent_type: "discharge-readiness",
       category: "agent",
+      threadId: options?.threadId || sessionId,
     },
   });
 
@@ -123,7 +186,8 @@ export async function traceAgentExecution<T>(
 export async function traceToolCall<T>(
   toolName: ToolName,
   sessionId: string,
-  fn: () => Promise<ToolResult<T>>
+  fn: () => Promise<ToolResult<T>>,
+  options?: { threadId?: string }
 ): Promise<ToolResult<T>> {
   const opik = getOpikClient();
   const startTime = Date.now();
@@ -138,6 +202,7 @@ export async function traceToolCall<T>(
       sessionId,
       tool: toolName,
       category: "tool_call",
+      threadId: options?.threadId || sessionId,
     },
   });
 

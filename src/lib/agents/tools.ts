@@ -12,6 +12,17 @@ import {
   generateDischargePlan as llmGeneratePlan,
 } from "@/lib/integrations/analysis";
 import { getActiveModelId } from "@/lib/integrations/llm-provider";
+import { estimateMedicationCosts } from "@/lib/integrations/cms-client";
+import { evaluateCareGaps as ruleBasedCareGaps } from "@/lib/integrations/guidelines-client";
+import {
+  getCareGapEvaluationPrompt,
+  formatCareGapEvaluationPrompt,
+  getCostEstimationPrompt,
+  formatCostEstimationPrompt,
+  getKnowledgeRetrievalPrompt,
+  formatKnowledgeRetrievalPrompt,
+} from "@/lib/integrations/opik-prompts";
+import { retrieveKnowledge, getIndexStats } from "@/lib/knowledge-base/knowledge-index";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import type { ToolResult, ToolName, PatientContext, DrugInteractionContext, CareGapContext, CostContext } from "./types";
@@ -23,7 +34,7 @@ import { extractJsonArray } from "@/lib/utils/llm-json";
 export const TOOLS: Record<ToolName, ToolDefinition> = {
   fetch_patient: {
     name: "fetch_patient",
-    description: "Fetch patient data from FHIR including demographics, medications, conditions, and labs",
+    description: "Fetch FHIR-structured patient data including demographics, medications, conditions, and labs",
     parameters: ["patientId"],
     execute: fetchPatientTool,
   },
@@ -44,6 +55,12 @@ export const TOOLS: Record<ToolName, ToolDefinition> = {
     description: "Estimate out-of-pocket medication costs using CMS pricing data",
     parameters: ["medications"],
     execute: estimateCostsTool,
+  },
+  retrieve_knowledge: {
+    name: "retrieve_knowledge",
+    description: "Search the clinical knowledge base (drug monographs, interactions, symptom triage, medical terms) using TF-IDF vector retrieval and synthesize findings via LLM",
+    parameters: ["patient", "query"],
+    execute: retrieveKnowledgeTool,
   },
   analyze_readiness: {
     name: "analyze_readiness",
@@ -136,8 +153,11 @@ async function checkDrugInteractionsTool(input: Record<string, unknown>): Promis
 }
 
 /**
- * Evaluate care gaps using LLM reasoning
- * Uses the currently selected model to analyze against clinical guidelines
+ * Evaluate care gaps using LLM reasoning augmented with rule-based data
+ *
+ * AI-first approach: The LLM performs the primary analysis, but receives
+ * deterministic rule-based results from guidelines-client.ts as grounding
+ * data to reduce hallucinations and improve accuracy.
  */
 async function evaluateCareGapsTool(input: Record<string, unknown>): Promise<ToolResult<CareGapContext[]>> {
   const startTime = Date.now();
@@ -146,43 +166,29 @@ async function evaluateCareGapsTool(input: Record<string, unknown>): Promise<Too
   console.log(`[Agent Tool] evaluate_care_gaps using model: ${getActiveModelId()}`);
 
   try {
-    // Use LLM to reason about care gaps against clinical guidelines
+    // Gather deterministic rule-based data to augment LLM reasoning
+    const ruleResults = ruleBasedCareGaps(patient);
+    const ruleBasedSummary = ruleResults
+      .map((r) => `- ${r.guideline} (${r.organization}, Grade ${r.grade}): ${r.status}${r.status === "unmet" ? ` — ${r.recommendation}` : ""}`)
+      .join("\n");
+
+    console.log(`[Agent Tool] Rule-based pre-check found ${ruleResults.length} applicable guidelines (${ruleResults.filter((r) => r.status === "unmet").length} unmet)`);
+
+    // LLM performs primary analysis, augmented with rule-based data
     const { createLLMProvider } = await import("@/lib/integrations/llm-provider");
     const provider = createLLMProvider(getActiveModelId());
 
-    const patientContext = `
-Patient: ${patient.name}, ${patient.age}yo ${patient.gender === "M" ? "Male" : "Female"}
-Diagnoses: ${patient.diagnoses.map((d) => d.display).join(", ")}
-Medications: ${patient.medications.map((m) => `${m.name} ${m.dose}`).join(", ")}
-Labs: ${patient.recentLabs?.map((l) => `${l.name}: ${l.value} ${l.unit}${l.abnormal ? " [ABNORMAL]" : ""}`).join(", ") || "None available"}
-Vitals: ${patient.vitalSigns ? `BP ${patient.vitalSigns.bloodPressure}, HR ${patient.vitalSigns.heartRate}` : "Not available"}
-`;
-
-    const prompt = `You are a clinical decision support system analyzing a patient against evidence-based clinical guidelines.
-
-${patientContext}
-
-Evaluate this patient against the following major clinical guidelines:
-1. ACC/AHA Heart Failure Guidelines (if applicable)
-2. ADA Diabetes Standards of Care (if applicable)
-3. ACC/AHA/HRS Atrial Fibrillation Guidelines (if applicable)
-4. GOLD COPD Guidelines (if applicable)
-5. Discharge Planning Standards (CMS/TJC)
-
-For each applicable guideline, determine if the patient meets the recommendation or has a care gap.
-
-Respond with ONLY a JSON array of care gaps found, no other text:
-[
-  {"guideline": "Guideline Name", "status": "met" or "unmet", "grade": "A" or "B" or "C"},
-  ...
-]
-
-Notes:
-- Grade A = Strong recommendation, high-quality evidence
-- Grade B = Moderate recommendation or moderate evidence
-- Grade C = Weak recommendation or low-quality evidence
-- Only include guidelines that apply to this patient's conditions
-- Be thorough but clinically accurate`;
+    const { template } = await getCareGapEvaluationPrompt();
+    const prompt = formatCareGapEvaluationPrompt(template, {
+      patientName: patient.name,
+      patientAge: patient.age,
+      patientGender: patient.gender === "M" ? "Male" : "Female",
+      diagnoses: patient.diagnoses.map((d) => d.display).join(", "),
+      medications: patient.medications.map((m) => `${m.name} ${m.dose}`).join(", "),
+      labs: patient.recentLabs?.map((l) => `${l.name}: ${l.value} ${l.unit}${l.abnormal ? " [ABNORMAL]" : ""}`).join(", ") || "None available",
+      vitals: patient.vitalSigns ? `BP ${patient.vitalSigns.bloodPressure}, HR ${patient.vitalSigns.heartRate}` : "Not available",
+      existingGaps: ruleBasedSummary || "No rule-based gaps identified",
+    });
 
     const response = await provider.generate(prompt, {
       spanName: "care-gap-evaluation",
@@ -190,30 +196,69 @@ Notes:
         patient_id: patient.id,
         diagnosis_count: patient.diagnoses.length,
         medication_count: patient.medications.length,
+        rule_based_gap_count: ruleResults.length,
+        rule_based_unmet_count: ruleResults.filter((r) => r.status === "unmet").length,
       },
     });
 
     // Parse LLM response (handles Qwen3 thinking tokens, trailing commas, etc.)
-    const gaps = extractJsonArray<CareGapContext[]>(response.content);
+    const llmGaps = extractJsonArray<CareGapContext[]>(response.content);
+
+    // Merge rule-based + LLM results, deduplicating by guideline name
+    const mergedGaps: CareGapContext[] = ruleResults.map((r) => ({
+      guideline: r.guideline,
+      status: r.status,
+      grade: r.grade,
+    }));
+
+    const existingNames = new Set(mergedGaps.map((g) => g.guideline.toLowerCase()));
+    for (const llmGap of llmGaps) {
+      if (!existingNames.has(llmGap.guideline.toLowerCase())) {
+        mergedGaps.push(llmGap);
+        existingNames.add(llmGap.guideline.toLowerCase());
+      }
+    }
+
+    console.log(`[Agent Tool] Care gap evaluation: ${ruleResults.length} rule-based + ${llmGaps.length} LLM = ${mergedGaps.length} total (after dedup)`);
 
     return {
       success: true,
-      data: gaps,
+      data: mergedGaps,
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] LLM care gap evaluation failed:", error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "LLM care gap evaluation failed",
-      duration: Date.now() - startTime,
-    };
+    console.error("[Agent Tool] Care gap evaluation failed:", error);
+
+    // Fallback: return rule-based results if LLM fails
+    try {
+      const fallbackResults = ruleBasedCareGaps(patient);
+      console.warn("[Agent Tool] Using rule-based fallback for care gaps");
+      return {
+        success: true,
+        data: fallbackResults.map((r) => ({
+          guideline: r.guideline,
+          status: r.status,
+          grade: r.grade,
+        })),
+        duration: Date.now() - startTime,
+      };
+    } catch {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Care gap evaluation failed",
+        duration: Date.now() - startTime,
+      };
+    }
   }
 }
 
 /**
- * Estimate medication costs using LLM reasoning
- * Uses the currently selected model to reason about medication costs
+ * Estimate medication costs using CMS data → LLM reasoning
+ *
+ * All tool data flows through the LLM for reasoning:
+ * 1. CMS client provides factual grounding (KNOWN_DRUG_TIERS, NDC API, heuristics)
+ * 2. LLM reasons over the CMS data via Opik-versioned prompt
+ * 3. Fallback: if LLM fails, use raw CMS data directly
  */
 async function estimateCostsTool(input: Record<string, unknown>): Promise<ToolResult<CostContext[]>> {
   const startTime = Date.now();
@@ -222,43 +267,40 @@ async function estimateCostsTool(input: Record<string, unknown>): Promise<ToolRe
   console.log(`[Agent Tool] estimate_costs using model: ${getActiveModelId()}`);
 
   try {
-    // Use LLM to reason about medication costs
+    // Gather CMS data as grounding for LLM reasoning
+    const cmsEstimates = await estimateMedicationCosts(
+      medications.map((m) => ({ name: m.name, dose: m.dose, frequency: m.frequency }))
+    );
+
+    const cmsDataSummary = cmsEstimates
+      .map((e) => `- ${e.drugName}: $${e.estimatedMonthlyOOP}/mo, Tier ${e.tierLevel || "unknown"}, ${e.coveredByMedicarePartD ? "Covered" : "Not covered"}${e.priorAuthRequired ? ", Prior Auth Required" : ""} (Source: ${e.source})`)
+      .join("\n");
+
+    console.log(`[Agent Tool] CMS grounding data gathered for ${cmsEstimates.length} medications`);
+
+    // LLM reasons over the CMS data
     const { createLLMProvider } = await import("@/lib/integrations/llm-provider");
     const provider = createLLMProvider(getActiveModelId());
 
+    const { template } = await getCostEstimationPrompt();
     const medicationList = medications.map((m) => `- ${m.name} ${m.dose} ${m.frequency}`).join("\n");
-
-    const prompt = `Analyze the following medications and estimate their monthly out-of-pocket costs for a typical Medicare Part D patient without supplemental coverage.
-
-Medications:
-${medicationList}
-
-For each medication, estimate:
-1. The approximate monthly out-of-pocket cost in USD
-2. Whether it's typically covered by Medicare Part D (true/false)
-
-Consider:
-- Brand vs generic availability
-- Typical copay tiers
-- High-cost specialty medications (biologics, newer anticoagulants, GLP-1 agonists)
-- Common generic medications typically have low costs ($10-30/month)
-- Brand-name medications without generics often cost $100-500+/month
-
-Respond with ONLY a JSON array, no other text:
-[
-  {"medication": "Drug Name", "monthlyOOP": 150, "covered": true},
-  ...
-]`;
+    const prompt = formatCostEstimationPrompt(template, {
+      medicationList,
+      cmsData: cmsDataSummary,
+    });
 
     const response = await provider.generate(prompt, {
       spanName: "cost-estimation",
       metadata: {
         medication_count: medications.length,
+        cms_total_oop: cmsEstimates.reduce((s, e) => s + e.estimatedMonthlyOOP, 0),
       },
     });
 
     // Parse LLM response (handles Qwen3 thinking tokens, trailing commas, etc.)
     const costs = extractJsonArray<CostContext[]>(response.content);
+
+    console.log(`[Agent Tool] LLM cost analysis: ${costs.length} medications, total $${costs.reduce((s, c) => s + c.monthlyOOP, 0)}/month`);
 
     return {
       success: true,
@@ -266,12 +308,194 @@ Respond with ONLY a JSON array, no other text:
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] LLM cost estimation failed:", error);
+    console.error("[Agent Tool] LLM cost estimation failed, falling back to CMS data:", error);
+
+    // Fallback: use raw CMS data if LLM fails
+    try {
+      const fallbackEstimates = await estimateMedicationCosts(
+        medications.map((m) => ({ name: m.name, dose: m.dose, frequency: m.frequency }))
+      );
+      console.warn("[Agent Tool] Using CMS data fallback for costs");
+      return {
+        success: true,
+        data: fallbackEstimates.map((e) => ({
+          medication: e.drugName,
+          monthlyOOP: e.estimatedMonthlyOOP,
+          covered: e.coveredByMedicarePartD,
+        })),
+        duration: Date.now() - startTime,
+      };
+    } catch {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Cost estimation failed",
+        duration: Date.now() - startTime,
+      };
+    }
+  }
+}
+
+/**
+ * Knowledge retrieval context type
+ */
+interface KnowledgeContext {
+  summary: string;
+  relevantFindings: {
+    category: string;
+    finding: string;
+    importance: string;
+  }[];
+  patientCounselingPoints: string[];
+  monitoringNeeded: string[];
+  redFlags: string[];
+  searchStats: {
+    documentsSearched: number;
+    resultsFound: number;
+    topScore: number;
+  };
+}
+
+/**
+ * Retrieve and synthesize clinical knowledge using TF-IDF RAG → LLM reasoning
+ *
+ * Architecture:
+ * 1. Build search query from patient context (conditions + medications)
+ * 2. TF-IDF search over ~400 knowledge-base documents
+ * 3. LLM synthesizes retrieved context for patient-specific relevance
+ * 4. Fallback: return raw search results if LLM fails
+ */
+async function retrieveKnowledgeTool(input: Record<string, unknown>): Promise<ToolResult<KnowledgeContext>> {
+  const startTime = Date.now();
+  const patient = input.patient as Patient;
+  const customQuery = input.query as string | undefined;
+
+  console.log(`[Agent Tool] retrieve_knowledge using model: ${getActiveModelId()}`);
+
+  try {
+    // Build search query from patient context
+    const conditions = patient.diagnoses.map((d) => d.display).join(", ");
+    const meds = patient.medications.map((m) => m.name).join(", ");
+    const searchQuery = customQuery || `${conditions} ${meds}`;
+
+    // TF-IDF retrieval from knowledge base
+    const { results, formatted, documentCount } = retrieveKnowledge(searchQuery, {
+      topK: 8,
+    });
+
+    const stats = getIndexStats();
+    console.log(`[Agent Tool] Knowledge retrieval: searched ${documentCount} documents, found ${results.length} relevant (top score: ${results[0]?.score?.toFixed(3) || 0})`);
+    console.log(`[Agent Tool] Index stats: ${JSON.stringify(stats.documentsByType)}`);
+
+    if (results.length === 0) {
+      return {
+        success: true,
+        data: {
+          summary: "No relevant entries found in the clinical knowledge base for this patient's conditions and medications.",
+          relevantFindings: [],
+          patientCounselingPoints: [],
+          monitoringNeeded: [],
+          redFlags: [],
+          searchStats: { documentsSearched: documentCount, resultsFound: 0, topScore: 0 },
+        },
+        duration: Date.now() - startTime,
+      };
+    }
+
+    // LLM synthesizes the retrieved context
+    const { createLLMProvider } = await import("@/lib/integrations/llm-provider");
+    const provider = createLLMProvider(getActiveModelId());
+
+    const { template } = await getKnowledgeRetrievalPrompt();
+    const prompt = formatKnowledgeRetrievalPrompt(template, {
+      patientName: patient.name,
+      patientAge: patient.age,
+      patientGender: patient.gender === "M" ? "Male" : "Female",
+      diagnoses: conditions,
+      medications: meds,
+      query: searchQuery,
+      retrievedContext: formatted,
+    });
+
+    const response = await provider.generate(prompt, {
+      spanName: "knowledge-retrieval",
+      metadata: {
+        patient_id: patient.id,
+        search_query: searchQuery,
+        results_found: results.length,
+        top_score: results[0]?.score || 0,
+        document_types: results.map((r) => r.document.type),
+        index_total_docs: documentCount,
+        index_vocabulary_size: stats.vocabularySize,
+      },
+    });
+
+    // Parse LLM response
+    const { extractJsonObject } = await import("@/lib/utils/llm-json");
+    const synthesis = extractJsonObject<{
+      summary: string;
+      relevantFindings: { category: string; finding: string; importance: string }[];
+      patientCounselingPoints: string[];
+      monitoringNeeded: string[];
+      redFlags: string[];
+    }>(response.content);
+
+    console.log(`[Agent Tool] Knowledge synthesis: ${synthesis.relevantFindings?.length || 0} findings, ${synthesis.redFlags?.length || 0} red flags`);
+
     return {
-      success: false,
-      error: error instanceof Error ? error.message : "LLM cost estimation failed",
+      success: true,
+      data: {
+        summary: synthesis.summary || "Knowledge base search completed.",
+        relevantFindings: synthesis.relevantFindings || [],
+        patientCounselingPoints: synthesis.patientCounselingPoints || [],
+        monitoringNeeded: synthesis.monitoringNeeded || [],
+        redFlags: synthesis.redFlags || [],
+        searchStats: {
+          documentsSearched: documentCount,
+          resultsFound: results.length,
+          topScore: results[0]?.score || 0,
+        },
+      },
       duration: Date.now() - startTime,
     };
+  } catch (error) {
+    console.error("[Agent Tool] Knowledge retrieval failed, returning raw search results:", error);
+
+    // Fallback: return raw search results without LLM synthesis
+    try {
+      const conditions = patient.diagnoses.map((d) => d.display).join(", ");
+      const meds = patient.medications.map((m) => m.name).join(", ");
+      const { results, documentCount } = retrieveKnowledge(
+        customQuery || `${conditions} ${meds}`,
+        { topK: 5 }
+      );
+
+      return {
+        success: true,
+        data: {
+          summary: results.map((r) => `${r.document.title}: ${r.document.content.slice(0, 200)}`).join("\n"),
+          relevantFindings: results.map((r) => ({
+            category: r.document.type,
+            finding: r.document.title,
+            importance: "informational" as const,
+          })),
+          patientCounselingPoints: [],
+          monitoringNeeded: [],
+          redFlags: [],
+          searchStats: {
+            documentsSearched: documentCount,
+            resultsFound: results.length,
+            topScore: results[0]?.score || 0,
+          },
+        },
+        duration: Date.now() - startTime,
+      };
+    } catch {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Knowledge retrieval failed",
+        duration: Date.now() - startTime,
+      };
+    }
   }
 }
 

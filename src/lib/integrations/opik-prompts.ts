@@ -17,6 +17,9 @@ let cachedPrompt: Prompt | null = null;
 let cachedPatientSummaryPrompt: Prompt | null = null;
 let cachedLLMJudgePrompt: Prompt | null = null;
 let cachedPatientCoachPrompt: Prompt | null = null;
+let cachedCareGapEvaluationPrompt: Prompt | null = null;
+let cachedCostEstimationPrompt: Prompt | null = null;
+let cachedKnowledgeRetrievalPrompt: Prompt | null = null;
 
 function getOpikClient(): Opik | null {
   if (!process.env.OPIK_API_KEY) {
@@ -159,6 +162,104 @@ When you need to use a tool, respond with ONLY a JSON object:
 {"tool_name": "toolName", "arguments": {"paramName": "value"}}
 
 Otherwise, respond conversationally in a friendly, supportive way.`;
+
+/**
+ * Care Gap Evaluation Prompt - LLM enrichment of rule-based care gap results
+ * Used when deterministic rules find < 2 unmet gaps, to discover additional guidelines
+ */
+const CARE_GAP_EVALUATION_PROMPT = `You are a clinical decision support system analyzing a patient against evidence-based clinical guidelines.
+
+Patient: {{patientName}}, {{patientAge}}yo {{patientGender}}
+Diagnoses: {{diagnoses}}
+Medications: {{medications}}
+Labs: {{labs}}
+Vitals: {{vitals}}
+
+Rule-Based Gaps Already Identified:
+{{existingGaps}}
+
+Evaluate this patient against the following major clinical guidelines:
+1. ACC/AHA Heart Failure Guidelines (if applicable)
+2. ADA Diabetes Standards of Care (if applicable)
+3. ACC/AHA/HRS Atrial Fibrillation Guidelines (if applicable)
+4. GOLD COPD Guidelines (if applicable)
+5. Discharge Planning Standards (CMS/TJC)
+
+The rule-based system has already identified the gaps listed above. Your job is to find ADDITIONAL care gaps not already covered by the existing results.
+
+Respond with ONLY a JSON array of additional care gaps found, no other text:
+[
+  {"guideline": "Guideline Name", "status": "met" or "unmet", "grade": "A" or "B" or "C"},
+  ...
+]
+
+Notes:
+- Grade A = Strong recommendation, high-quality evidence
+- Grade B = Moderate recommendation or moderate evidence
+- Grade C = Weak recommendation or low-quality evidence
+- Only include guidelines that apply to this patient's conditions
+- Do NOT duplicate any guideline already listed in "Rule-Based Gaps Already Identified"
+- Be thorough but clinically accurate`;
+
+/**
+ * Cost Estimation Prompt - LLM fallback for medication cost estimation
+ * Only used when CMS client cannot determine costs for a medication
+ */
+const COST_ESTIMATION_PROMPT = `You are a Medicare Part D cost analysis specialist. Analyze the following medications and their CMS-sourced pricing data for a typical Medicare Part D patient without supplemental coverage.
+
+Medications:
+{{medicationList}}
+
+CMS Pricing Data (from Medicare formulary and NDC directory):
+{{cmsData}}
+
+Using the CMS data above as your primary source, provide your analysis for each medication:
+1. The monthly out-of-pocket cost in USD (use the CMS data; refine only if you have strong evidence of a discrepancy)
+2. Whether it's typically covered by Medicare Part D (true/false)
+
+You may also flag:
+- Medications where a generic alternative could save money
+- Drugs requiring prior authorization that could delay discharge
+- Potential copay assistance programs for high-cost specialty medications
+
+Respond with ONLY a JSON array, no other text:
+[
+  {"medication": "Drug Name", "monthlyOOP": 150, "covered": true},
+  ...
+]`;
+
+const KNOWLEDGE_RETRIEVAL_PROMPT = `You are a clinical knowledge synthesis specialist. A TF-IDF search over the TransitionIQ clinical knowledge base has returned the following relevant entries for the patient context below.
+
+Patient Context:
+- Name: {{patientName}}, Age: {{patientAge}}, Gender: {{patientGender}}
+- Diagnoses: {{diagnoses}}
+- Current medications: {{medications}}
+
+Search Query: {{query}}
+
+Retrieved Knowledge Base Entries:
+{{retrievedContext}}
+
+Using ONLY the retrieved knowledge base entries above as your primary source (do not hallucinate data not present in the entries), synthesize a clinically relevant summary that:
+
+1. Highlights information directly relevant to THIS patient's conditions and medications
+2. Flags any drug interactions, contraindications, or warnings found in the entries
+3. Notes relevant patient counseling points or self-care guidance
+4. Identifies monitoring parameters that apply to this patient
+5. Calls out any red flags or urgent considerations
+
+Be concise and actionable. If the retrieved entries do not contain relevant information for the query, say so clearly rather than guessing.
+
+Respond with ONLY a JSON object:
+{
+  "summary": "Concise clinical summary of relevant findings",
+  "relevantFindings": [
+    {"category": "drug_info|interaction|symptom|guideline|education", "finding": "...", "importance": "critical|important|informational"}
+  ],
+  "patientCounselingPoints": ["Point 1", "Point 2"],
+  "monitoringNeeded": ["Parameter 1", "Parameter 2"],
+  "redFlags": ["Any urgent items found"]
+}`;
 
 const LLM_JUDGE_PROMPT = `You are an expert medical quality assurance reviewer evaluating AI-generated discharge readiness assessments.
 
@@ -429,6 +530,61 @@ export async function initializeOpikPrompts(): Promise<{
     const patientCoachVersionInfo = patientCoachPrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: patient-coach (version: ${patientCoachVersionInfo})`);
 
+    // Create/update the care gap evaluation prompt
+    const careGapPrompt = await opik.createPrompt({
+      name: "care-gap-evaluation",
+      prompt: CARE_GAP_EVALUATION_PROMPT,
+      description: "LLM enrichment prompt for care gap evaluation beyond rule-based checks",
+      metadata: {
+        version: "1.0",
+        author: "transitioniq",
+        use_case: "healthcare_care_gap_evaluation",
+      },
+      tags: ["clinical", "guidelines", "care-gaps", "healthcare", "transitioniq"],
+      changeDescription: "Care gap evaluation prompt with rule-based gap awareness",
+    });
+
+    cachedCareGapEvaluationPrompt = careGapPrompt;
+    const careGapVersionInfo = careGapPrompt.commit || "initial";
+    console.log(`[Opik] Prompt stored in Prompt Library: care-gap-evaluation (version: ${careGapVersionInfo})`);
+
+    // Create/update the cost estimation prompt
+    const costPrompt = await opik.createPrompt({
+      name: "cost-estimation",
+      prompt: COST_ESTIMATION_PROMPT,
+      description: "LLM fallback prompt for medication cost estimation when CMS data unavailable",
+      metadata: {
+        version: "1.0",
+        author: "transitioniq",
+        use_case: "healthcare_cost_estimation",
+      },
+      tags: ["clinical", "costs", "medications", "healthcare", "transitioniq"],
+      changeDescription: "Cost estimation prompt for Medicare Part D OOP estimates",
+    });
+
+    cachedCostEstimationPrompt = costPrompt;
+    const costVersionInfo = costPrompt.commit || "initial";
+    console.log(`[Opik] Prompt stored in Prompt Library: cost-estimation (version: ${costVersionInfo})`);
+
+    // Create/update the knowledge retrieval prompt
+    const knowledgePrompt = await opik.createPrompt({
+      name: "knowledge-retrieval",
+      prompt: KNOWLEDGE_RETRIEVAL_PROMPT,
+      description: "RAG synthesis prompt for TF-IDF knowledge base retrieval in TransitionIQ",
+      metadata: {
+        version: "1.0",
+        author: "transitioniq",
+        use_case: "healthcare_knowledge_retrieval",
+        rag_type: "tfidf_in_memory",
+      },
+      tags: ["rag", "knowledge-base", "clinical", "retrieval", "healthcare", "transitioniq"],
+      changeDescription: "Knowledge retrieval synthesis prompt for in-memory TF-IDF RAG",
+    });
+
+    cachedKnowledgeRetrievalPrompt = knowledgePrompt;
+    const knowledgeVersionInfo = knowledgePrompt.commit || "initial";
+    console.log(`[Opik] Prompt stored in Prompt Library: knowledge-retrieval (version: ${knowledgeVersionInfo})`);
+
     console.log(`[Opik] View prompts at: https://www.comet.com/opik/prompts`);
 
     return {
@@ -581,6 +737,9 @@ export function clearPromptCache(): void {
   cachedPatientSummaryPrompt = null;
   cachedLLMJudgePrompt = null;
   cachedPatientCoachPrompt = null;
+  cachedCareGapEvaluationPrompt = null;
+  cachedCostEstimationPrompt = null;
+  cachedKnowledgeRetrievalPrompt = null;
   console.log("[Opik] Prompt cache cleared");
 }
 
@@ -654,6 +813,200 @@ export function formatPatientCoachPrompt(
     formatted = formatted.replace(new RegExp(`{{${key}}}`, "g"), String(value));
   }
 
+  return formatted;
+}
+
+/**
+ * Get the care gap evaluation prompt from Opik Prompt Library
+ * Falls back to local prompt if Opik unavailable
+ */
+export async function getCareGapEvaluationPrompt(): Promise<{
+  template: string;
+  commit: string | null;
+  fromOpik: boolean;
+}> {
+  const opik = getOpikClient();
+
+  if (cachedCareGapEvaluationPrompt) {
+    return {
+      template: cachedCareGapEvaluationPrompt.prompt,
+      commit: cachedCareGapEvaluationPrompt.commit || null,
+      fromOpik: true,
+    };
+  }
+
+  if (opik) {
+    try {
+      const prompt = await opik.getPrompt({ name: "care-gap-evaluation" });
+      if (prompt) {
+        cachedCareGapEvaluationPrompt = prompt;
+        console.log(`[Opik] Using care-gap-evaluation prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
+        return {
+          template: prompt.prompt,
+          commit: prompt.commit || null,
+          fromOpik: true,
+        };
+      }
+    } catch (error) {
+      console.warn("[Opik] Failed to get care-gap-evaluation prompt from Prompt Library, using local template:", error);
+    }
+  }
+
+  console.log("[Opik] Using local care-gap-evaluation prompt template (not versioned in Opik)");
+  return {
+    template: CARE_GAP_EVALUATION_PROMPT,
+    commit: null,
+    fromOpik: false,
+  };
+}
+
+/**
+ * Format the care gap evaluation prompt with patient data
+ */
+export function formatCareGapEvaluationPrompt(
+  template: string,
+  data: {
+    patientName: string;
+    patientAge: number;
+    patientGender: string;
+    diagnoses: string;
+    medications: string;
+    labs: string;
+    vitals: string;
+    existingGaps: string;
+  }
+): string {
+  let formatted = template;
+  for (const [key, value] of Object.entries(data)) {
+    formatted = formatted.replace(new RegExp(`{{${key}}}`, "g"), String(value));
+  }
+  return formatted;
+}
+
+/**
+ * Get the cost estimation prompt from Opik Prompt Library
+ * Falls back to local prompt if Opik unavailable
+ */
+export async function getCostEstimationPrompt(): Promise<{
+  template: string;
+  commit: string | null;
+  fromOpik: boolean;
+}> {
+  const opik = getOpikClient();
+
+  if (cachedCostEstimationPrompt) {
+    return {
+      template: cachedCostEstimationPrompt.prompt,
+      commit: cachedCostEstimationPrompt.commit || null,
+      fromOpik: true,
+    };
+  }
+
+  if (opik) {
+    try {
+      const prompt = await opik.getPrompt({ name: "cost-estimation" });
+      if (prompt) {
+        cachedCostEstimationPrompt = prompt;
+        console.log(`[Opik] Using cost-estimation prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
+        return {
+          template: prompt.prompt,
+          commit: prompt.commit || null,
+          fromOpik: true,
+        };
+      }
+    } catch (error) {
+      console.warn("[Opik] Failed to get cost-estimation prompt from Prompt Library, using local template:", error);
+    }
+  }
+
+  console.log("[Opik] Using local cost-estimation prompt template (not versioned in Opik)");
+  return {
+    template: COST_ESTIMATION_PROMPT,
+    commit: null,
+    fromOpik: false,
+  };
+}
+
+/**
+ * Format the cost estimation prompt with medication data
+ */
+export function formatCostEstimationPrompt(
+  template: string,
+  data: {
+    medicationList: string;
+    cmsData: string;
+  }
+): string {
+  let formatted = template;
+  for (const [key, value] of Object.entries(data)) {
+    formatted = formatted.replace(new RegExp(`{{${key}}}`, "g"), String(value));
+  }
+  return formatted;
+}
+
+/**
+ * Get the knowledge retrieval prompt from Opik Prompt Library
+ * Falls back to local prompt if Opik unavailable
+ */
+export async function getKnowledgeRetrievalPrompt(): Promise<{
+  template: string;
+  commit: string | null;
+  fromOpik: boolean;
+}> {
+  const opik = getOpikClient();
+
+  if (cachedKnowledgeRetrievalPrompt) {
+    return {
+      template: cachedKnowledgeRetrievalPrompt.prompt,
+      commit: cachedKnowledgeRetrievalPrompt.commit || null,
+      fromOpik: true,
+    };
+  }
+
+  if (opik) {
+    try {
+      const prompt = await opik.getPrompt({ name: "knowledge-retrieval" });
+      if (prompt) {
+        cachedKnowledgeRetrievalPrompt = prompt;
+        console.log(`[Opik] Using knowledge-retrieval prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
+        return {
+          template: prompt.prompt,
+          commit: prompt.commit || null,
+          fromOpik: true,
+        };
+      }
+    } catch (error) {
+      console.warn("[Opik] Failed to get knowledge-retrieval prompt from Prompt Library, using local template:", error);
+    }
+  }
+
+  console.log("[Opik] Using local knowledge-retrieval prompt template (not versioned in Opik)");
+  return {
+    template: KNOWLEDGE_RETRIEVAL_PROMPT,
+    commit: null,
+    fromOpik: false,
+  };
+}
+
+/**
+ * Format the knowledge retrieval prompt with patient and search data
+ */
+export function formatKnowledgeRetrievalPrompt(
+  template: string,
+  data: {
+    patientName: string;
+    patientAge: number;
+    patientGender: string;
+    diagnoses: string;
+    medications: string;
+    query: string;
+    retrievedContext: string;
+  }
+): string {
+  let formatted = template;
+  for (const [key, value] of Object.entries(data)) {
+    formatted = formatted.replace(new RegExp(`{{${key}}}`, "g"), String(value));
+  }
   return formatted;
 }
 

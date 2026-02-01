@@ -116,7 +116,6 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
 // Active model storage using globalThis to persist across Next.js module reloads
 // This fixes the issue where module-level variables get cached and stale
 declare global {
-  // eslint-disable-next-line no-var
   var __transitioniq_active_model: string | undefined;
 }
 

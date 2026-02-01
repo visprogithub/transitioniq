@@ -112,8 +112,6 @@ export async function analyzeDischargeReadiness(
     promptsInitialized = true;
   }
 
-  const startTime = Date.now();
-
   // Get prompt from Opik Prompt Library
   const { template, commit, fromOpik } = await getDischargeAnalysisPrompt();
 

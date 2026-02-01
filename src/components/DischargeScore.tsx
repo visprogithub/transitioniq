@@ -16,6 +16,7 @@ export function DischargeScore({ score, status, isLoading = false }: DischargeSc
   // Animate score counting up
   useEffect(() => {
     if (isLoading) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset for animation
       setDisplayScore(0);
       return;
     }

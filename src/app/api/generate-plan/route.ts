@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 import { generateDischargePlan } from "@/lib/integrations/analysis";
-import { traceGeminiCall } from "@/lib/integrations/opik";
+import { traceGeminiCall, traceError } from "@/lib/integrations/opik";
 import { setActiveModel, resetLLMProvider } from "@/lib/integrations/llm-provider";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
@@ -47,6 +47,7 @@ export async function POST(request: NextRequest) {
         });
       } catch (geminiError) {
         console.warn("Gemini plan generation failed, using fallback:", geminiError);
+        await traceError("api-generate-plan-llm", geminiError, { patientId });
         // Fall through to computed plan
       }
     }
@@ -56,6 +57,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ plan });
   } catch (error) {
     console.error("Plan generation error:", error);
+    await traceError("api-generate-plan", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Plan generation failed" },
       { status: 500 }

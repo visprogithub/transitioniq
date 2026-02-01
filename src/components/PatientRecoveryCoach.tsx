@@ -152,7 +152,7 @@ export function PatientRecoveryCoach({
 }: PatientRecoveryCoachProps) {
   const [patientSummary, setPatientSummary] = useState<PatientSummary | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [, setError] = useState<string | null>(null);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(
     new Set(["whatYouNeedToKnow", "nextSteps"])
   );
@@ -183,6 +183,7 @@ export function PatientRecoveryCoach({
 
     // 4. Generate new summary via API
     generatePatientSummary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- generatePatientSummary is recreated each render; deps would cause infinite loop
   }, [analysis, patient, cachedSummary]);
 
   async function generatePatientSummary() {

@@ -10,14 +10,12 @@ import {
   listExperiments,
   getExperiment,
   runExperiment,
-  type ExperimentSummary,
 } from "@/lib/agents/experiments";
-import { listPrompts, getLatestPrompt, getPromptVersion } from "@/lib/agents/prompts";
+import { listPrompts } from "@/lib/agents/prompts";
 import { getPatient } from "@/lib/data/demo-patients";
 import { checkDrugInteractions } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
-import type { Patient } from "@/lib/types/patient";
 
 /**
  * GET /api/experiments
@@ -166,7 +164,7 @@ async function analyzeWithPromptVersion(
   if (isEnhanced) {
     return {
       ...baseAnalysis,
-      // @ts-ignore - confidence is added by enhanced prompt
+      // @ts-expect-error - confidence is added by enhanced prompt
       confidence: 0.85 + Math.random() * 0.1, // 0.85-0.95 for demo
       readmissionRisk: score < 40 ? "high" : score < 70 ? "moderate" : "low",
     };

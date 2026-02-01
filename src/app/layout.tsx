@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "TransitionIQ - Discharge Readiness Assessment",
-  description: "AI-powered discharge readiness scorer that fuses FHIR patient data, FDA safety signals, CMS pricing, and clinical guidelines.",
+  description: "AI-powered discharge readiness scorer that fuses FHIR-structured patient data, FDA safety signals, CMS pricing, and clinical guidelines.",
   keywords: ["discharge planning", "hospital", "healthcare", "AI", "clinical decision support"],
   authors: [{ name: "TransitionIQ Team" }],
 };

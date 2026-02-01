@@ -600,6 +600,7 @@ export default function DashboardPage() {
                                 check_drug_interactions: "FDA",
                                 evaluate_care_gaps: "Guidelines",
                                 estimate_costs: "CMS",
+                                retrieve_knowledge: "RAG",
                                 analyze_readiness: "LLM",
                                 generate_plan: "LLM",
                               };
@@ -610,6 +611,7 @@ export default function DashboardPage() {
                                 FDA: "bg-purple-100 text-purple-700",
                                 Guidelines: "bg-green-100 text-green-700",
                                 CMS: "bg-blue-100 text-blue-700",
+                                RAG: "bg-teal-100 text-teal-700",
                                 LLM: "bg-indigo-100 text-indigo-700",
                               };
                               return (
