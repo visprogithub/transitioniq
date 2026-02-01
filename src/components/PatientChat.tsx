@@ -448,7 +448,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
               <p className="text-xs text-gray-500 text-center">
                 {messages.length <= 1 ? "Try asking one of these:" : "Suggested questions:"}
               </p>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {suggestedQuestions.map((q, i) => (
                   <motion.button
                     key={i}
@@ -463,7 +463,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-xs text-gray-400">{q.category}</p>
-                      <p className="text-sm text-gray-700 truncate">
+                      <p className="text-sm text-gray-700">
                         {q.question}
                       </p>
                     </div>

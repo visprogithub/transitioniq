@@ -10,29 +10,83 @@ This software and its source code are proprietary and confidential. Unauthorized
 
 ## Overview
 
-TransitionIQ is an AI-powered discharge readiness assessment tool that helps healthcare providers evaluate whether patients are safe to leave the hospital. It fuses multiple data sources to provide a comprehensive risk assessment:
+TransitionIQ is an AI-powered discharge readiness assessment tool that helps healthcare providers evaluate whether patients are safe to leave the hospital. It uses a multi-agent orchestrator that fuses data from multiple clinical sources, reasons over them with LLMs, and presents both a clinician-facing assessment and a patient-friendly preparation guide.
 
-- **FHIR Patient Data** - Medications, conditions, and lab results
-- **FDA Safety Signals** - Drug interaction checks via RxNorm
-- **Clinical Guidelines** - ACC/AHA, ADA, GOLD guideline compliance
-- **CMS Cost Estimates** - Out-of-pocket cost barriers
+### Data Sources
+
+- **FHIR Patient Data** - Medications, conditions, allergies, and lab results
+- **FDA Safety Signals** - Drug interaction checks via RxNorm/openFDA
+- **Clinical Guidelines** - ACC/AHA, ADA, GOLD guideline compliance evaluation
+- **CMS Cost Estimates** - Medicare Part D out-of-pocket cost barriers
+- **Clinical Knowledge Base** - RAG-powered search across drug monographs, interactions, symptom triage protocols, and medical terminology
+
+### Demo vs. Production
+
+For this hackathon submission, all three views (Clinical, Patient, Evaluation) exist within the same web app for demonstration purposes. In a production deployment:
+
+- **Clinical View** would be integrated into the hospital's **EHR system** (e.g., Epic, Cerner) as a clinical decision support module, accessible during the discharge workflow.
+- **Patient View** would be a separate **mobile app** or integrated into a patient portal like **MyChart**, where patients receive their personalized going-home preparation guide and can chat with the Recovery Coach.
+- **Evaluation tab** would be an **internal dashboard** for the TransitionIQ team to monitor model performance, run A/B experiments, track accuracy metrics, and manage prompt versions — not visible to clinicians or patients.
 
 ## Tech Stack
 
-- **Frontend**: Next.js 16 with App Router, TypeScript, Tailwind CSS
-- **LLM**: Multi-provider support (OpenAI, HuggingFace, Gemini, Anthropic)
-- **Observability**: Opik (Comet) for tracing, evaluation, and cost tracking
+- **Frontend**: Next.js 16 with App Router, TypeScript, Tailwind CSS, Framer Motion
+- **LLM**: Multi-provider support (OpenAI, HuggingFace, Gemini, Anthropic) via abstracted LLM provider
+- **Agent Framework**: TypeScript ReAct-style orchestrator with tool chaining
+- **Observability**: Opik (Comet) for tracing, prompt versioning, evaluation, error tracking, and cost tracking
+- **Knowledge Base**: Zero-dependency TF-IDF vector search with medical NLP (synonym expansion, stemming)
+- **Memory**: In-memory session management with conversation history compaction
 - **Hosting**: Vercel
 
 ## Features
 
+### Clinical View
 - **Multi-Model Support** - Switch between OpenAI GPT-4o Mini, HuggingFace (Qwen, Llama), Gemini, and Anthropic Claude
-- **Animated Discharge Score** - Visual gauge (0-100) with status indicators (Ready/Caution/Not Ready)
-- **Risk Factor Cards** - Expandable cards with severity levels (high/moderate/low) and data source attribution
-- **Smart Rate Limit Handling** - Automatic prompts to switch models when rate limited
+- **Animated Discharge Score** - Visual gauge (0-100) with status indicators and collapsible methodology explanation
+- **Risk Factor Cards** - Expandable cards with severity levels (high/moderate/low) and data source attribution (FDA, CMS, Guidelines, FHIR, RAG)
 - **AI-Generated Discharge Plans** - Comprehensive checklists tailored to patient risk factors
+- **Smart Rate Limit Handling** - Automatic prompts to switch models when rate limited
+
+### Patient View
+- **Preparation Tracker** - Patient-friendly framing focused on going-home preparation (not readiness judgment)
+- **Recovery Coach** - Multi-turn conversational AI with tool use (medication lookup, symptom checking, term explanation, dietary/activity guidance)
+- **Prioritized Checklist** - Separated into "Must Do Before Leaving" and "Helpful For Your Recovery" sections
+- **Suggested Questions** - Pre-built question cards for common patient concerns
+
+### Observability & Evaluation
 - **Real-time Opik Tracing** - Token usage, cost estimates, and latency tracking for all LLM calls
+- **Error Tracing** - All API route errors logged to Opik with source identification and stack traces
+- **Thread Grouping** - Multi-turn conversations grouped by threadId for debugging
+- **Prompt Library** - 8 prompts versioned and managed via Opik Prompt Library with local fallbacks
 - **Model Comparison** - A/B testing and evaluation dashboard for comparing model outputs
+- **Agent Trajectory Logging** - Step-by-step decision tracking for the agent orchestrator
+
+## Agent Architecture
+
+The agent orchestrator runs a 7-step ReAct-style pipeline. Each step uses deterministic data clients for grounding, then sends the data to the LLM via Opik-versioned prompts for reasoning:
+
+```
+User Request -> API Route -> Agent Orchestrator
+                                    |
+    Step 1: fetch_patient           (FHIR patient data)
+    Step 2: check_drug_interactions (FDA/RxNorm + LLM reasoning)
+    Step 3: evaluate_care_gaps      (Clinical guidelines + LLM reasoning)
+    Step 4: estimate_costs          (CMS Part D pricing + LLM reasoning)
+    Step 5: retrieve_knowledge      (TF-IDF RAG search + LLM synthesis)
+    Step 6: analyze_readiness       (All context -> LLM discharge assessment)
+    Step 7: generate_plan           (Risk factors -> LLM discharge checklist)
+                                    |
+                            Opik Tracing (every step)
+                                    |
+                        Dashboard Visualization
+```
+
+### Design Philosophy
+
+- **Data -> LLM Reasoning**: Deterministic clients provide grounding data. LLMs reason over the data. Fallback to raw data if LLM fails.
+- **No Hardcoded Outputs**: All analysis, scoring, and recommendations are AI-generated (except demo patient data).
+- **Prompt Versioning**: All prompts stored in Opik Prompt Library with local fallbacks for offline/testing.
+- **Error Resilience**: Agent failures trigger fallback to direct LLM. All errors traced to Opik.
 
 ## Environment Variables
 
@@ -72,17 +126,25 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) to view the dashboard.
 
+```bash
+npm run build        # Production build
+npm run lint         # ESLint check
+```
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/patient/[id]` | GET | Fetch patient data by ID |
-| `/api/analyze` | POST | Run discharge readiness analysis |
+| `/api/analyze` | POST | Run discharge readiness analysis (agent or direct LLM) |
 | `/api/generate-plan` | POST | Generate discharge checklist |
+| `/api/patient-chat` | POST | Multi-turn patient recovery coach conversation |
+| `/api/agent` | POST | Run agent or continue conversation session |
+| `/api/agent` | GET | Get session status by sessionId |
 | `/api/model/switch` | POST | Switch active LLM model |
 | `/api/model/switch` | GET | Get current model and available models |
 | `/api/evaluate/models` | GET | List all models with availability |
-| `/api/evaluate/models` | POST | Run model comparison experiment |
+| `/api/experiments` | POST | Run Opik experiments for model evaluation |
 
 ## Demo Patients
 
@@ -107,61 +169,100 @@ Open [http://localhost:3000](http://localhost:3000) to view the dashboard.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Next.js Frontend                         │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │   Patient   │  │  Discharge  │  │    Model Selector       │ │
-│  │   Header    │  │    Score    │  │  (Multi-provider)       │ │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │ Risk Factor │  │  Discharge  │  │  Evaluation Dashboard   │ │
-│  │    Cards    │  │    Plan     │  │    (Model Comparison)   │ │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      API Routes (Next.js)                       │
-│  /api/analyze  │  /api/generate-plan  │  /api/model/switch     │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                     ▼                     ▼
-┌───────────────┐    ┌───────────────┐    ┌───────────────┐
-│  LLM Provider │    │  Data Sources │    │     Opik      │
-│  Abstraction  │    │               │    │  Observability│
-│               │    │  • FDA/RxNorm │    │               │
-│  • OpenAI     │    │  • Guidelines │    │  • Traces     │
-│  • HuggingFace│    │  • Cost Est.  │    │  • Token Usage│
-│  • Gemini     │    │  • FHIR Data  │    │  • Latency    │
-│  • Anthropic  │    │               │    │  • Cost Est.  │
-└───────────────┘    └───────────────┘    └───────────────┘
++-----------------------------------------------------------------+
+|                       Next.js Frontend                          |
+|  +-------------+  +--------------+  +------------------------+ |
+|  | Clinical    |  | Patient View |  |  Evaluation Dashboard  | |
+|  | Dashboard   |  | + Recovery   |  |  (Model Comparison)    | |
+|  | + Score     |  |   Coach Chat |  |                        | |
+|  +-------------+  +--------------+  +------------------------+ |
++-----------------------------------------------------------------+
+                              |
+                              v
++-----------------------------------------------------------------+
+|                    API Routes (Next.js)                          |
+|  /api/analyze | /api/patient-chat | /api/generate-plan          |
+|  /api/agent   | /api/experiments  | /api/model/switch            |
++-----------------------------------------------------------------+
+                              |
+               +--------------+--------------+
+               v              v              v
++---------------+    +---------------+    +---------------+
+|  Agent        |    |  Data Sources |    |     Opik      |
+|  Orchestrator |    |               |    |  Observability|
+|               |    |  * FDA/RxNorm |    |               |
+|  7-step ReAct |    |  * Guidelines |    |  * Traces     |
+|  pipeline     |    |  * CMS Costs  |    |  * Prompts    |
+|  + memory     |    |  * FHIR Data  |    |  * Token/Cost |
+|  + tools      |    |  * RAG Search |    |  * Errors     |
++---------------+    +---------------+    +---------------+
+        |
+        v
++---------------+
+| LLM Provider  |
+|  Abstraction  |
+|               |
+|  * OpenAI     |
+|  * HuggingFace|
+|  * Gemini     |
+|  * Anthropic  |
++---------------+
 ```
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
+| `src/lib/agents/orchestrator.ts` | ReAct-style agent orchestrator with 7-step pipeline |
+| `src/lib/agents/tools.ts` | Tool implementations (drug interactions, care gaps, costs, RAG, analysis) |
+| `src/lib/agents/tracing.ts` | Agent-level Opik tracing with thread grouping |
+| `src/lib/agents/memory.ts` | Session memory management for multi-turn conversations |
 | `src/lib/integrations/llm-provider.ts` | Multi-provider LLM abstraction with Opik tracing |
+| `src/lib/integrations/opik.ts` | Core Opik client, trace/span management, error tracing |
+| `src/lib/integrations/opik-prompts.ts` | Prompt Library (8 prompts versioned in Opik) |
 | `src/lib/integrations/analysis.ts` | Discharge analysis using LLM provider |
-| `src/lib/integrations/opik-prompts.ts` | Prompt library management via Opik |
+| `src/lib/integrations/fda-client.ts` | FDA/RxNorm drug interaction client |
+| `src/lib/integrations/cms-client.ts` | CMS Medicare Part D cost estimation |
+| `src/lib/integrations/guidelines-client.ts` | Clinical guideline compliance checks |
+| `src/lib/knowledge-base/vector-search.ts` | Zero-dependency TF-IDF search engine with medical NLP |
+| `src/lib/knowledge-base/knowledge-index.ts` | Knowledge base indexer (~400 clinical documents) |
+| `src/components/DischargeScore.tsx` | Animated circular score gauge with methodology explanation |
+| `src/components/PatientRecoveryCoach.tsx` | Patient-facing preparation guide and checklist |
+| `src/components/PatientChat.tsx` | Multi-turn recovery coach chat with tool use |
 | `src/components/ModelSelector.tsx` | UI for switching between LLM models |
-| `src/components/DischargeScore.tsx` | Animated circular score gauge |
-| `src/components/RiskFactorCard.tsx` | Expandable risk factor cards |
+| `src/components/RiskFactorCard.tsx` | Expandable risk factor cards with data source badges |
+
+## Opik Integration
+
+### Prompt Library (8 prompts)
+All prompts are stored and versioned in Opik's Prompt Library with local fallback templates:
+- `discharge-analysis` - Main discharge readiness assessment
+- `drug-interaction-evaluation` - FDA data reasoning
+- `care-gap-evaluation` - Clinical guideline compliance reasoning
+- `cost-estimation` - CMS cost barrier analysis
+- `knowledge-retrieval` - RAG synthesis prompt
+- `discharge-plan-generation` - Checklist generation
+- `patient-summary-generation` - Patient-friendly summary
+- `patient-chat-system` - Recovery coach system prompt
+
+### Tracing
+- **LLM Spans**: Every LLM call tracked with model, provider, token usage, and cost
+- **Data Source Spans**: FDA, Guidelines, CMS, and RAG calls traced separately
+- **Agent Trajectories**: Step-by-step decision logging for the orchestrator pipeline
+- **Error Traces**: All API route errors logged as `error-{source}` traces with stack traces
+- **Thread Grouping**: Multi-turn conversations grouped by `threadId` metadata
+
+### Evaluation
+- **Model Comparison**: A/B testing via Opik experiments
+- **Tool Correctness**: Per-tool accuracy evaluation
+- **Task Completion**: Automated checks for score, status, risk factors, and recommendations
+- **Conversation Metrics**: Turn count, tool usage, and task completion tracking
 
 ## Hackathon
 
 Built for the Encode Club "Commit To Change" (Comet Resolution V2) Hackathon, targeting:
 - **Health, Fitness & Wellness Prize** ($5K)
 - **Best Use of Opik Prize** ($5K)
-
-### Opik Integration Highlights
-
-- **Prompt Library**: Discharge analysis prompts stored and versioned in Opik
-- **LLM Spans**: Every LLM call tracked with model, provider, token usage
-- **Cost Tracking**: Estimated costs per request based on token pricing
-- **Model Comparison**: A/B testing with Opik experiments
-- **Data Source Tracing**: FDA, Guidelines, and FHIR calls tracked separately
 
 ---
 

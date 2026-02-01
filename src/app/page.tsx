@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu, AlertTriangle, Heart } from "lucide-react";
+import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu, AlertTriangle, Heart, Info, X } from "lucide-react";
 import { PatientHeader } from "@/components/PatientHeader";
 import { DischargeScore } from "@/components/DischargeScore";
 import { RiskFactorCard } from "@/components/RiskFactorCard";
@@ -73,6 +73,8 @@ export default function DashboardPage() {
   const [dischargePlan, setDischargePlan] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showPatientDropdown, setShowPatientDropdown] = useState(false);
+  const [showModelDropdown, setShowModelDropdown] = useState(false);
+  const [showDemoNote, setShowDemoNote] = useState(true);
   const [expandedRiskFactors, setExpandedRiskFactors] = useState<Set<string>>(new Set());
   const [modelLimitError, setModelLimitError] = useState<{
     modelId: string;
@@ -269,7 +271,7 @@ export default function DashboardPage() {
                   }`}
                 >
                   <LayoutDashboard className="w-4 h-4" />
-                  <span className="hidden xs:inline">Clinical</span>
+                  <span className="text-xs sm:text-sm">Clinical</span>
                 </button>
               </Tooltip>
               <Tooltip content="Patient-friendly recovery guidance" position="bottom">
@@ -295,15 +297,20 @@ export default function DashboardPage() {
                   }`}
                 >
                   <FlaskConical className="w-4 h-4" />
-                  <span className="hidden xs:inline">Evaluation</span>
+                  <span className="text-xs sm:text-sm">Evaluation</span>
                 </button>
               </Tooltip>
             </nav>
 
             {/* Model Selector and Patient Selector - Row on mobile */}
             <div className="flex items-center justify-center gap-2 sm:gap-3 w-full sm:w-auto">
-              {/* Model Selector - always visible */}
-              <ModelSelector
+              {/* Model Selector - visible on dashboard and patient tabs */}
+              {activeTab !== "evaluation" && <ModelSelector
+                isOpenControlled={showModelDropdown}
+                onOpenChange={(open) => {
+                  setShowModelDropdown(open);
+                  if (open) setShowPatientDropdown(false);
+                }}
                 onModelChange={(modelId) => {
                   setCurrentModel(modelId);
                   // Clear analysis when model changes so user re-runs with new model
@@ -314,14 +321,17 @@ export default function DashboardPage() {
                     setJudgeError(null);
                   }
                 }}
-              />
+              />}
 
-              {/* Patient Selector - show on dashboard and patient tabs */}
-              {(activeTab === "dashboard" || activeTab === "patient") && (
+              {/* Patient Selector - show on dashboard tab only */}
+              {activeTab === "dashboard" && (
                 <div className="relative">
                   <Tooltip content="Select a demo patient to analyze" position="bottom">
                     <button
-                      onClick={() => setShowPatientDropdown(!showPatientDropdown)}
+                      onClick={() => {
+                        setShowPatientDropdown(!showPatientDropdown);
+                        setShowModelDropdown(false);
+                      }}
                       className="flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                     >
                       <Users className="w-4 h-4 text-gray-600" />
@@ -368,8 +378,47 @@ export default function DashboardPage() {
         </div>
       </header>
 
+      {/* Backdrop overlay — closes dropdowns on tap, prevents scroll-through */}
+      {(showPatientDropdown || showModelDropdown) && (
+        <div
+          className="fixed inset-0 z-40"
+          onClick={() => {
+            setShowPatientDropdown(false);
+            setShowModelDropdown(false);
+          }}
+        />
+      )}
+
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Demo Context Note */}
+        <AnimatePresence>
+          {showDemoNote && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-6 bg-gray-50 border border-gray-200 rounded-lg p-3 flex items-start gap-3"
+            >
+              <Info className="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0" />
+              <p className="text-xs text-gray-500 flex-1">
+                <span className="font-medium text-gray-600">Demo mode:</span>{" "}
+                {activeTab === "dashboard"
+                  ? "In production, this Clinical View would be integrated into the hospital EHR (e.g., Epic, Cerner) as a discharge decision support module."
+                  : activeTab === "patient"
+                  ? "In production, this Patient View would be a standalone mobile app or integrated into a patient portal like MyChart."
+                  : "In production, the Evaluation dashboard would be an internal tool for the TransitionIQ team to monitor model performance and manage prompt versions."}
+              </p>
+              <button
+                onClick={() => setShowDemoNote(false)}
+                className="text-gray-400 hover:text-gray-600 flex-shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Evaluation Tab */}
         {activeTab === "evaluation" && <EvaluationDashboard />}
 

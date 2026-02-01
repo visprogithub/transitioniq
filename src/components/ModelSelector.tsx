@@ -15,6 +15,10 @@ interface ModelInfo {
 interface ModelSelectorProps {
   onModelChange?: (modelId: string) => void;
   compact?: boolean;
+  /** Controlled open state — when provided, parent manages open/close */
+  isOpenControlled?: boolean;
+  /** Callback when open state changes (for coordinating with other dropdowns) */
+  onOpenChange?: (open: boolean) => void;
 }
 
 // Provider styling
@@ -24,8 +28,13 @@ const PROVIDER_STYLES: Record<string, { bg: string; text: string; label: string 
   openai: { bg: "bg-green-100", text: "text-green-700", label: "OpenAI" },
 };
 
-export function ModelSelector({ onModelChange, compact = false }: ModelSelectorProps) {
-  const [isOpen, setIsOpen] = useState(false);
+export function ModelSelector({ onModelChange, compact = false, isOpenControlled, onOpenChange }: ModelSelectorProps) {
+  const [isOpenInternal, setIsOpenInternal] = useState(false);
+  const isOpen = isOpenControlled !== undefined ? isOpenControlled : isOpenInternal;
+  const setIsOpen = (open: boolean) => {
+    setIsOpenInternal(open);
+    onOpenChange?.(open);
+  };
   const [isLoading, setIsLoading] = useState(false);
   const [isSwitching, setIsSwitching] = useState(false);
   const [activeModel, setActiveModel] = useState<string>("");

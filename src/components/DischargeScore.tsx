@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
+import { ChevronDown, Info } from "lucide-react";
 import { Tooltip } from "./Tooltip";
 
 interface DischargeScoreProps {
@@ -12,6 +13,7 @@ interface DischargeScoreProps {
 
 export function DischargeScore({ score, status, isLoading = false }: DischargeScoreProps) {
   const [displayScore, setDisplayScore] = useState(0);
+  const [showMethodology, setShowMethodology] = useState(false);
 
   // Animate score counting up
   useEffect(() => {
@@ -169,6 +171,63 @@ export function DischargeScore({ score, status, isLoading = false }: DischargeSc
               <span>70-100: Ready</span>
             </div>
           </Tooltip>
+        </motion.div>
+      )}
+
+      {/* How is this calculated? — collapsible methodology */}
+      {!isLoading && (
+        <motion.div
+          className="mt-4 w-full"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 2 }}
+        >
+          <button
+            onClick={() => setShowMethodology(!showMethodology)}
+            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors mx-auto"
+          >
+            <Info className="w-3.5 h-3.5" />
+            <span>How is this calculated?</span>
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showMethodology ? "rotate-180" : ""}`} />
+          </button>
+
+          <AnimatePresence>
+            {showMethodology && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="mt-3 bg-gray-50 rounded-lg p-4 text-xs text-gray-600 space-y-2">
+                  <p className="font-medium text-gray-700">Score is based on AI analysis of 5 data sources:</p>
+                  <ul className="space-y-1.5 ml-1">
+                    <li className="flex items-start gap-2">
+                      <span className="text-red-400 mt-0.5">&#x2022;</span>
+                      <span><strong>Drug Interactions</strong> — FDA adverse event data cross-referenced against patient medications</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-amber-400 mt-0.5">&#x2022;</span>
+                      <span><strong>Care Gaps</strong> — Clinical guideline compliance checks (screenings, follow-ups)</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-blue-400 mt-0.5">&#x2022;</span>
+                      <span><strong>Follow-up Scheduling</strong> — PCP and specialist appointment verification</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-purple-400 mt-0.5">&#x2022;</span>
+                      <span><strong>Cost Barriers</strong> — CMS Medicare Part D pricing for medication affordability</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-teal-400 mt-0.5">&#x2022;</span>
+                      <span><strong>Clinical Knowledge</strong> — RAG-powered cross-reference of drug monographs and medical guidelines</span>
+                    </li>
+                  </ul>
+                  <p className="text-gray-400 pt-1">Each high-risk factor reduces the score by 20 points, moderate by 10, low by 5.</p>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </motion.div>
       )}
     </div>

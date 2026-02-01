@@ -16,7 +16,7 @@ export function SafetyDisclaimer({ variant = "banner" }: SafetyDisclaimerProps) 
             <span className="font-medium">Important Safety Information</span>
           </div>
           <p>
-            TransitionIQ is a clinical decision support tool designed to assist
+            TransitionIQ is a discharge readiness assessment tool designed to assist
             healthcare professionals. It does <strong>not</strong> replace
             professional medical judgment. All discharge decisions must be made
             by qualified healthcare providers who have directly evaluated the
@@ -45,7 +45,7 @@ export function SafetyDisclaimer({ variant = "banner" }: SafetyDisclaimerProps) 
       <div className="max-w-6xl mx-auto flex items-center justify-center gap-3">
         <AlertTriangle className="w-5 h-5 flex-shrink-0" />
         <div className="text-sm">
-          <span className="font-semibold">Clinical Decision Support Tool</span>
+          <span className="font-semibold">Discharge Readiness Assessment Tool</span>
           <span className="mx-2">|</span>
           <span>
             This AI-powered assessment assists but does not replace professional

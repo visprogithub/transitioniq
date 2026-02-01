@@ -451,9 +451,9 @@ export function PatientRecoveryCoach({
         <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
           <Sparkles className="w-10 h-10 text-blue-500" />
         </div>
-        <h2 className="text-xl font-semibold text-gray-900 mb-2">Run Analysis First</h2>
+        <h2 className="text-xl font-semibold text-gray-900 mb-2">Analysis Needed</h2>
         <p className="text-gray-500 mb-4">
-          Go to the Dashboard tab and run an analysis to get your personalized recovery guidance
+          Switch to the Clinical tab and run an analysis to generate your personalized going-home preparation guide
         </p>
       </div>
     );
@@ -491,7 +491,7 @@ export function PatientRecoveryCoach({
 
   return (
     <div className="space-y-6">
-      {/* Header - Simple Readiness Gauge */}
+      {/* Header - Going-Home Preparation Tracker */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -519,10 +519,10 @@ export function PatientRecoveryCoach({
             </div>
             <span className={`text-sm font-semibold ${colors.text} uppercase tracking-wide`}>
               {patientSummary.readinessLevel === "good"
-                ? "Looking Good"
+                ? "You're All Set"
                 : patientSummary.readinessLevel === "caution"
-                ? "Almost Ready"
-                : "Need to Talk"}
+                ? "Getting Ready"
+                : "Let's Prepare"}
             </span>
           </div>
 
@@ -761,48 +761,100 @@ export function PatientRecoveryCoach({
               exit={{ height: 0, opacity: 0 }}
               className="border-t border-gray-100"
             >
-              <div className="p-5 space-y-3">
-                {patientSummary.nextSteps.map((step, i) => {
-                  const isCompleted = completedSteps.has(i);
-                  return (
-                    <motion.button
-                      key={i}
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: i * 0.05 }}
-                      onClick={() => toggleStep(i)}
-                      className={`w-full flex items-center gap-4 p-4 rounded-lg transition-all ${
-                        isCompleted
-                          ? "bg-emerald-50 border border-emerald-200"
-                          : step.priority === "high"
-                          ? "bg-red-50 border border-red-200 hover:bg-red-100"
-                          : "bg-gray-50 hover:bg-gray-100"
-                      }`}
-                    >
-                      <div
-                        className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${
-                          isCompleted
-                            ? "bg-emerald-500 border-emerald-500"
-                            : "border-gray-300"
-                        }`}
-                      >
-                        {isCompleted && <CheckCircle className="w-4 h-4 text-white" />}
-                      </div>
-                      <span
-                        className={`flex-1 text-left ${
-                          isCompleted ? "line-through text-gray-500" : "text-gray-700"
-                        }`}
-                      >
-                        {step.task}
-                      </span>
-                      {!isCompleted && step.priority === "high" && (
-                        <span className="text-xs bg-red-200 text-red-800 px-2 py-1 rounded-full font-medium">
-                          Important
-                        </span>
-                      )}
-                    </motion.button>
-                  );
-                })}
+              <div className="p-5 space-y-5">
+                {/* Must Do Before Leaving — high priority items */}
+                {patientSummary.nextSteps.some((s) => s.priority === "high") && (
+                  <div>
+                    <h4 className="text-sm font-semibold text-red-700 mb-3 flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-red-500" />
+                      Must Do Before Leaving
+                    </h4>
+                    <div className="space-y-3">
+                      {patientSummary.nextSteps.map((step, i) => {
+                        if (step.priority !== "high") return null;
+                        const isCompleted = completedSteps.has(i);
+                        return (
+                          <motion.button
+                            key={i}
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: i * 0.05 }}
+                            onClick={() => toggleStep(i)}
+                            className={`w-full flex items-center gap-4 p-4 rounded-lg transition-all ${
+                              isCompleted
+                                ? "bg-emerald-50 border border-emerald-200"
+                                : "bg-red-50 border border-red-200 hover:bg-red-100"
+                            }`}
+                          >
+                            <div
+                              className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${
+                                isCompleted
+                                  ? "bg-emerald-500 border-emerald-500"
+                                  : "border-gray-300"
+                              }`}
+                            >
+                              {isCompleted && <CheckCircle className="w-4 h-4 text-white" />}
+                            </div>
+                            <span
+                              className={`flex-1 text-left ${
+                                isCompleted ? "line-through text-gray-500" : "text-gray-700"
+                              }`}
+                            >
+                              {step.task}
+                            </span>
+                          </motion.button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Helpful For Your Recovery — non-high priority items */}
+                {patientSummary.nextSteps.some((s) => s.priority !== "high") && (
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-600 mb-3 flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-gray-400" />
+                      Helpful For Your Recovery
+                    </h4>
+                    <div className="space-y-3">
+                      {patientSummary.nextSteps.map((step, i) => {
+                        if (step.priority === "high") return null;
+                        const isCompleted = completedSteps.has(i);
+                        return (
+                          <motion.button
+                            key={i}
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: i * 0.05 }}
+                            onClick={() => toggleStep(i)}
+                            className={`w-full flex items-center gap-4 p-4 rounded-lg transition-all ${
+                              isCompleted
+                                ? "bg-emerald-50 border border-emerald-200"
+                                : "bg-gray-50 hover:bg-gray-100"
+                            }`}
+                          >
+                            <div
+                              className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${
+                                isCompleted
+                                  ? "bg-emerald-500 border-emerald-500"
+                                  : "border-gray-300"
+                              }`}
+                            >
+                              {isCompleted && <CheckCircle className="w-4 h-4 text-white" />}
+                            </div>
+                            <span
+                              className={`flex-1 text-left ${
+                                isCompleted ? "line-through text-gray-500" : "text-gray-700"
+                              }`}
+                            >
+                              {step.task}
+                            </span>
+                          </motion.button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             </motion.div>
           )}
