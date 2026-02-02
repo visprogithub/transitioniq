@@ -8,6 +8,12 @@
   "functions": {
     "src/app/api/**/*.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/experiments/opik/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/evaluate/models/route.ts": {
+      "maxDuration": 300
     }
   }
 }

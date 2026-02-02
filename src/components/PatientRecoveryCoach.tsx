@@ -24,14 +24,13 @@ import type { DischargeAnalysis } from "@/lib/types/analysis";
 import { PatientChat } from "./PatientChat";
 
 // ============================================================================
-// LOCAL STORAGE CACHING UTILITIES
+// SESSION STORAGE CACHING UTILITIES (auto-clears on tab close; 10-min TTL)
 // ============================================================================
-const CACHE_PREFIX = "transitioniq-summary-";
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const CACHE_PREFIX = "tiq-summary-";
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_CACHE_ENTRIES = 10;
 
 function getCacheKey(patientId: string, analysis: DischargeAnalysis): string {
-  // Create a hash based on patient ID and key analysis characteristics
   const analysisHash = `${analysis.score}-${analysis.riskFactors.length}-${analysis.status}`;
   return `${CACHE_PREFIX}${patientId}-${analysisHash}`;
 }
@@ -40,20 +39,16 @@ function getCachedSummary(patientId: string, analysis: DischargeAnalysis): Patie
   if (typeof window === "undefined") return null;
   try {
     const key = getCacheKey(patientId, analysis);
-    const cached = localStorage.getItem(key);
+    const cached = sessionStorage.getItem(key);
     if (cached) {
       const parsed = JSON.parse(cached);
-      // Check TTL
       if (Date.now() - parsed.timestamp < CACHE_TTL_MS) {
-        console.log("[Cache] Using cached patient summary for", patientId);
         return parsed.summary as PatientSummary;
       }
-      // Expired - remove it
-      localStorage.removeItem(key);
-      console.log("[Cache] Expired cache entry removed for", patientId);
+      sessionStorage.removeItem(key);
     }
-  } catch (e) {
-    console.warn("[Cache] Failed to read from localStorage:", e);
+  } catch {
+    // sessionStorage unavailable — ignore
   }
   return null;
 }
@@ -62,47 +57,49 @@ function cacheSummary(patientId: string, analysis: DischargeAnalysis, summary: P
   if (typeof window === "undefined") return;
   try {
     const key = getCacheKey(patientId, analysis);
-    localStorage.setItem(
-      key,
-      JSON.stringify({
-        summary,
-        timestamp: Date.now(),
-      })
-    );
-    console.log("[Cache] Saved patient summary to cache for", patientId);
-    // Clean up old entries
+    sessionStorage.setItem(key, JSON.stringify({ summary, timestamp: Date.now() }));
     cleanupOldCacheEntries();
-  } catch (e) {
-    console.warn("[Cache] Failed to write to localStorage:", e);
+  } catch {
+    // quota exceeded or unavailable — silently skip
   }
 }
 
 function cleanupOldCacheEntries(): void {
   if (typeof window === "undefined") return;
   try {
-    const keys = Object.keys(localStorage).filter((k) => k.startsWith(CACHE_PREFIX));
-    if (keys.length > MAX_CACHE_ENTRIES) {
-      // Get entries with timestamps and sort by oldest
-      const entries = keys
-        .map((k) => {
-          try {
-            const data = JSON.parse(localStorage.getItem(k) || "{}");
-            return { key: k, timestamp: data.timestamp || 0 };
-          } catch {
-            return { key: k, timestamp: 0 };
-          }
-        })
-        .sort((a, b) => a.timestamp - b.timestamp);
-
-      // Remove oldest entries to get back to limit
-      const toRemove = entries.slice(0, keys.length - MAX_CACHE_ENTRIES);
-      toRemove.forEach((e) => {
-        localStorage.removeItem(e.key);
-        console.log("[Cache] Removed old entry:", e.key);
-      });
+    const now = Date.now();
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (!key?.startsWith(CACHE_PREFIX)) continue;
+      try {
+        const data = JSON.parse(sessionStorage.getItem(key)!) as { timestamp: number };
+        if (now - data.timestamp > CACHE_TTL_MS) {
+          keysToRemove.push(key);
+        }
+      } catch {
+        keysToRemove.push(key!);
+      }
     }
-  } catch (e) {
-    console.warn("[Cache] Failed to cleanup old entries:", e);
+    // Also enforce max entries limit
+    const allKeys: { key: string; timestamp: number }[] = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (!key?.startsWith(CACHE_PREFIX) || keysToRemove.includes(key)) continue;
+      try {
+        const data = JSON.parse(sessionStorage.getItem(key)!) as { timestamp: number };
+        allKeys.push({ key, timestamp: data.timestamp || 0 });
+      } catch {
+        keysToRemove.push(key!);
+      }
+    }
+    if (allKeys.length > MAX_CACHE_ENTRIES) {
+      allKeys.sort((a, b) => a.timestamp - b.timestamp);
+      allKeys.slice(0, allKeys.length - MAX_CACHE_ENTRIES).forEach((e) => keysToRemove.push(e.key));
+    }
+    keysToRemove.forEach((k) => sessionStorage.removeItem(k));
+  } catch {
+    // ignore
   }
 }
 // ============================================================================
@@ -440,7 +437,7 @@ export function PatientRecoveryCoach({
           <Heart className="w-10 h-10 text-blue-500" />
         </div>
         <h2 className="text-xl font-semibold text-gray-900 mb-2">Your Recovery Coach</h2>
-        <p className="text-gray-500">Select a patient to see personalized recovery guidance</p>
+        <p className="text-gray-500">Select a patient in the Clinical View then click &apos;Analyze&apos; to see personalized recovery guidance for that patient.</p>
       </div>
     );
   }

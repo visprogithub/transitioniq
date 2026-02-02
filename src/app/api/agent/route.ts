@@ -13,8 +13,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { runAgent, continueConversation, getSession } from "@/lib/agents/orchestrator";
 import { logAgentGraph, logConversationMetrics, evaluateTaskCompletion } from "@/lib/agents/tracing";
 import { traceError } from "@/lib/integrations/opik";
+import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 
 export async function POST(request: NextRequest) {
+  // Rate limit: agent calls (multi-LLM)
+  const blocked = applyRateLimit(request, "analyze");
+  if (blocked) return blocked;
+
   try {
     const body = await request.json();
     const { patientId, message, sessionId } = body as {

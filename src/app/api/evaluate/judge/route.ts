@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { evaluateWithLLMJudge, batchEvaluateWithJudge } from "@/lib/evaluation/llm-judge";
 import { getPatient } from "@/lib/data/demo-patients";
+import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 interface SingleJudgeRequest {
@@ -24,6 +25,10 @@ interface BatchJudgeRequest {
  * Supports single evaluation or batch mode.
  */
 export async function POST(request: NextRequest) {
+  // Rate limit: LLM-as-Judge calls
+  const blocked = applyRateLimit(request, "judge");
+  if (blocked) return blocked;
+
   try {
     const body = await request.json();
 

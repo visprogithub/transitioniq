@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu, AlertTriangle, Heart, Info, X } from "lucide-react";
+import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu, AlertTriangle, Heart, Info, X, ShieldAlert } from "lucide-react";
 import { PatientHeader } from "@/components/PatientHeader";
 import { DischargeScore } from "@/components/DischargeScore";
 import { RiskFactorCard } from "@/components/RiskFactorCard";
@@ -45,6 +45,68 @@ interface AnalysisWithModel extends DischargeAnalysis {
 
 type TabType = "dashboard" | "patient" | "evaluation";
 
+// ---------------------------------------------------------------------------
+// sessionStorage analysis cache — auto-clears on tab close; 10-min TTL
+// ---------------------------------------------------------------------------
+const ANALYSIS_CACHE_PREFIX = "tiq-analysis-";
+const ANALYSIS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+interface CachedAnalysis {
+  data: AnalysisWithModel;
+  timestamp: number;
+}
+
+function analysisCacheKey(patientId: string, modelId: string): string {
+  return `${ANALYSIS_CACHE_PREFIX}${patientId}:${modelId || "default"}`;
+}
+
+/** Remove all stale (>10 min) analysis entries from sessionStorage. */
+function cleanupAnalysisCache(): void {
+  try {
+    const now = Date.now();
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (!key?.startsWith(ANALYSIS_CACHE_PREFIX)) continue;
+      try {
+        const entry = JSON.parse(sessionStorage.getItem(key)!) as CachedAnalysis;
+        if (now - entry.timestamp > ANALYSIS_CACHE_TTL_MS) {
+          keysToRemove.push(key);
+        }
+      } catch {
+        keysToRemove.push(key!); // corrupt entry — remove
+      }
+    }
+    keysToRemove.forEach((k) => sessionStorage.removeItem(k));
+  } catch {
+    // sessionStorage unavailable (SSR, incognito quota, etc.) — ignore
+  }
+}
+
+function getCachedAnalysis(patientId: string, modelId: string): AnalysisWithModel | null {
+  try {
+    const raw = sessionStorage.getItem(analysisCacheKey(patientId, modelId));
+    if (!raw) return null;
+    const entry = JSON.parse(raw) as CachedAnalysis;
+    if (Date.now() - entry.timestamp > ANALYSIS_CACHE_TTL_MS) {
+      sessionStorage.removeItem(analysisCacheKey(patientId, modelId));
+      return null;
+    }
+    return entry.data;
+  } catch {
+    return null;
+  }
+}
+
+function cacheAnalysis(patientId: string, modelId: string, data: AnalysisWithModel): void {
+  try {
+    const entry: CachedAnalysis = { data, timestamp: Date.now() };
+    sessionStorage.setItem(analysisCacheKey(patientId, modelId), JSON.stringify(entry));
+  } catch {
+    // quota exceeded or unavailable — silently skip
+  }
+}
+
 // Demo patients for quick selection
 const DEMO_PATIENTS = [
   { id: "demo-polypharmacy", name: "John Smith", description: "68M, 12 medications, AFib + Diabetes" },
@@ -86,6 +148,41 @@ export default function DashboardPage() {
   const [judgeError, setJudgeError] = useState<string | null>(null);
   // Patient summary state - lifted here to persist across tab switches
   const [patientSummary, setPatientSummary] = useState<PatientSummary | null>(null);
+  // Rate limit state for discharge plan generation
+  const [planRateLimitReset, setPlanRateLimitReset] = useState<number | null>(null);
+  const [planRateLimitCountdown, setPlanRateLimitCountdown] = useState("");
+
+  // Initialize session cookie on first visit (for server-side rate limiting)
+  useEffect(() => {
+    if (!document.cookie.includes("tiq_session=")) {
+      const sessionId = crypto.randomUUID();
+      document.cookie = `tiq_session=${sessionId}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax`;
+    }
+    // Clean up stale analysis entries (>10 min) on every page load
+    cleanupAnalysisCache();
+  }, []);
+
+  // Countdown timer for plan generation rate limit
+  useEffect(() => {
+    if (!planRateLimitReset) {
+      setPlanRateLimitCountdown("");
+      return;
+    }
+    const tick = () => {
+      const remaining = planRateLimitReset - Date.now();
+      if (remaining <= 0) {
+        setPlanRateLimitReset(null);
+        setPlanRateLimitCountdown("");
+        return;
+      }
+      const m = Math.floor(remaining / 60000);
+      const s = Math.ceil((remaining % 60000) / 1000);
+      setPlanRateLimitCountdown(m > 0 ? `${m}m ${s}s` : `${s}s`);
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [planRateLimitReset]);
 
   // Load patient data when selection changes
   useEffect(() => {
@@ -116,13 +213,34 @@ export default function DashboardPage() {
     loadPatient();
   }, [selectedPatientId]);
 
-  // Run discharge analysis
+  // Run discharge analysis (checks sessionStorage cache first)
   async function runAnalysis() {
     if (!patient) return;
 
     setIsAnalyzing(true);
     setError(null);
     setModelLimitError(null);
+    setDischargePlan(null);
+    setPlanRateLimitReset(null);
+    setJudgeEvaluation(null);
+    setJudgeError(null);
+
+    // Check sessionStorage cache for same patient + model
+    const cached = getCachedAnalysis(patient.id, currentModel);
+    if (cached) {
+      setAnalysis(cached);
+      setPatientSummary(null);
+      const highRiskIds = new Set<string>(
+        cached.riskFactors
+          .filter((rf: RiskFactor) => rf.severity === "high")
+          .map((rf: RiskFactor) => rf.id)
+      );
+      setExpandedRiskFactors(highRiskIds);
+      setIsAnalyzing(false);
+      // Still trigger judge in background for cached analysis
+      runJudgeEvaluation(patient.id, cached);
+      return;
+    }
 
     try {
       const response = await fetch("/api/analyze", {
@@ -133,7 +251,12 @@ export default function DashboardPage() {
 
       const data = await response.json();
 
-      // Check for rate limit / usage limit error
+      // Check for demo rate limit (429 without suggestModelSwitch)
+      if (response.status === 429 && !data.suggestModelSwitch) {
+        throw new Error(data.message || "Demo rate limit reached. Please try again in a few minutes.");
+      }
+
+      // Check for model provider rate limit / usage limit error
       if (response.status === 429 && data.suggestModelSwitch) {
         setModelLimitError({
           modelId: data.modelId,
@@ -147,6 +270,9 @@ export default function DashboardPage() {
       if (!response.ok) {
         throw new Error(data.error || "Analysis failed");
       }
+
+      // Cache the fresh analysis in sessionStorage
+      cacheAnalysis(patient.id, currentModel, data);
 
       setAnalysis(data);
       // Clear cached patient summary since analysis changed
@@ -205,6 +331,7 @@ export default function DashboardPage() {
 
     setIsGeneratingPlan(true);
     setError(null);
+    setPlanRateLimitReset(null);
 
     try {
       const response = await fetch("/api/generate-plan", {
@@ -213,8 +340,17 @@ export default function DashboardPage() {
         body: JSON.stringify({ patientId: patient.id, analysis, modelId: currentModel || undefined }),
       });
 
-      if (!response.ok) throw new Error("Plan generation failed");
       const data = await response.json();
+
+      // Demo rate limit — show amber countdown instead of red error
+      if (response.status === 429) {
+        const resetTime = Date.now() + (data.retryAfterMs || 60000);
+        setPlanRateLimitReset(resetTime);
+        setIsGeneratingPlan(false);
+        return;
+      }
+
+      if (!response.ok) throw new Error(data.error || "Plan generation failed");
       setDischargePlan(data.plan);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Plan generation failed");
@@ -317,6 +453,7 @@ export default function DashboardPage() {
                   if (analysis) {
                     setAnalysis(null);
                     setDischargePlan(null);
+                    setPlanRateLimitReset(null);
                     setJudgeEvaluation(null);
                     setJudgeError(null);
                   }
@@ -348,7 +485,7 @@ export default function DashboardPage() {
                         initial={{ opacity: 0, y: -10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -10 }}
-                        className="absolute right-0 mt-2 w-[calc(100vw-1rem)] sm:w-80 max-w-80 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50 max-h-[60vh] overflow-y-auto"
+                        className="fixed left-2 right-2 sm:absolute sm:left-auto sm:right-0 mt-2 sm:w-80 sm:max-w-80 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50 max-h-[60vh] overflow-y-auto"
                       >
                         <div className="p-2">
                           <p className="text-xs font-medium text-gray-500 px-3 py-2">Demo Patients</p>
@@ -582,15 +719,6 @@ export default function DashboardPage() {
                             <Cpu className="w-4 h-4" />
                             <span>Analyzed with: <span className="font-medium text-gray-700">{analysis.modelUsed}</span></span>
                           </div>
-                          {analysis.modelRequested && analysis.modelUsed &&
-                            analysis.modelRequested !== analysis.modelUsed &&
-                            !analysis.modelRequested.includes(analysis.modelUsed) &&
-                            !analysis.modelUsed.includes(analysis.modelRequested) && (
-                            <div className="flex items-center justify-center gap-2 text-xs text-amber-600">
-                              <AlertTriangle className="w-3 h-3" />
-                              <span>Requested: {analysis.modelRequested} (different model used)</span>
-                            </div>
-                          )}
                           {analysis.agentFallbackUsed && (
                             <div className="flex items-center justify-center gap-2 text-xs text-amber-500">
                               <AlertTriangle className="w-3 h-3" />
@@ -684,23 +812,30 @@ export default function DashboardPage() {
                     </>
                   )}
 
-                  {/* Generate Plan Button */}
+                  {/* Generate Plan Button — or rate limit banner */}
                   {analysis && !isGeneratingPlan && (
                     <motion.div
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
                       className="mt-6 text-center"
                     >
-                      <Tooltip content="Create an actionable checklist based on risk factors" position="top">
-                        <button
-                          onClick={generatePlan}
-                          disabled={isGeneratingPlan}
-                          className="flex items-center gap-2 mx-auto px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-lg font-medium hover:from-emerald-600 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg"
-                        >
-                          <FileText className="w-5 h-5" />
-                          Generate Discharge Plan
-                        </button>
-                      </Tooltip>
+                      {planRateLimitReset ? (
+                        <div className="flex items-center justify-center gap-2 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm">
+                          <ShieldAlert className="w-5 h-5 flex-shrink-0" />
+                          <span>Rate limit reached. Try again in <strong>{planRateLimitCountdown}</strong>.</span>
+                        </div>
+                      ) : (
+                        <Tooltip content="Create an actionable checklist based on risk factors" position="top">
+                          <button
+                            onClick={generatePlan}
+                            disabled={isGeneratingPlan}
+                            className="flex items-center gap-2 mx-auto px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-lg font-medium hover:from-emerald-600 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg"
+                          >
+                            <FileText className="w-5 h-5" />
+                            Generate Discharge Plan
+                          </button>
+                        </Tooltip>
+                      )}
                     </motion.div>
                   )}
 

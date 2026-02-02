@@ -21,6 +21,7 @@ import {
   getModelConfig,
 } from "@/lib/integrations/llm-provider";
 import { analyzeDischargeReadiness, resetLLMProvider } from "@/lib/integrations/analysis";
+import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 // 12 patients * ~10s each per model = up to 5 minutes for multi-model
@@ -101,6 +102,10 @@ export async function GET() {
  * - experimentName: string (optional - for Opik tracking)
  */
 export async function POST(request: NextRequest) {
+  // Rate limit: most expensive endpoint (12 patients * N models)
+  const blocked = applyRateLimit(request, "evaluation");
+  if (blocked) return blocked;
+
   const availableModels = getAvailableModels();
   if (availableModels.length === 0) {
     return NextResponse.json(

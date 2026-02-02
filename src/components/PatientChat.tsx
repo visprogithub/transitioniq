@@ -52,6 +52,10 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [limitWarning, setLimitWarning] = useState<string | null>(null);
+  // Session-wide rate limit state (20 msgs / 15 min)
+  const [chatRateLimitReset, setChatRateLimitReset] = useState<number | null>(null);
+  const [chatRateLimitCountdown, setChatRateLimitCountdown] = useState("");
+  const isChatRateLimited = chatRateLimitReset !== null && chatRateLimitReset > Date.now();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -65,6 +69,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
     setMessages([]);
     setShowSuggestions(true);
     setLimitWarning(null);
+    setChatRateLimitReset(null);
   }
 
   // Generate suggested questions based on patient data
@@ -109,6 +114,28 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Countdown timer for session-wide rate limit
+  useEffect(() => {
+    if (!chatRateLimitReset) {
+      setChatRateLimitCountdown("");
+      return;
+    }
+    const tick = () => {
+      const remaining = chatRateLimitReset - Date.now();
+      if (remaining <= 0) {
+        setChatRateLimitReset(null);
+        setChatRateLimitCountdown("");
+        return;
+      }
+      const m = Math.floor(remaining / 60000);
+      const s = Math.ceil((remaining % 60000) / 1000);
+      setChatRateLimitCountdown(m > 0 ? `${m}m ${s}s` : `${s}s`);
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [chatRateLimitReset]);
 
   // Welcome message on first load
   useEffect(() => {
@@ -180,7 +207,20 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       });
 
       if (response.status === 429) {
-        throw new Error("Please wait a moment before sending another message");
+        const errorData = await response.json().catch(() => ({}));
+
+        if (errorData.category === "chat") {
+          // Session-wide demo rate limit — show countdown banner
+          const resetTime = Date.now() + (errorData.retryAfterMs || 60000);
+          setChatRateLimitReset(resetTime);
+          // Remove the loading message without adding an error bubble
+          setMessages((prev) => prev.filter((m) => !m.isLoading));
+          setIsLoading(false);
+          return;
+        }
+
+        // Per-patient 1s cooldown — show as error bubble
+        throw new Error(errorData.error || "Please wait a moment before sending another message");
       }
 
       if (!response.ok) {
@@ -367,6 +407,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         </div>
       )}
 
+      {/* Session Rate Limit Countdown Banner */}
+      {isChatRateLimited && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 border-b border-amber-200">
+          <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+          <p className="text-xs text-amber-800 flex-1">
+            Demo chat limit reached. Try again in <strong>{chatRateLimitCountdown}</strong>.
+          </p>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         <AnimatePresence initial={false}>
@@ -500,12 +550,12 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             placeholder="Type your question..."
-            disabled={isLoading}
+            disabled={isLoading || isChatRateLimited}
             className="flex-1 px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white text-gray-900 placeholder-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed"
           />
           <button
             type="submit"
-            disabled={!inputValue.trim() || isLoading}
+            disabled={!inputValue.trim() || isLoading || isChatRateLimited}
             className="px-4 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {isLoading ? (

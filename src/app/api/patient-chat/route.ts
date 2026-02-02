@@ -10,6 +10,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import { createLLMProvider, getActiveModelId } from "@/lib/integrations/llm-provider";
 import { getOpikClient, traceError } from "@/lib/integrations/opik";
 import { getPatient } from "@/lib/data/demo-patients";
@@ -484,6 +485,10 @@ function estimateTokens(text: string): number {
  * Main chat endpoint
  */
 export async function POST(request: NextRequest) {
+  // Session-wide demo rate limit: 20 messages per 15 minutes
+  const blocked = applyRateLimit(request, "chat");
+  if (blocked) return blocked;
+
   const opik = getOpikClient();
   const turnId = `turn-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 

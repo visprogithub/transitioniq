@@ -105,6 +105,9 @@ OPIK_PROJECT_NAME=transitioniq
 
 # Optional: Override default model selection
 LLM_MODEL=openai-gpt-4o-mini
+
+# Optional: Admin bypass for rate limiting (see Rate Limiting section)
+ADMIN_SECRET=your_admin_secret
 ```
 
 ### Model Priority
@@ -116,6 +119,41 @@ When multiple API keys are configured, the default model is selected in this ord
 4. Gemini 2.0 Flash Lite (if `GEMINI_API_KEY` set)
 
 You can override this by setting `LLM_MODEL` or using the model selector in the UI.
+
+## Rate Limiting (Demo Protection)
+
+When sharing the demo link publicly, cookie-based rate limiting protects expensive API endpoints from abuse. A `tiq_session` cookie is set automatically via Next.js proxy on the first request.
+
+### Limits
+
+| Endpoint Category | Limit | Window | What Triggers It |
+|-------------------|-------|--------|------------------|
+| **Evaluation** (`/api/evaluate/models`, `/api/experiments/opik`) | 3 requests | 15 min | Running model comparison or Opik experiments |
+| **Judge** (`/api/evaluate/judge`) | 5 requests | 10 min | Running LLM-as-Judge quality evaluations |
+| **Analyze** (`/api/analyze`, `/api/agent`) | 10 requests | 5 min | Running discharge readiness analysis |
+| **Generate Plan** (`/api/generate-plan`) | 10 requests | 5 min | Generating discharge checklists |
+| **Patient Chat** (`/api/patient-chat`) | 1s cooldown | per message | Sending Recovery Coach messages |
+
+When rate-limited, the UI shows a disabled state with a countdown timer and a banner message.
+
+### Admin Bypass
+
+To bypass rate limits (e.g., during a live demo), set the `ADMIN_SECRET` environment variable and run this in your browser console:
+
+```js
+document.cookie = "tiq_admin=YOUR_SECRET; path=/; max-age=86400";
+```
+
+Replace `YOUR_SECRET` with the value of `ADMIN_SECRET` from your `.env.local`. The bypass lasts 24 hours.
+
+```env
+# Add to .env.local for admin bypass
+ADMIN_SECRET=your_secret_here
+```
+
+### Vercel Behavior
+
+Rate limits use in-memory storage which resets on serverless cold starts. This is acceptable for demo protection. The session cookie (7-day TTL) survives cold starts so returning visitors are tracked when the function re-warms.
 
 ## Development
 

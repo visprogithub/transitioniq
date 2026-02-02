@@ -17,6 +17,7 @@ import {
   formatDischargePlanPrompt,
   logPromptUsage,
   initializeOpikPrompts,
+  warmAllPrompts,
 } from "./opik-prompts";
 import { createLLMProvider, getActiveModelId, type LLMProvider } from "./llm-provider";
 import {
@@ -106,10 +107,12 @@ export async function analyzeDischargeReadiness(
 ): Promise<DischargeAnalysis> {
   // Note: API key validation is handled by LLMProvider for the active model
 
-  // Initialize Opik prompts if not done
+  // Initialize Opik prompts if not done, then warm all prompts in parallel
   if (!promptsInitialized) {
     await initializeOpikPrompts();
     promptsInitialized = true;
+    // Fire-and-forget: warm remaining prompts so subsequent tools get cache hits
+    warmAllPrompts().catch(() => {});
   }
 
   // Get prompt from Opik Prompt Library

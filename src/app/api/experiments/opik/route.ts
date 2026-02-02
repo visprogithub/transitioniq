@@ -13,13 +13,19 @@ import {
   getOpikExperimentsUrl,
   getOpikTracesUrl,
   EXPERIMENT_DATASET,
+  CORE_DATASET,
 } from "@/lib/integrations/opik-experiments";
 import { getAvailableModels } from "@/lib/integrations/llm-provider";
+import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 
-// 12 patients * ~10s each per model = up to 5 minutes for multi-model
+// Cloud uses 3 core patients (~30s/model). Still allow 5 min for multi-model.
 export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
+  // Rate limit: expensive multi-model experiment
+  const blocked = applyRateLimit(request, "evaluation");
+  if (blocked) return blocked;
+
   try {
     // Check for Opik API key
     if (!process.env.OPIK_API_KEY) {
@@ -58,19 +64,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Optionally create/update the dataset first
+    // Optionally create/update the dataset first (cloud uses core 3 patients)
     if (createDataset) {
       try {
-        await getOrCreateOpikDataset();
+        await getOrCreateOpikDataset(undefined, CORE_DATASET);
       } catch (error) {
         console.warn("[Opik] Failed to create dataset:", error);
       }
     }
 
-    // Run experiment(s)
+    // Run experiment(s) with core 3 patients for cloud speed
     if (modelsToRun.length === 1) {
       // Single model - run one experiment
-      const result = await runOpikExperiment(experimentName, modelsToRun[0]);
+      const result = await runOpikExperiment(experimentName, modelsToRun[0], CORE_DATASET);
 
       return NextResponse.json({
         success: true,
@@ -96,7 +102,7 @@ export async function POST(request: NextRequest) {
       });
     } else {
       // Multiple models - run experiments per model for comparison
-      const multiResult = await runMultiModelExperiment(experimentName, modelsToRun);
+      const multiResult = await runMultiModelExperiment(experimentName, modelsToRun, CORE_DATASET);
 
       return NextResponse.json({
         success: true,
@@ -158,21 +164,22 @@ export async function PUT() {
       );
     }
 
-    const dataset = await getOrCreateOpikDataset();
+    const dataset = await getOrCreateOpikDataset(undefined, CORE_DATASET);
     const datasetName = dataset.name || "discharge-readiness-eval";
 
     return NextResponse.json({
       success: true,
       datasetName,
-      itemCount: EXPERIMENT_DATASET.length,
-      patients: EXPERIMENT_DATASET.map((tc) => ({
+      itemCount: CORE_DATASET.length,
+      totalAvailable: EXPERIMENT_DATASET.length,
+      patients: CORE_DATASET.map((tc) => ({
         patientId: tc.patientId,
         patientName: tc.patientName,
         scenario: tc.scenario,
         expectedStatus: tc.expectedStatus,
         expectedScoreRange: tc.expectedScoreRange,
       })),
-      message: `Dataset "${datasetName}" pushed to Opik with ${EXPERIMENT_DATASET.length} test cases.`,
+      message: `Dataset "${datasetName}" pushed to Opik with ${CORE_DATASET.length} core test cases (${EXPERIMENT_DATASET.length} available locally).`,
       urls: {
         experiments: getOpikExperimentsUrl(),
         traces: getOpikTracesUrl(),
@@ -198,7 +205,8 @@ export async function GET() {
   return NextResponse.json({
     opikConfigured,
     projectName,
-    datasetSize: EXPERIMENT_DATASET.length,
+    cloudDatasetSize: CORE_DATASET.length,
+    totalDatasetSize: EXPERIMENT_DATASET.length,
     urls: {
       experiments: getOpikExperimentsUrl(),
       traces: getOpikTracesUrl(),

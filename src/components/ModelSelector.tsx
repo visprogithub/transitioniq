@@ -169,7 +169,7 @@ export function ModelSelector({ onModelChange, compact = false, isOpenControlled
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
-            className="fixed left-2 right-2 sm:absolute sm:left-auto sm:right-0 mt-2 sm:w-72 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50"
+            className="fixed left-2 right-2 md:absolute md:left-auto md:right-0 mt-2 md:w-72 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50"
           >
             <div className="p-2 border-b border-gray-100">
               <p className="text-xs font-medium text-gray-500 px-2">Select AI Model</p>

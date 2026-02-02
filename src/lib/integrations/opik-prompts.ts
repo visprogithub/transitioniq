@@ -13,6 +13,37 @@
 import { Opik, type Prompt } from "opik";
 
 let opikClient: Opik | null = null;
+
+// ---------------------------------------------------------------------------
+// Unified prompt cache with 30-minute TTL
+// Module-level cache survives across requests on the same Vercel instance.
+// TTL ensures prompts eventually refresh if updated in the Opik dashboard.
+// ---------------------------------------------------------------------------
+const PROMPT_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+interface PromptCacheEntry {
+  prompt: Prompt;
+  fetchedAt: number;
+}
+
+const promptCache = new Map<string, PromptCacheEntry>();
+
+function getCachedPromptEntry(name: string): Prompt | null {
+  const entry = promptCache.get(name);
+  if (!entry) return null;
+  if (Date.now() - entry.fetchedAt > PROMPT_CACHE_TTL_MS) {
+    promptCache.delete(name);
+    return null;
+  }
+  return entry.prompt;
+}
+
+function setCachedPromptEntry(name: string, prompt: Prompt): void {
+  promptCache.set(name, { prompt, fetchedAt: Date.now() });
+}
+
+// Legacy aliases — keep the module API compatible with initializeOpikPrompts()
+// which assigns directly to these after createPrompt() calls.
 let cachedPrompt: Prompt | null = null;
 let cachedPatientSummaryPrompt: Prompt | null = null;
 let cachedLLMJudgePrompt: Prompt | null = null;
@@ -20,6 +51,58 @@ let cachedPatientCoachPrompt: Prompt | null = null;
 let cachedCareGapEvaluationPrompt: Prompt | null = null;
 let cachedCostEstimationPrompt: Prompt | null = null;
 let cachedKnowledgeRetrievalPrompt: Prompt | null = null;
+let cachedPlanPrompt: Prompt | null = null;
+
+// ---------------------------------------------------------------------------
+// Parallel prompt warm-up — fetches all 8 prompts concurrently on first use
+// ---------------------------------------------------------------------------
+let warmupPromise: Promise<void> | null = null;
+
+/**
+ * Pre-fetch ALL prompts from Opik in a single parallel burst.
+ * Call this once early (e.g., on the first API request). Subsequent
+ * calls are no-ops until the cache TTL expires.
+ *
+ * Each individual getXxxPrompt() still works standalone if warmup
+ * hasn't run — warmup just eliminates sequential cold-start latency.
+ */
+export async function warmAllPrompts(): Promise<void> {
+  // Deduplicate concurrent callers
+  if (warmupPromise) return warmupPromise;
+
+  const opik = getOpikClient();
+  if (!opik) return;
+
+  // Check if all prompts are already cached & fresh
+  const names = [
+    "discharge-analysis", "discharge-plan", "patient-summary",
+    "llm-judge", "patient-coach", "care-gap-evaluation",
+    "cost-estimation", "knowledge-retrieval",
+  ];
+  const allCached = names.every((n) => getCachedPromptEntry(n) !== null);
+  if (allCached) return;
+
+  warmupPromise = (async () => {
+    try {
+      const results = await Promise.allSettled(
+        names.map((name) => opik.getPrompt({ name }))
+      );
+      for (let i = 0; i < names.length; i++) {
+        const r = results[i];
+        if (r.status === "fulfilled" && r.value) {
+          setCachedPromptEntry(names[i], r.value);
+        }
+      }
+      console.log(`[Opik] Warmed ${results.filter((r) => r.status === "fulfilled" && r.value).length}/${names.length} prompts in parallel`);
+    } catch (error) {
+      console.warn("[Opik] Prompt warm-up failed (will fetch on demand):", error);
+    } finally {
+      warmupPromise = null;
+    }
+  })();
+
+  return warmupPromise;
+}
 
 function getOpikClient(): Opik | null {
   if (!process.env.OPIK_API_KEY) {
@@ -39,7 +122,6 @@ function getOpikClient(): Opik | null {
 /**
  * Discharge Analysis Prompt - stored in Opik Prompt Library
  */
-let cachedPlanPrompt: Prompt | null = null;
 
 /**
  * Patient Summary Prompt - stored in Opik Prompt Library
@@ -448,8 +530,9 @@ export async function initializeOpikPrompts(): Promise<{
       changeDescription: "Updated prompt template for discharge readiness scoring",
     });
 
-    // Cache the prompt for reuse
+    // Cache the prompt for reuse (both legacy var and TTL Map)
     cachedPrompt = analysisPrompt;
+    setCachedPromptEntry("discharge-analysis", analysisPrompt);
 
     const versionInfo = analysisPrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: discharge-analysis (version: ${versionInfo})`);
@@ -468,8 +551,8 @@ export async function initializeOpikPrompts(): Promise<{
       changeDescription: "Initial discharge plan checklist generation prompt",
     });
 
-    // Cache the plan prompt
     cachedPlanPrompt = planPrompt;
+    setCachedPromptEntry("discharge-plan", planPrompt);
 
     const planVersionInfo = planPrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: discharge-plan (version: ${planVersionInfo})`);
@@ -489,6 +572,7 @@ export async function initializeOpikPrompts(): Promise<{
     });
 
     cachedPatientSummaryPrompt = patientSummaryPrompt;
+    setCachedPromptEntry("patient-summary", patientSummaryPrompt);
     const patientSummaryVersionInfo = patientSummaryPrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: patient-summary (version: ${patientSummaryVersionInfo})`);
 
@@ -507,6 +591,7 @@ export async function initializeOpikPrompts(): Promise<{
     });
 
     cachedLLMJudgePrompt = llmJudgePrompt;
+    setCachedPromptEntry("llm-judge", llmJudgePrompt);
     const llmJudgeVersionInfo = llmJudgePrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: llm-judge (version: ${llmJudgeVersionInfo})`);
 
@@ -527,6 +612,7 @@ export async function initializeOpikPrompts(): Promise<{
     });
 
     cachedPatientCoachPrompt = patientCoachPrompt;
+    setCachedPromptEntry("patient-coach", patientCoachPrompt);
     const patientCoachVersionInfo = patientCoachPrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: patient-coach (version: ${patientCoachVersionInfo})`);
 
@@ -545,6 +631,7 @@ export async function initializeOpikPrompts(): Promise<{
     });
 
     cachedCareGapEvaluationPrompt = careGapPrompt;
+    setCachedPromptEntry("care-gap-evaluation", careGapPrompt);
     const careGapVersionInfo = careGapPrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: care-gap-evaluation (version: ${careGapVersionInfo})`);
 
@@ -563,6 +650,7 @@ export async function initializeOpikPrompts(): Promise<{
     });
 
     cachedCostEstimationPrompt = costPrompt;
+    setCachedPromptEntry("cost-estimation", costPrompt);
     const costVersionInfo = costPrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: cost-estimation (version: ${costVersionInfo})`);
 
@@ -582,6 +670,7 @@ export async function initializeOpikPrompts(): Promise<{
     });
 
     cachedKnowledgeRetrievalPrompt = knowledgePrompt;
+    setCachedPromptEntry("knowledge-retrieval", knowledgePrompt);
     const knowledgeVersionInfo = knowledgePrompt.commit || "initial";
     console.log(`[Opik] Prompt stored in Prompt Library: knowledge-retrieval (version: ${knowledgeVersionInfo})`);
 
@@ -612,45 +701,26 @@ export async function getDischargeAnalysisPrompt(): Promise<{
   commit: string | null;
   fromOpik: boolean;
 }> {
-  const opik = getOpikClient();
-
-  // Use cached prompt if available
-  if (cachedPrompt) {
-    return {
-      template: cachedPrompt.prompt,
-      commit: cachedPrompt.commit || null,
-      fromOpik: true,
-    };
+  const cached = getCachedPromptEntry("discharge-analysis") || cachedPrompt;
+  if (cached) {
+    return { template: cached.prompt, commit: cached.commit || null, fromOpik: true };
   }
 
+  const opik = getOpikClient();
   if (opik) {
     try {
-      // Retrieve the prompt from Opik Prompt Library
       const prompt = await opik.getPrompt({ name: "discharge-analysis" });
       if (prompt) {
-        // Cache for subsequent calls
+        setCachedPromptEntry("discharge-analysis", prompt);
         cachedPrompt = prompt;
-
-        console.log(`[Opik] Using prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
-
-        return {
-          template: prompt.prompt,
-          commit: prompt.commit || null,
-          fromOpik: true,
-        };
+        return { template: prompt.prompt, commit: prompt.commit || null, fromOpik: true };
       }
     } catch (error) {
-      console.warn("[Opik] Failed to get prompt from Prompt Library, using local template:", error);
+      console.warn("[Opik] Failed to get discharge-analysis prompt, using local:", error);
     }
   }
 
-  // Fallback to local prompt (not stored in Opik)
-  console.log("[Opik] Using local prompt template (not versioned in Opik)");
-  return {
-    template: DISCHARGE_ANALYSIS_PROMPT,
-    commit: null,
-    fromOpik: false,
-  };
+  return { template: DISCHARGE_ANALYSIS_PROMPT, commit: null, fromOpik: false };
 }
 
 /**
@@ -662,45 +732,26 @@ export async function getDischargePlanPrompt(): Promise<{
   commit: string | null;
   fromOpik: boolean;
 }> {
-  const opik = getOpikClient();
-
-  // Use cached prompt if available
-  if (cachedPlanPrompt) {
-    return {
-      template: cachedPlanPrompt.prompt,
-      commit: cachedPlanPrompt.commit || null,
-      fromOpik: true,
-    };
+  const cached = getCachedPromptEntry("discharge-plan") || cachedPlanPrompt;
+  if (cached) {
+    return { template: cached.prompt, commit: cached.commit || null, fromOpik: true };
   }
 
+  const opik = getOpikClient();
   if (opik) {
     try {
-      // Retrieve the prompt from Opik Prompt Library
       const prompt = await opik.getPrompt({ name: "discharge-plan" });
       if (prompt) {
-        // Cache for subsequent calls
+        setCachedPromptEntry("discharge-plan", prompt);
         cachedPlanPrompt = prompt;
-
-        console.log(`[Opik] Using discharge-plan prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
-
-        return {
-          template: prompt.prompt,
-          commit: prompt.commit || null,
-          fromOpik: true,
-        };
+        return { template: prompt.prompt, commit: prompt.commit || null, fromOpik: true };
       }
     } catch (error) {
-      console.warn("[Opik] Failed to get discharge-plan prompt from Prompt Library, using local template:", error);
+      console.warn("[Opik] Failed to get discharge-plan prompt, using local:", error);
     }
   }
 
-  // Fallback to local prompt (not stored in Opik)
-  console.log("[Opik] Using local discharge-plan prompt template (not versioned in Opik)");
-  return {
-    template: DISCHARGE_PLAN_PROMPT,
-    commit: null,
-    fromOpik: false,
-  };
+  return { template: DISCHARGE_PLAN_PROMPT, commit: null, fromOpik: false };
 }
 
 /**
@@ -732,6 +783,7 @@ export function formatDischargePlanPrompt(
  * Clear the cached prompt (useful for testing different versions)
  */
 export function clearPromptCache(): void {
+  promptCache.clear();
   cachedPrompt = null;
   cachedPlanPrompt = null;
   cachedPatientSummaryPrompt = null;
@@ -752,45 +804,26 @@ export async function getPatientCoachPrompt(): Promise<{
   commit: string | null;
   fromOpik: boolean;
 }> {
-  const opik = getOpikClient();
-
-  // Use cached prompt if available
-  if (cachedPatientCoachPrompt) {
-    return {
-      template: cachedPatientCoachPrompt.prompt,
-      commit: cachedPatientCoachPrompt.commit || null,
-      fromOpik: true,
-    };
+  const cached = getCachedPromptEntry("patient-coach") || cachedPatientCoachPrompt;
+  if (cached) {
+    return { template: cached.prompt, commit: cached.commit || null, fromOpik: true };
   }
 
+  const opik = getOpikClient();
   if (opik) {
     try {
-      // Retrieve the prompt from Opik Prompt Library
       const prompt = await opik.getPrompt({ name: "patient-coach" });
       if (prompt) {
-        // Cache for subsequent calls
+        setCachedPromptEntry("patient-coach", prompt);
         cachedPatientCoachPrompt = prompt;
-
-        console.log(`[Opik] Using patient-coach prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
-
-        return {
-          template: prompt.prompt,
-          commit: prompt.commit || null,
-          fromOpik: true,
-        };
+        return { template: prompt.prompt, commit: prompt.commit || null, fromOpik: true };
       }
     } catch (error) {
-      console.warn("[Opik] Failed to get patient-coach prompt from Prompt Library, using local template:", error);
+      console.warn("[Opik] Failed to get patient-coach prompt, using local:", error);
     }
   }
 
-  // Fallback to local prompt (not stored in Opik)
-  console.log("[Opik] Using local patient-coach prompt template (not versioned in Opik)");
-  return {
-    template: PATIENT_COACH_PROMPT,
-    commit: null,
-    fromOpik: false,
-  };
+  return { template: PATIENT_COACH_PROMPT, commit: null, fromOpik: false };
 }
 
 /**
@@ -825,39 +858,26 @@ export async function getCareGapEvaluationPrompt(): Promise<{
   commit: string | null;
   fromOpik: boolean;
 }> {
-  const opik = getOpikClient();
-
-  if (cachedCareGapEvaluationPrompt) {
-    return {
-      template: cachedCareGapEvaluationPrompt.prompt,
-      commit: cachedCareGapEvaluationPrompt.commit || null,
-      fromOpik: true,
-    };
+  const cached = getCachedPromptEntry("care-gap-evaluation") || cachedCareGapEvaluationPrompt;
+  if (cached) {
+    return { template: cached.prompt, commit: cached.commit || null, fromOpik: true };
   }
 
+  const opik = getOpikClient();
   if (opik) {
     try {
       const prompt = await opik.getPrompt({ name: "care-gap-evaluation" });
       if (prompt) {
+        setCachedPromptEntry("care-gap-evaluation", prompt);
         cachedCareGapEvaluationPrompt = prompt;
-        console.log(`[Opik] Using care-gap-evaluation prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
-        return {
-          template: prompt.prompt,
-          commit: prompt.commit || null,
-          fromOpik: true,
-        };
+        return { template: prompt.prompt, commit: prompt.commit || null, fromOpik: true };
       }
     } catch (error) {
-      console.warn("[Opik] Failed to get care-gap-evaluation prompt from Prompt Library, using local template:", error);
+      console.warn("[Opik] Failed to get care-gap-evaluation prompt, using local:", error);
     }
   }
 
-  console.log("[Opik] Using local care-gap-evaluation prompt template (not versioned in Opik)");
-  return {
-    template: CARE_GAP_EVALUATION_PROMPT,
-    commit: null,
-    fromOpik: false,
-  };
+  return { template: CARE_GAP_EVALUATION_PROMPT, commit: null, fromOpik: false };
 }
 
 /**
@@ -892,39 +912,26 @@ export async function getCostEstimationPrompt(): Promise<{
   commit: string | null;
   fromOpik: boolean;
 }> {
-  const opik = getOpikClient();
-
-  if (cachedCostEstimationPrompt) {
-    return {
-      template: cachedCostEstimationPrompt.prompt,
-      commit: cachedCostEstimationPrompt.commit || null,
-      fromOpik: true,
-    };
+  const cached = getCachedPromptEntry("cost-estimation") || cachedCostEstimationPrompt;
+  if (cached) {
+    return { template: cached.prompt, commit: cached.commit || null, fromOpik: true };
   }
 
+  const opik = getOpikClient();
   if (opik) {
     try {
       const prompt = await opik.getPrompt({ name: "cost-estimation" });
       if (prompt) {
+        setCachedPromptEntry("cost-estimation", prompt);
         cachedCostEstimationPrompt = prompt;
-        console.log(`[Opik] Using cost-estimation prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
-        return {
-          template: prompt.prompt,
-          commit: prompt.commit || null,
-          fromOpik: true,
-        };
+        return { template: prompt.prompt, commit: prompt.commit || null, fromOpik: true };
       }
     } catch (error) {
-      console.warn("[Opik] Failed to get cost-estimation prompt from Prompt Library, using local template:", error);
+      console.warn("[Opik] Failed to get cost-estimation prompt, using local:", error);
     }
   }
 
-  console.log("[Opik] Using local cost-estimation prompt template (not versioned in Opik)");
-  return {
-    template: COST_ESTIMATION_PROMPT,
-    commit: null,
-    fromOpik: false,
-  };
+  return { template: COST_ESTIMATION_PROMPT, commit: null, fromOpik: false };
 }
 
 /**
@@ -953,39 +960,26 @@ export async function getKnowledgeRetrievalPrompt(): Promise<{
   commit: string | null;
   fromOpik: boolean;
 }> {
-  const opik = getOpikClient();
-
-  if (cachedKnowledgeRetrievalPrompt) {
-    return {
-      template: cachedKnowledgeRetrievalPrompt.prompt,
-      commit: cachedKnowledgeRetrievalPrompt.commit || null,
-      fromOpik: true,
-    };
+  const cached = getCachedPromptEntry("knowledge-retrieval") || cachedKnowledgeRetrievalPrompt;
+  if (cached) {
+    return { template: cached.prompt, commit: cached.commit || null, fromOpik: true };
   }
 
+  const opik = getOpikClient();
   if (opik) {
     try {
       const prompt = await opik.getPrompt({ name: "knowledge-retrieval" });
       if (prompt) {
+        setCachedPromptEntry("knowledge-retrieval", prompt);
         cachedKnowledgeRetrievalPrompt = prompt;
-        console.log(`[Opik] Using knowledge-retrieval prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
-        return {
-          template: prompt.prompt,
-          commit: prompt.commit || null,
-          fromOpik: true,
-        };
+        return { template: prompt.prompt, commit: prompt.commit || null, fromOpik: true };
       }
     } catch (error) {
-      console.warn("[Opik] Failed to get knowledge-retrieval prompt from Prompt Library, using local template:", error);
+      console.warn("[Opik] Failed to get knowledge-retrieval prompt, using local:", error);
     }
   }
 
-  console.log("[Opik] Using local knowledge-retrieval prompt template (not versioned in Opik)");
-  return {
-    template: KNOWLEDGE_RETRIEVAL_PROMPT,
-    commit: null,
-    fromOpik: false,
-  };
+  return { template: KNOWLEDGE_RETRIEVAL_PROMPT, commit: null, fromOpik: false };
 }
 
 /**
@@ -1019,45 +1013,26 @@ export async function getPatientSummaryPrompt(): Promise<{
   commit: string | null;
   fromOpik: boolean;
 }> {
-  const opik = getOpikClient();
-
-  // Use cached prompt if available
-  if (cachedPatientSummaryPrompt) {
-    return {
-      template: cachedPatientSummaryPrompt.prompt,
-      commit: cachedPatientSummaryPrompt.commit || null,
-      fromOpik: true,
-    };
+  const cached = getCachedPromptEntry("patient-summary") || cachedPatientSummaryPrompt;
+  if (cached) {
+    return { template: cached.prompt, commit: cached.commit || null, fromOpik: true };
   }
 
+  const opik = getOpikClient();
   if (opik) {
     try {
-      // Retrieve the prompt from Opik Prompt Library
       const prompt = await opik.getPrompt({ name: "patient-summary" });
       if (prompt) {
-        // Cache for subsequent calls
+        setCachedPromptEntry("patient-summary", prompt);
         cachedPatientSummaryPrompt = prompt;
-
-        console.log(`[Opik] Using patient-summary prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
-
-        return {
-          template: prompt.prompt,
-          commit: prompt.commit || null,
-          fromOpik: true,
-        };
+        return { template: prompt.prompt, commit: prompt.commit || null, fromOpik: true };
       }
     } catch (error) {
-      console.warn("[Opik] Failed to get patient-summary prompt from Prompt Library, using local template:", error);
+      console.warn("[Opik] Failed to get patient-summary prompt, using local:", error);
     }
   }
 
-  // Fallback to local prompt (not stored in Opik)
-  console.log("[Opik] Using local patient-summary prompt template (not versioned in Opik)");
-  return {
-    template: PATIENT_SUMMARY_PROMPT,
-    commit: null,
-    fromOpik: false,
-  };
+  return { template: PATIENT_SUMMARY_PROMPT, commit: null, fromOpik: false };
 }
 
 /**
@@ -1069,45 +1044,26 @@ export async function getLLMJudgePrompt(): Promise<{
   commit: string | null;
   fromOpik: boolean;
 }> {
-  const opik = getOpikClient();
-
-  // Use cached prompt if available
-  if (cachedLLMJudgePrompt) {
-    return {
-      template: cachedLLMJudgePrompt.prompt,
-      commit: cachedLLMJudgePrompt.commit || null,
-      fromOpik: true,
-    };
+  const cached = getCachedPromptEntry("llm-judge") || cachedLLMJudgePrompt;
+  if (cached) {
+    return { template: cached.prompt, commit: cached.commit || null, fromOpik: true };
   }
 
+  const opik = getOpikClient();
   if (opik) {
     try {
-      // Retrieve the prompt from Opik Prompt Library
       const prompt = await opik.getPrompt({ name: "llm-judge" });
       if (prompt) {
-        // Cache for subsequent calls
+        setCachedPromptEntry("llm-judge", prompt);
         cachedLLMJudgePrompt = prompt;
-
-        console.log(`[Opik] Using llm-judge prompt from Prompt Library (version: ${prompt.commit || "unknown"})`);
-
-        return {
-          template: prompt.prompt,
-          commit: prompt.commit || null,
-          fromOpik: true,
-        };
+        return { template: prompt.prompt, commit: prompt.commit || null, fromOpik: true };
       }
     } catch (error) {
-      console.warn("[Opik] Failed to get llm-judge prompt from Prompt Library, using local template:", error);
+      console.warn("[Opik] Failed to get llm-judge prompt, using local:", error);
     }
   }
 
-  // Fallback to local prompt (not stored in Opik)
-  console.log("[Opik] Using local llm-judge prompt template (not versioned in Opik)");
-  return {
-    template: LLM_JUDGE_PROMPT,
-    commit: null,
-    fromOpik: false,
-  };
+  return { template: LLM_JUDGE_PROMPT, commit: null, fromOpik: false };
 }
 
 /**

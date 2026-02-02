@@ -63,6 +63,25 @@ export function Tooltip({
         break;
     }
 
+    // Clamp to viewport bounds so tooltip never overflows off-screen
+    const pad = 8;
+    const vw = window.innerWidth;
+
+    if (position === "top" || position === "bottom") {
+      // These use translate(-50%, ...) so the tooltip is centered on x
+      const halfWidth = maxWidth / 2;
+      if (x - halfWidth < pad) x = halfWidth + pad;
+      if (x + halfWidth > vw - pad) x = vw - halfWidth - pad;
+    }
+    if (position === "left") {
+      // translate(-100%, -50%) — tooltip extends left from x
+      if (x - maxWidth < pad) x = maxWidth + pad;
+    }
+    if (position === "right") {
+      // translate(0, -50%) — tooltip extends right from x
+      if (x + maxWidth > vw - pad) x = vw - maxWidth - pad;
+    }
+
     setCoords({ x, y });
   };
 

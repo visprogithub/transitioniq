@@ -34,7 +34,10 @@ function getOpikClient(): Opik | null {
 }
 
 /**
- * Test dataset for discharge readiness evaluation
+ * Test dataset for discharge readiness evaluation.
+ * All 12 patients are available for local/comprehensive runs.
+ * For cloud experiments (via the API route), use CORE_DATASET (first 3)
+ * to keep evaluation time under ~30s per model.
  */
 export const EXPERIMENT_DATASET = [
   {
@@ -149,6 +152,13 @@ export const EXPERIMENT_DATASET = [
     expectedHighRiskCount: { min: 2, max: 6 },
   },
 ];
+
+/**
+ * Core dataset — the 3 essential test patients covering the full severity
+ * spectrum (not_ready / caution / ready). Used by the cloud API route to
+ * keep experiment runtime under ~30s per model instead of ~2min+ with all 12.
+ */
+export const CORE_DATASET = EXPERIMENT_DATASET.slice(0, 3);
 
 // ─── Custom Opik Metrics ─────────────────────────────────────────────
 
@@ -401,14 +411,15 @@ export interface OpikExperimentResult {
  * Run an Opik experiment using the proper evaluate() API.
  * This creates a REAL experiment in the Opik dashboard (not just traces).
  *
- * All 12 patients are evaluated. The route has maxDuration=300 set for timeout.
- *
  * @param experimentName - Name for the experiment
  * @param modelId - Which LLM model to use for analysis
+ * @param patientSubset - Optional subset of patients to evaluate (default: all 12).
+ *   Pass CORE_DATASET for cloud/API runs to keep it fast (~30s vs ~2min+).
  */
 export async function runOpikExperiment(
   experimentName: string = `discharge-eval-${Date.now()}`,
   modelId?: string,
+  patientSubset?: typeof EXPERIMENT_DATASET,
 ): Promise<OpikExperimentResult> {
   const opik = getOpikClient();
   if (!opik) {
@@ -426,8 +437,8 @@ export async function runOpikExperiment(
   const projectName = process.env.OPIK_PROJECT_NAME || "transitioniq";
   const opikDashboardUrl = `https://www.comet.com/opik/${projectName}/experiments`;
 
-  // Get or create the dataset with all 12 patients
-  const dataset = await getOrCreateOpikDataset();
+  // Get or create the dataset (subset for cloud API, all 12 for local)
+  const dataset = await getOrCreateOpikDataset(undefined, patientSubset);
 
   // Track results locally for our response
   const localResults: OpikExperimentResult["results"] = [];
@@ -477,25 +488,29 @@ export async function runOpikExperiment(
       });
 
       return {
-        score: analysis.score,
-        status: analysis.status,
-        highRiskCount,
-        riskFactorCount: analysis.riskFactors.length,
-        latencyMs,
-        modelId: activeModel,
+        output: {
+          score: analysis.score,
+          status: analysis.status,
+          highRiskCount,
+          riskFactorCount: analysis.riskFactors.length,
+          latencyMs,
+          modelId: activeModel,
+        },
       };
     } catch (error) {
       const latencyMs = Date.now() - startTime;
       console.error(`[Opik Experiment] LLM analysis failed for ${input.patient_id}:`, error);
 
       return {
-        score: -1,
-        status: "error",
-        highRiskCount: 0,
-        riskFactorCount: 0,
-        latencyMs,
-        modelId: activeModel,
-        error: error instanceof Error ? error.message : "Unknown error",
+        output: {
+          score: -1,
+          status: "error",
+          highRiskCount: 0,
+          riskFactorCount: 0,
+          latencyMs,
+          modelId: activeModel,
+          error: error instanceof Error ? error.message : "Unknown error",
+        },
       };
     }
   };
@@ -563,7 +578,7 @@ export async function runOpikExperiment(
     opikDashboardUrl,
     results: localResults,
     summary: {
-      totalCases: EXPERIMENT_DATASET.length,
+      totalCases: localResults.length,
       passedCases,
       passRate,
       avgScore,
@@ -624,10 +639,13 @@ async function runManualTracingFallback(
 /**
  * Run experiments across MULTIPLE models.
  * Creates a separate Opik experiment per model for side-by-side comparison.
+ *
+ * @param patientSubset - Optional subset of patients (default: all 12).
  */
 export async function runMultiModelExperiment(
   experimentName: string,
   modelIds: string[],
+  patientSubset?: typeof EXPERIMENT_DATASET,
 ): Promise<{
   experiments: OpikExperimentResult[];
   comparison: Record<string, { avgScore: number; passRate: number; avgLatencyMs: number }>;
@@ -637,7 +655,7 @@ export async function runMultiModelExperiment(
   for (const modelId of modelIds) {
     console.log(`[Opik] Running experiment for model: ${modelId}`);
     try {
-      const result = await runOpikExperiment(experimentName, modelId);
+      const result = await runOpikExperiment(experimentName, modelId, patientSubset);
       experiments.push(result);
     } catch (error) {
       console.error(`[Opik] Experiment failed for model ${modelId}:`, error);

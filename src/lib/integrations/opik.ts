@@ -108,13 +108,21 @@ export async function traceAnalysis<T>(
     const duration = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
+    };
+
     if (span) {
       span.update({
         metadata: { duration_ms: duration, success: false, error: errorMessage },
+        errorInfo,
       });
       span.end();
     }
     if (trace) {
+      trace.update({ errorInfo });
       trace.end();
     }
 
@@ -282,13 +290,21 @@ export async function traceLLMCall<T>(
     const duration = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
+    };
+
     if (span) {
       span.update({
         metadata: { duration_ms: duration, success: false, error: errorMessage },
+        errorInfo,
       });
       span.end();
     }
     if (trace) {
+      trace.update({ errorInfo });
       trace.end();
     }
 
@@ -431,6 +447,12 @@ export async function traceError(
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorStack = error instanceof Error ? error.stack : undefined;
 
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: errorStack ?? errorMessage,
+    };
+
     const trace = opik.trace({
       name: `error-${source}`,
       metadata: {
@@ -451,7 +473,11 @@ export async function traceError(
         timestamp: new Date().toISOString(),
       },
     });
+
+    // Set errorInfo so Opik dashboard counts this as an error trace
+    span.update({ errorInfo });
     span.end();
+    trace.update({ errorInfo });
     trace.end();
 
     await flushTraces();

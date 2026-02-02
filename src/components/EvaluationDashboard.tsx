@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Play,
@@ -15,6 +15,7 @@ import {
   Cloud,
   FlaskConical,
   Database,
+  ShieldAlert,
 } from "lucide-react";
 
 interface ModelSummary {
@@ -131,6 +132,45 @@ export function EvaluationDashboard() {
   const [opikError, setOpikError] = useState<string | null>(null);
   const [isPushingDataset, setIsPushingDataset] = useState(false);
   const [datasetPushResult, setDatasetPushResult] = useState<{ success: boolean; message: string; itemCount?: number } | null>(null);
+  const [rateLimitResetTime, setRateLimitResetTime] = useState<number | null>(null);
+  const [rateLimitCountdown, setRateLimitCountdown] = useState<string>("");
+
+  // Handle rate limit 429 responses
+  const handleRateLimitResponse = useCallback(async (response: Response): Promise<boolean> => {
+    if (response.status === 429) {
+      const data = await response.json().catch(() => ({ retryAfterMs: 60000 }));
+      const resetTime = Date.now() + (data.retryAfterMs || 60000);
+      setRateLimitResetTime(resetTime);
+      return true;
+    }
+    return false;
+  }, []);
+
+  // Countdown timer for rate limit
+  useEffect(() => {
+    if (!rateLimitResetTime) {
+      setRateLimitCountdown("");
+      return;
+    }
+
+    const tick = () => {
+      const remaining = rateLimitResetTime - Date.now();
+      if (remaining <= 0) {
+        setRateLimitResetTime(null);
+        setRateLimitCountdown("");
+        return;
+      }
+      const minutes = Math.floor(remaining / 60000);
+      const seconds = Math.ceil((remaining % 60000) / 1000);
+      setRateLimitCountdown(minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`);
+    };
+
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [rateLimitResetTime]);
+
+  const isRateLimited = rateLimitResetTime !== null && rateLimitResetTime > Date.now();
 
   // Load available models
   async function loadModelsInfo() {
@@ -176,6 +216,10 @@ export function EvaluationDashboard() {
       });
       clearTimeout(timeoutId);
 
+      if (await handleRateLimitResponse(response)) {
+        throw new Error("Rate limit reached — try again when the cooldown expires.");
+      }
+
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || "Evaluation failed");
@@ -217,6 +261,10 @@ export function EvaluationDashboard() {
       clearTimeout(timeoutId);
 
       // Read response as text first, then parse — avoids crash on non-JSON responses
+      if (await handleRateLimitResponse(response)) {
+        throw new Error("Rate limit reached — try again when the cooldown expires.");
+      }
+
       const text = await response.text();
       let data;
       try {
@@ -491,13 +539,25 @@ export function EvaluationDashboard() {
               </div>
             </div>
 
+            {/* Rate Limit Banner */}
+            {isRateLimited && (
+              <div className="pt-4">
+                <div className="flex items-center gap-2 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm">
+                  <ShieldAlert className="w-5 h-5 flex-shrink-0" />
+                  <span>
+                    Demo rate limit reached. Try again in <strong>{rateLimitCountdown}</strong>.
+                  </span>
+                </div>
+              </div>
+            )}
+
             {/* Run Buttons */}
             <div className="pt-4 space-y-4">
               <div className="flex flex-wrap gap-4">
                 {/* Local Evaluation Button */}
                 <button
                   onClick={runEvaluation}
-                  disabled={isRunningEval || selectedModels.length === 0}
+                  disabled={isRunningEval || selectedModels.length === 0 || isRateLimited}
                   className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-700 text-white rounded-lg font-medium hover:from-purple-700 hover:to-purple-800 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isRunningEval ? (
@@ -505,13 +565,13 @@ export function EvaluationDashboard() {
                   ) : (
                     <Play className="w-5 h-5" />
                   )}
-                  {isRunningEval ? "Running Evaluation..." : "Run Local Evaluation"}
+                  {isRateLimited ? `Rate limited (${rateLimitCountdown})` : isRunningEval ? "Running Evaluation..." : "Run Local Evaluation"}
                 </button>
 
                 {/* Opik Cloud Experiment Button */}
                 <button
                   onClick={runOpikExperiment}
-                  disabled={isRunningOpikExperiment || selectedModels.length === 0}
+                  disabled={isRunningOpikExperiment || selectedModels.length === 0 || isRateLimited}
                   className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-blue-600 to-indigo-700 text-white rounded-lg font-medium hover:from-blue-700 hover:to-indigo-800 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isRunningOpikExperiment ? (
@@ -519,7 +579,7 @@ export function EvaluationDashboard() {
                   ) : (
                     <FlaskConical className="w-5 h-5" />
                   )}
-                  {isRunningOpikExperiment ? "Running Opik Experiment..." : "Run Opik Cloud Experiment"}
+                  {isRateLimited ? `Rate limited (${rateLimitCountdown})` : isRunningOpikExperiment ? "Running Opik Experiment..." : "Run Opik Cloud Experiment"}
                 </button>
 
                 {/* Push Dataset to Opik Button */}

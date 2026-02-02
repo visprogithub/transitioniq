@@ -3,9 +3,14 @@ import { getPatient } from "@/lib/data/demo-patients";
 import { generateDischargePlan } from "@/lib/integrations/analysis";
 import { traceGeminiCall, traceError } from "@/lib/integrations/opik";
 import { setActiveModel, resetLLMProvider } from "@/lib/integrations/llm-provider";
+import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 export async function POST(request: NextRequest) {
+  // Rate limit: plan generation (single LLM call)
+  const blocked = applyRateLimit(request, "generate");
+  if (blocked) return blocked;
+
   try {
     const body = await request.json();
     const { patientId, analysis, modelId } = body as { patientId: string; analysis: DischargeAnalysis; modelId?: string };

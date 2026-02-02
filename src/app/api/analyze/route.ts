@@ -7,9 +7,14 @@ import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
 import { traceDataSourceCall, traceError } from "@/lib/integrations/opik";
 import { getActiveModelId, setActiveModel, resetLLMProvider, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
 import { runAgent, getSession } from "@/lib/agents/orchestrator";
+import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import type { Patient } from "@/lib/types/patient";
 
 export async function POST(request: NextRequest) {
+  // Rate limit: agent pipeline (1-7 LLM calls)
+  const blocked = applyRateLimit(request, "analyze");
+  if (blocked) return blocked;
+
   try {
     const body = await request.json();
     const { patientId, useAgent = true, sessionId, modelId } = body;
