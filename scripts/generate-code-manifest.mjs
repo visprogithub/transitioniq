@@ -52,7 +52,7 @@ async function walkDirectory(dir) {
 
   for (const entry of entries) {
     const fullPath = join(dir, entry.name);
-    const relativePath = relative(ROOT, fullPath);
+    const relativePath = relative(ROOT, fullPath).replace(/\\/g, '/');
 
     if (shouldExclude(relativePath)) continue;
 

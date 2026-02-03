@@ -31,7 +31,7 @@ For this hackathon submission, all three views (Clinical, Patient, Evaluation) e
 ## Tech Stack
 
 - **Frontend**: Next.js 16 with App Router, TypeScript, Tailwind CSS, Framer Motion
-- **LLM**: Multi-provider support (OpenAI, HuggingFace, Gemini, Anthropic) via abstracted LLM provider
+- **LLM**: Multi-provider support (OpenAI, HuggingFace, Gemini) via abstracted LLM provider
 - **Agent Framework**: TypeScript ReAct-style orchestrator with tool chaining
 - **Observability**: Opik (Comet) for tracing, prompt versioning, evaluation, error tracking, and cost tracking
 - **Knowledge Base**: Zero-dependency TF-IDF vector search with medical NLP (synonym expansion, stemming)
@@ -41,7 +41,7 @@ For this hackathon submission, all three views (Clinical, Patient, Evaluation) e
 ## Features
 
 ### Clinical View
-- **Multi-Model Support** - Switch between OpenAI GPT-4o Mini, HuggingFace (Qwen, Llama), Gemini, and Anthropic Claude
+- **Multi-Model Support** - Switch between OpenAI GPT-4o Mini, HuggingFace (Qwen3 8B, Qwen3 30B), and Gemini (2.5 Flash, 2.5 Flash Lite)
 - **Animated Discharge Score** - Visual gauge (0-100) with status indicators and collapsible methodology explanation
 - **Risk Factor Cards** - Expandable cards with severity levels (high/moderate/low) and data source attribution (FDA, CMS, Guidelines, FHIR, RAG)
 - **AI-Generated Discharge Plans** - Comprehensive checklists tailored to patient risk factors
@@ -95,9 +95,8 @@ Create a `.env.local` file with at least one LLM provider:
 ```env
 # LLM Providers (at least one required)
 OPENAI_API_KEY=your_openai_key          # OpenAI GPT-4o Mini
-HF_API_KEY=your_huggingface_key         # HuggingFace (free tier available)
-GEMINI_API_KEY=your_gemini_key          # Google Gemini
-ANTHROPIC_API_KEY=your_anthropic_key    # Anthropic Claude
+HF_API_KEY=your_huggingface_key         # HuggingFace Qwen3 (free tier available)
+GEMINI_API_KEY=your_gemini_key          # Google Gemini 2.5 Flash
 
 # Observability (required for tracing)
 OPIK_API_KEY=your_opik_api_key
@@ -114,9 +113,8 @@ ADMIN_SECRET=your_admin_secret
 
 When multiple API keys are configured, the default model is selected in this order:
 1. OpenAI GPT-4o Mini (if `OPENAI_API_KEY` set)
-2. HuggingFace Qwen 7B (if `HF_API_KEY` set)
-3. Anthropic Claude 3 Haiku (if `ANTHROPIC_API_KEY` set)
-4. Gemini 2.0 Flash Lite (if `GEMINI_API_KEY` set)
+2. HuggingFace Qwen3 8B (if `HF_API_KEY` set)
+3. Gemini 2.5 Flash Lite (if `GEMINI_API_KEY` set)
 
 You can override this by setting `LLM_MODEL` or using the model selector in the UI.
 
@@ -186,23 +184,30 @@ npm run lint         # ESLint check
 
 ## Demo Patients
 
-| ID | Name | Scenario | Expected Score |
-|----|------|----------|----------------|
-| `demo-polypharmacy` | John Smith | 12 medications, warfarin + aspirin, no PCP follow-up | ~40-60 (Not Ready) |
-| `demo-heart-failure` | Mary Johnson | CHF + COPD, elevated BNP, multiple care gaps | ~30-50 (Not Ready) |
-| `demo-ready` | Robert Chen | Post-appendectomy, stable vitals, routine discharge | ~80-95 (Ready) |
+| ID | Name | Age/Sex | Scenario | Expected Score |
+|----|------|---------|----------|----------------|
+| `demo-polypharmacy` | John Smith | 68M | 12 medications, warfarin + aspirin, atrial fibrillation | ~40-60 (Not Ready) |
+| `demo-heart-failure` | Mary Johnson | 72F | Heart failure, COPD exacerbation, hypertension | ~50-70 (Caution) |
+| `demo-ready` | Robert Chen | 45M | Post-appendectomy, simple surgery recovery | ~85-100 (Ready) |
+| `demo-pediatric` | Emily Wilson | 8F | Post-tonsillectomy (pediatric) | ~85-100 (Ready) |
+| `demo-geriatric-fall` | Dorothy Martinez | 88F | Hip fracture, dementia, cognitive decline | ~20-40 (Not Ready) |
+| `demo-pregnancy-gdm` | Sarah Thompson | 32F | Gestational diabetes, hypertension | ~50-70 (Caution) |
+| `demo-renal-dialysis` | William Jackson | 65M | CKD Stage 4 on dialysis, diabetes, anemia | ~30-50 (Not Ready) |
+| `demo-psychiatric-bipolar` | Jennifer Adams | 45F | Bipolar disorder on lithium, anxiety | ~40-60 (Caution) |
+| `demo-oncology-neutropenic` | Michael Brown | 58M | Post-chemo colon cancer, severe neutropenia | ~30-50 (Not Ready) |
+| `demo-simple-surgery` | Lisa Garcia | 35F | Post-laparoscopic cholecystectomy | ~85-100 (Ready) |
+| `demo-extreme-polypharmacy` | Harold Wilson | 75M | 18 medications, critical lab values | ~10-30 (Not Ready) |
+| `demo-social-risk` | David Thompson | 52M | Homeless, COPD exacerbation, alcohol use disorder | ~20-50 (Not Ready) |
 
 ## Available Models
 
 | Model ID | Provider | Notes |
 |----------|----------|-------|
 | `openai-gpt-4o-mini` | OpenAI | Fast, reliable, low cost |
-| `hf-qwen-7b` | HuggingFace | Free tier, Qwen 2.5 7B Instruct |
-| `hf-llama-3.2-3b` | HuggingFace | Free tier, Llama 3.2 3B Instruct |
-| `gemini-2.0-flash` | Google | 5 RPM free tier limit |
-| `gemini-2.0-flash-lite` | Google | 15 RPM free tier limit |
-| `claude-3-haiku` | Anthropic | Fast, cost-effective |
-| `claude-3-sonnet` | Anthropic | Higher quality, higher cost |
+| `hf-qwen3-8b` | HuggingFace | Free tier, Qwen3 8B |
+| `hf-qwen3-30b-a3b` | HuggingFace | Free tier, Qwen3 30B (3B active) |
+| `gemini-2.5-flash` | Google | Latest Gemini Flash |
+| `gemini-2.5-flash-lite` | Google | Lightweight Gemini variant |
 
 ## Architecture
 
@@ -243,7 +248,6 @@ npm run lint         # ESLint check
 |  * OpenAI     |
 |  * HuggingFace|
 |  * Gemini     |
-|  * Anthropic  |
 +---------------+
 ```
 

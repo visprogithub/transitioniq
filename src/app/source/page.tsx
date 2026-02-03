@@ -12,8 +12,6 @@ import {
   FolderOpen,
   ChevronRight,
   ChevronDown,
-  Eye,
-  EyeOff,
   Clock,
   ShieldOff,
   FileCode,
@@ -257,14 +255,11 @@ const markdownComponents: Record<string, React.ComponentType<any>> = {
 /* ------------------------------------------------------------------ */
 
 export default function SourceViewerPage() {
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [selectedFile, setSelectedFile] = useState<string>('README.md');
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [error, setError] = useState<{ type: string; message: string } | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   // --- Anti-copy friction: disable right-click on protected areas ---
   useEffect(() => {
@@ -290,18 +285,11 @@ export default function SourceViewerPage() {
     return () => document.removeEventListener('keydown', handler);
   }, []);
 
-  const handleSubmit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      setLoading(true);
-      setError(null);
-
+  // --- Auto-fetch manifest on mount ---
+  useEffect(() => {
+    async function fetchManifest() {
       try {
-        const res = await fetch('/api/source', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password }),
-        });
+        const res = await fetch('/api/source');
         const data = await res.json();
 
         if (!res.ok) {
@@ -310,23 +298,22 @@ export default function SourceViewerPage() {
         }
 
         setManifest(data);
-        setAuthenticated(true);
 
         // Auto-expand top-level directories
         const topDirs = new Set<string>();
-        (data.files as FileEntry[]).forEach((f) => {
+        (data.files as FileEntry[]).forEach((f: FileEntry) => {
           const firstSlash = f.path.indexOf('/');
           if (firstSlash !== -1) topDirs.add(f.path.slice(0, firstSlash));
         });
         setExpandedDirs(topDirs);
       } catch {
-        setError({ type: 'network', message: 'Failed to connect. Please try again.' });
+        setError({ type: 'network', message: 'Failed to load source code. Please try again.' });
       } finally {
         setLoading(false);
       }
-    },
-    [password],
-  );
+    }
+    fetchManifest();
+  }, []);
 
   const tree = useMemo(() => {
     if (!manifest) return [];
@@ -347,81 +334,42 @@ export default function SourceViewerPage() {
     });
   }, []);
 
+  /* ---- Loading state ---- */
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+        <div className="text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-zinc-800 mb-6 animate-pulse">
+            <FileCode size={32} className="text-blue-400" />
+          </div>
+          <p className="text-zinc-400 text-sm">Loading source code...</p>
+        </div>
+      </div>
+    );
+  }
+
   /* ---- Expired / Disabled states ---- */
-  if (error && (error.type === 'expired' || error.type === 'disabled')) {
+  if (error) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
         <div className="max-w-md w-full text-center">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-zinc-800 mb-6">
             {error.type === 'expired' ? (
               <Clock size={32} className="text-zinc-500" />
-            ) : (
+            ) : error.type === 'disabled' ? (
               <ShieldOff size={32} className="text-zinc-500" />
+            ) : (
+              <FileText size={32} className="text-zinc-500" />
             )}
           </div>
           <h1 className="text-xl font-semibold text-zinc-200 mb-2">
-            {error.type === 'expired' ? 'Access Expired' : 'Viewer Disabled'}
+            {error.type === 'expired'
+              ? 'Access Expired'
+              : error.type === 'disabled'
+                ? 'Viewer Disabled'
+                : 'Unable to Load'}
           </h1>
           <p className="text-zinc-500">{error.message}</p>
-        </div>
-      </div>
-    );
-  }
-
-  /* ---- Password gate ---- */
-  if (!authenticated) {
-    return (
-      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
-        <div className="max-w-sm w-full">
-          <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-zinc-800 mb-6">
-              <Lock size={32} className="text-blue-400" />
-            </div>
-            <h1 className="text-2xl font-bold text-zinc-100 mb-1">TransitionIQ</h1>
-            <p className="text-zinc-500 text-sm">Source Code Viewer</p>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label htmlFor="password" className="block text-sm text-zinc-400 mb-1.5">
-                Access Password
-              </label>
-              <div className="relative">
-                <input
-                  id="password"
-                  type={showPassword ? 'text' : 'password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-2.5 text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 pr-10"
-                  placeholder="Enter password"
-                  autoFocus
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
-                >
-                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-                </button>
-              </div>
-            </div>
-
-            {error && (error.type === 'unauthorized' || error.type === 'network') && (
-              <p className="text-red-400 text-sm">{error.message}</p>
-            )}
-
-            <button
-              type="submit"
-              disabled={loading || !password}
-              className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white font-medium rounded-lg px-4 py-2.5 transition-colors"
-            >
-              {loading ? 'Verifying...' : 'View Source Code'}
-            </button>
-          </form>
-
-          <p className="text-center text-zinc-600 text-xs mt-6">
-            Access expires February 19, 2026
-          </p>
         </div>
       </div>
     );

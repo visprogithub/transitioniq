@@ -19,7 +19,7 @@ function getManifest() {
   return manifestCache;
 }
 
-export async function POST(request: Request) {
+export async function GET() {
   // === KILL SWITCH (scoped to this route only) ===
   // Set CODE_VIEWER_ENABLED=true in Vercel env vars to enable.
   // Remove or set to anything else to instantly nuke access.
@@ -37,24 +37,6 @@ export async function POST(request: Request) {
     return NextResponse.json(
       { error: 'expired', message: 'Source code access has expired.' },
       { status: 403 }
-    );
-  }
-
-  // === PASSWORD CHECK ===
-  let body: { password?: string };
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json(
-      { error: 'bad_request', message: 'Invalid request body.' },
-      { status: 400 }
-    );
-  }
-
-  if (!body.password || body.password !== process.env.CODE_VIEWER_PASSWORD) {
-    return NextResponse.json(
-      { error: 'unauthorized', message: 'Invalid password.' },
-      { status: 401 }
     );
   }
 
