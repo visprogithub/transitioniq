@@ -133,6 +133,70 @@ async function main() {
       return { hash, author, date, message: msgParts.join('|') };
     });
 
+  // Capture diffs for each commit
+  const MAX_DIFF_SIZE = 50 * 1024; // 50KB cap per commit
+  for (const commit of gitHistory) {
+    try {
+      // Try parent diff first, fall back to --root for initial commit
+      // Use ~1 instead of ^ because Windows cmd interprets ^ as escape
+      let diff = '';
+      try {
+        diff = execSync(
+          `git diff ${commit.hash}~1..${commit.hash} -- ${INCLUDE_PATHS.join(' ')}`,
+          { cwd: ROOT, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] },
+        );
+      } catch {
+        try {
+          diff = execSync(
+            `git diff --root ${commit.hash} -- ${INCLUDE_PATHS.join(' ')}`,
+            { cwd: ROOT, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] },
+          );
+        } catch {
+          // skip this commit's diff
+        }
+      }
+
+      if (diff && diff.length <= MAX_DIFF_SIZE) {
+        commit.diff = diff;
+      } else if (diff) {
+        commit.diff = diff.slice(0, MAX_DIFF_SIZE) + '\n\n... diff truncated (exceeded 50KB) ...';
+      }
+
+      // Get stat summary
+      try {
+        const stat = execSync(
+          `git diff --stat ${commit.hash}~1..${commit.hash} -- ${INCLUDE_PATHS.join(' ')}`,
+          { cwd: ROOT, encoding: 'utf-8', maxBuffer: 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] },
+        );
+        const summaryMatch = stat.match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/);
+        if (summaryMatch) {
+          commit.filesChanged = parseInt(summaryMatch[1]) || 0;
+          commit.insertions = parseInt(summaryMatch[2]) || 0;
+          commit.deletions = parseInt(summaryMatch[3]) || 0;
+        }
+      } catch {
+        // stat for root commit
+        try {
+          const stat = execSync(
+            `git diff --stat --root ${commit.hash} -- ${INCLUDE_PATHS.join(' ')}`,
+            { cwd: ROOT, encoding: 'utf-8', maxBuffer: 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] },
+          );
+          const summaryMatch = stat.match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/);
+          if (summaryMatch) {
+            commit.filesChanged = parseInt(summaryMatch[1]) || 0;
+            commit.insertions = parseInt(summaryMatch[2]) || 0;
+            commit.deletions = parseInt(summaryMatch[3]) || 0;
+          }
+        } catch {
+          // skip
+        }
+      }
+    } catch (err) {
+      console.warn(`Could not capture diff for ${commit.hash}: ${err.message}`);
+    }
+  }
+  console.log(`Captured diffs for ${gitHistory.filter(c => c.diff).length}/${gitHistory.length} commits`);
+
   const manifest = {
     generatedAt: new Date().toISOString(),
     fileCount: files.length,

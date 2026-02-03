@@ -36,6 +36,10 @@ interface GitCommit {
   author: string;
   date: string;
   message: string;
+  filesChanged?: number;
+  insertions?: number;
+  deletions?: number;
+  diff?: string;
 }
 
 interface Manifest {
@@ -251,6 +255,48 @@ const markdownComponents: Record<string, React.ComponentType<any>> = {
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 /* ------------------------------------------------------------------ */
+/*  Diff Renderer                                                      */
+/* ------------------------------------------------------------------ */
+
+function DiffViewer({ diff }: { diff: string }) {
+  const lines = diff.split('\n');
+
+  return (
+    <div className="mt-3 rounded-lg border border-zinc-800 overflow-hidden text-xs font-mono">
+      {lines.map((line, i) => {
+        let bg = '';
+        let textColor = 'text-zinc-500';
+
+        if (line.startsWith('diff --git')) {
+          bg = 'bg-zinc-800/80';
+          textColor = 'text-blue-400 font-semibold';
+        } else if (line.startsWith('---') || line.startsWith('+++')) {
+          bg = 'bg-zinc-800/50';
+          textColor = 'text-zinc-400';
+        } else if (line.startsWith('@@')) {
+          bg = 'bg-indigo-950/40';
+          textColor = 'text-indigo-400';
+        } else if (line.startsWith('+')) {
+          bg = 'bg-green-950/40';
+          textColor = 'text-green-300';
+        } else if (line.startsWith('-')) {
+          bg = 'bg-red-950/40';
+          textColor = 'text-red-300';
+        } else if (line.startsWith('index') || line.startsWith('new file') || line.startsWith('deleted file')) {
+          textColor = 'text-zinc-600';
+        }
+
+        return (
+          <div key={i} className={`px-3 py-0 leading-5 whitespace-pre-wrap break-all ${bg} ${textColor}`}>
+            {line || '\u00A0'}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main Page                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -260,6 +306,7 @@ export default function SourceViewerPage() {
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [error, setError] = useState<{ type: string; message: string } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [expandedCommits, setExpandedCommits] = useState<Set<string>>(new Set());
 
   // --- Anti-copy friction: disable right-click on protected areas ---
   useEffect(() => {
@@ -330,6 +377,15 @@ export default function SourceViewerPage() {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const toggleCommit = useCallback((hash: string) => {
+    setExpandedCommits((prev) => {
+      const next = new Set(prev);
+      if (next.has(hash)) next.delete(hash);
+      else next.add(hash);
       return next;
     });
   }, []);
@@ -445,7 +501,10 @@ export default function SourceViewerPage() {
                 onDragStart={(e) => e.preventDefault()}
               >
                 <div className="max-w-3xl space-y-0">
-                  {manifest?.gitHistory?.map((commit, i) => (
+                  {manifest?.gitHistory?.map((commit, i) => {
+                    const isExpanded = expandedCommits.has(commit.hash);
+                    const hasDiff = !!commit.diff;
+                    return (
                     <div key={commit.hash + i} className="flex items-start gap-4 group">
                       {/* Timeline line + dot */}
                       <div className="flex flex-col items-center shrink-0 pt-1">
@@ -453,20 +512,41 @@ export default function SourceViewerPage() {
                           i === 0 ? 'border-blue-400 bg-blue-400/30' : 'border-zinc-600 bg-zinc-800'
                         }`} />
                         {i < (manifest?.gitHistory?.length ?? 0) - 1 && (
-                          <div className="w-px h-full min-h-8 bg-zinc-800" />
+                          <div className="w-px flex-1 min-h-8 bg-zinc-800" />
                         )}
                       </div>
                       {/* Commit info */}
-                      <div className="pb-6 min-w-0">
-                        <p className="text-zinc-200 text-sm leading-snug break-words">{commit.message}</p>
-                        <div className="flex items-center gap-3 mt-1.5 text-xs text-zinc-500">
-                          <code className="text-amber-400/80 bg-zinc-800/80 px-1.5 py-0.5 rounded font-mono text-xs">{commit.hash}</code>
-                          <span>{commit.author}</span>
-                          <span>{commit.date}</span>
-                        </div>
+                      <div className="pb-6 min-w-0 flex-1">
+                        <button
+                          onClick={() => hasDiff && toggleCommit(commit.hash)}
+                          className={`text-left w-full ${hasDiff ? 'cursor-pointer' : 'cursor-default'}`}
+                        >
+                          <p className="text-zinc-200 text-sm leading-snug break-words">{commit.message}</p>
+                          <div className="flex items-center gap-3 mt-1.5 text-xs text-zinc-500">
+                            <code className="text-amber-400/80 bg-zinc-800/80 px-1.5 py-0.5 rounded font-mono text-xs">{commit.hash}</code>
+                            <span>{commit.author}</span>
+                            <span>{commit.date}</span>
+                            {commit.filesChanged != null && (
+                              <span className="text-zinc-600">
+                                {commit.filesChanged} file{commit.filesChanged !== 1 ? 's' : ''}
+                                {commit.insertions ? <span className="text-green-500 ml-1">+{commit.insertions}</span> : null}
+                                {commit.deletions ? <span className="text-red-500 ml-1">-{commit.deletions}</span> : null}
+                              </span>
+                            )}
+                            {hasDiff && (
+                              <span className="text-zinc-600">
+                                {isExpanded ? '▾ hide diff' : '▸ view diff'}
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                        {isExpanded && commit.diff && (
+                          <DiffViewer diff={commit.diff} />
+                        )}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>

@@ -298,6 +298,25 @@ All prompts are stored and versioned in Opik's Prompt Library with local fallbac
 - **Task Completion**: Automated checks for score, status, risk factors, and recommendations
 - **Conversation Metrics**: Turn count, tool usage, and task completion tracking
 
+## Source Code Viewer
+
+Navigate to [`/source`](/source) to access the built-in source code viewer for hackathon review.
+
+### Browsing Files
+- The **sidebar** shows a folder tree — click folders to expand/collapse, click files to view
+- **Syntax highlighting** for TypeScript, TSX, JavaScript, JSON, CSS, and Markdown
+- **Markdown files** (like this README) render with full formatting
+
+### Git History
+- Click **Git History** at the top of the sidebar to view the full commit timeline
+- Each commit shows the message, hash, author, date, and file change stats (+/- lines)
+- Click any commit to **expand and view the full diff** with color-coded additions (green) and deletions (red)
+
+### Access Controls
+- **Kill switch**: Set `CODE_VIEWER_ENABLED=false` in Vercel to instantly disable access
+- **Auto-expiry**: Access automatically expires February 19, 2026
+- **No indexing**: `/source` is blocked from search engines via `robots.txt` and `noindex` meta tags
+
 ## Hackathon
 
 Built for the Encode Club "Commit To Change" (Comet Resolution V2) Hackathon, targeting:
