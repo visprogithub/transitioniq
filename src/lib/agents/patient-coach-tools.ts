@@ -854,6 +854,23 @@ async function executeGetDietaryGuidance(
       ],
       cautions: [],
     },
+    general: {
+      recommendation: "Eating well helps your body heal and recover. Here are general guidelines for a healthy recovery diet.",
+      tips: [
+        "Eat a balanced diet with fruits, vegetables, whole grains, and lean protein",
+        "Stay hydrated — drink water throughout the day",
+        "Eat smaller, more frequent meals if large meals are hard to manage",
+        "Choose soft, easy-to-digest foods if you have nausea or a poor appetite",
+        "Ask your care team about any specific dietary restrictions for your condition",
+      ],
+      cautions: hasWarfarin
+        ? ["Keep vitamin K intake consistent while on Warfarin — don't suddenly increase or decrease leafy greens"]
+        : hasHeartFailure
+          ? ["Limit sodium to less than 2,000mg per day", "You may need to limit fluids — ask your doctor"]
+          : hasDiabetes
+            ? ["Watch your carbohydrate and sugar intake", "Don't skip meals if you take diabetes medication"]
+            : [],
+    },
   };
 
   // Find matching dietary info

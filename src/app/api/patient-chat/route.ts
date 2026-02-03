@@ -347,9 +347,16 @@ function detectRequiredTool(message: string): { name: string; arguments: Record<
   ];
   for (const keyword of dietKeywords) {
     if (lowerMsg.includes(keyword)) {
+      // Extract specific topic if possible, otherwise use "general"
+      const topicMap: Record<string, string> = {
+        salt: "sodium", sodium: "sodium", sugar: "sugar", sweet: "sugar",
+        protein: "protein", meat: "protein", fluid: "fluids", water: "fluids",
+        drink: "fluids", warfarin: "warfarin",
+      };
+      const topic = Object.entries(topicMap).find(([k]) => lowerMsg.includes(k))?.[1] || "general";
       return {
         name: "getDietaryGuidance",
-        arguments: { question: message }
+        arguments: { topic }
       };
     }
   }
@@ -361,9 +368,16 @@ function detectRequiredTool(message: string): { name: string; arguments: Record<
   ];
   for (const keyword of activityKeywords) {
     if (lowerMsg.includes(keyword)) {
+      // Extract specific activity if possible, otherwise use "general"
+      const activityMap: Record<string, string> = {
+        walk: "walking", exercise: "exercise", lift: "lifting", drive: "driving",
+        driving: "driving", shower: "bathing", bath: "bathing", stairs: "stairs",
+        work: "work", physical: "exercise",
+      };
+      const activity = Object.entries(activityMap).find(([k]) => lowerMsg.includes(k))?.[1] || "general";
       return {
         name: "getActivityGuidance",
-        arguments: { question: message }
+        arguments: { activity }
       };
     }
   }
@@ -514,8 +528,8 @@ export async function POST(request: NextRequest) {
     // Now that we have patientId, update trace with thread grouping
     const threadId = `chat-${patientId}`;
     trace?.update({
+      threadId,
       metadata: {
-        threadId,
         patientId,
       },
     });
@@ -596,25 +610,26 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Build conversation context
+    // Build conversation context — keep system prompt separate for proper role-based messaging
     const systemPrompt = buildSystemPrompt(patient, analysis || null);
     const provider = createLLMProvider();
 
     // Build memory context from previous sessions/turns
     const memoryContext = buildContextForLLM(memorySessionId);
 
-    // Build the full prompt with memory context and COMPACTED conversation history
-    let fullPrompt = `${systemPrompt}\n\n`;
+    // Build user prompt (context + history + current message + instructions)
+    // System prompt is passed separately via provider options for proper role:"system" handling
+    let userPrompt = "";
 
     if (memoryContext) {
-      fullPrompt += `## Memory Context\n${memoryContext}\n\n`;
+      userPrompt += `## Memory Context\n${memoryContext}\n\n`;
     }
 
-    fullPrompt += `## Conversation History\n`;
+    userPrompt += `## Conversation History\n`;
 
     // Add summary of older messages if conversation was compacted
     if (wasTruncated && conversationSummary) {
-      fullPrompt += `[Summary of earlier conversation: ${conversationSummary}]\n\n`;
+      userPrompt += `[Summary of earlier conversation: ${conversationSummary}]\n\n`;
     }
 
     // Add recent messages verbatim (but still with length limits)
@@ -622,26 +637,26 @@ export async function POST(request: NextRequest) {
       if (msg.role === "user") {
         // Truncate very long messages
         const content = msg.content.length > 500 ? msg.content.slice(0, 500) + "..." : msg.content;
-        fullPrompt += `Patient: ${content}\n`;
+        userPrompt += `Patient: ${content}\n`;
       } else if (msg.role === "assistant") {
         // Truncate assistant responses more aggressively
         const content = msg.content.length > 300 ? msg.content.slice(0, 300) + "..." : msg.content;
-        fullPrompt += `Coach: ${content}\n`;
+        userPrompt += `Coach: ${content}\n`;
       } else if (msg.role === "tool") {
-        fullPrompt += `[Tool used]\n`;
+        userPrompt += `[Tool used]\n`;
       }
     }
 
-    // Check if prompt is too long
-    const promptCharCount = fullPrompt.length;
-    if (promptCharCount > LIMITS.MAX_PROMPT_CHARS) {
-      // Truncate the prompt
-      console.warn(`[Patient Chat] Prompt too long (${promptCharCount} chars), truncating`);
-      fullPrompt = fullPrompt.slice(0, LIMITS.MAX_PROMPT_CHARS) + "\n[Earlier context truncated]\n";
+    // Check if user prompt is too long (system prompt is separate)
+    const userPromptCharCount = userPrompt.length;
+    if (userPromptCharCount > LIMITS.MAX_PROMPT_CHARS) {
+      // Truncate the user prompt
+      console.warn(`[Patient Chat] User prompt too long (${userPromptCharCount} chars), truncating`);
+      userPrompt = userPrompt.slice(0, LIMITS.MAX_PROMPT_CHARS) + "\n[Earlier context truncated]\n";
     }
 
-    fullPrompt += `\nPatient: ${message}\n\n`;
-    fullPrompt += `## Instructions
+    userPrompt += `\nPatient: ${message}\n\n`;
+    userPrompt += `## Instructions
 You are responding to the patient's message above. Give a COMPLETE, helpful answer.
 
 IMPORTANT: For these types of questions, you MUST use a tool first:
@@ -670,6 +685,9 @@ Remember:
 - Encourage asking their healthcare team for clarification
 
 Coach:`;
+
+    // Combined prompt for Opik logging (full context for observability)
+    const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
 
     // PROACTIVE TOOL DETECTION: Detect required tool from message content
     // This bypasses unreliable LLM JSON output
@@ -715,17 +733,17 @@ Coach:`;
       });
       toolSpan?.end();
 
-      // Generate response using tool results
-      const toolResultsPrompt = `${fullPrompt}
+      // Generate response using tool results (system prompt passed separately via options)
+      const toolResultsPrompt = `${userPrompt}
 
 I looked up information to help answer your question:
 
 Tool: ${proactiveTool.name}
 Result: ${JSON.stringify(toolResult.result, null, 2)}
 
-Now provide a warm, helpful response to the patient incorporating this information.
-Use simple language. Be specific and actionable. Don't say "let's check" - you already checked!
-Include any relevant warnings (when to call 911, when to call the doctor).
+You MUST use the tool results above to give a complete, specific answer to the patient's question.
+Do NOT ask follow-up questions or say "tell me more" — answer directly using the data provided.
+Use simple language. Be specific and actionable. Include any relevant warnings (when to call 911, when to call the doctor).
 
 Coach:`;
 
@@ -737,6 +755,7 @@ Coach:`;
 
       const finalLLMResponse = await provider.generate(toolResultsPrompt, {
         spanName: "patient-chat-with-tool",
+        systemPrompt,
         metadata: {
           patient_id: patientId,
           purpose: "final-response",
@@ -758,8 +777,9 @@ Coach:`;
         metadata: { purpose: "determine-response-or-tool" },
       });
 
-      const initialResponse = await provider.generate(fullPrompt, {
+      const initialResponse = await provider.generate(userPrompt, {
         spanName: "patient-chat-initial",
+        systemPrompt,
         metadata: {
           patient_id: patientId,
           purpose: "initial-response",
@@ -818,8 +838,8 @@ Coach:`;
         toolSpan?.end();
       }
 
-      // Second LLM call - generate response using tool results
-      const toolResultsPrompt = `${fullPrompt}
+      // Second LLM call - generate response using tool results (system prompt passed separately)
+      const toolResultsPrompt = `${userPrompt}
 
 I used the following tools to help answer the patient's question:
 
@@ -830,8 +850,9 @@ Result: ${JSON.stringify(t.result, null, 2)}`
   )
   .join("\n\n")}
 
-Now, using this information, provide a friendly, supportive response to the patient.
-Incorporate the tool results naturally into your response without mentioning that you used tools.
+You MUST use the tool results above to give a complete, specific answer to the patient's question.
+Do NOT ask follow-up questions or say "tell me more" — answer directly using the data provided.
+Incorporate the information naturally without mentioning that you used tools.
 Use simple language and be encouraging.
 
 Coach:`;
@@ -844,6 +865,7 @@ Coach:`;
 
       const finalLLMResponse = await provider.generate(toolResultsPrompt, {
         spanName: "patient-chat-final",
+        systemPrompt,
         metadata: {
           patient_id: patientId,
           purpose: "final-response",
@@ -902,7 +924,7 @@ Coach:`;
       conversationId: turnId,
       turnNumber,
       tokensUsed: {
-        promptChars: promptCharCount,
+        promptChars: userPromptCharCount,
         historyMessages: recentMessages.length,
         truncated: wasTruncated,
       },
@@ -916,7 +938,7 @@ Coach:`;
         tools_used: toolsUsed.map((t) => t.name),
       },
       metadata: {
-        prompt_chars: promptCharCount,
+        prompt_chars: userPromptCharCount,
         estimated_prompt_tokens: estimateTokens(fullPrompt),
         history_compacted: wasTruncated,
       },

@@ -60,12 +60,12 @@ export async function traceAgentExecution<T>(
 
   const trace = opik.trace({
     name: "agent-execution",
+    threadId: options?.threadId || sessionId,
     metadata: {
       sessionId,
       patientId,
       agent_type: "discharge-readiness",
       category: "agent",
-      threadId: options?.threadId || sessionId,
     },
   });
 
@@ -137,11 +137,11 @@ export async function traceToolCall<T>(
 
   const trace = opik.trace({
     name: `tool-${toolName}`,
+    threadId: options?.threadId || sessionId,
     metadata: {
       sessionId,
       tool: toolName,
       category: "tool_call",
-      threadId: options?.threadId || sessionId,
     },
   });
 
@@ -191,7 +191,8 @@ export async function logToolCorrectness(
   toolName: ToolName,
   sessionId: string,
   isCorrect: boolean,
-  reason: string
+  reason: string,
+  options?: { threadId?: string }
 ): Promise<void> {
   const opik = getOpikClient();
   if (!opik) {
@@ -201,6 +202,7 @@ export async function logToolCorrectness(
 
   const trace = opik.trace({
     name: `evaluation-tool-correctness`,
+    threadId: options?.threadId || sessionId,
     metadata: {
       sessionId,
       tool: toolName,
@@ -236,7 +238,8 @@ export async function logAgentTrajectory(
     tool?: ToolName;
     reasoning: string;
     success: boolean;
-  }>
+  }>,
+  options?: { threadId?: string }
 ): Promise<void> {
   const opik = getOpikClient();
   if (!opik) {
@@ -252,6 +255,7 @@ export async function logAgentTrajectory(
 
   const trace = opik.trace({
     name: "evaluation-agent-trajectory",
+    threadId: options?.threadId || sessionId,
     metadata: {
       sessionId,
       patientId,
@@ -289,7 +293,8 @@ export async function logConversationMetrics(
   sessionId: string,
   turnCount: number,
   toolCallsTotal: number,
-  taskCompleted: boolean
+  taskCompleted: boolean,
+  options?: { threadId?: string }
 ): Promise<void> {
   const opik = getOpikClient();
   if (!opik) {
@@ -299,6 +304,7 @@ export async function logConversationMetrics(
 
   const trace = opik.trace({
     name: "evaluation-conversation",
+    threadId: options?.threadId || sessionId,
     metadata: {
       sessionId,
       category: "evaluation",
@@ -328,7 +334,8 @@ export async function logConversationMetrics(
  */
 export async function logAgentGraph(
   sessionId: string,
-  graph: AgentGraph
+  graph: AgentGraph,
+  options?: { threadId?: string }
 ): Promise<void> {
   const opik = getOpikClient();
   if (!opik) {
@@ -338,6 +345,7 @@ export async function logAgentGraph(
 
   const trace = opik.trace({
     name: "agent-graph",
+    threadId: options?.threadId || sessionId,
     metadata: {
       sessionId,
       category: "agent_graph",
@@ -384,7 +392,8 @@ export async function evaluateTaskCompletion(
     hasStatus: boolean;
     hasRiskFactors: boolean;
     hasRecommendations: boolean;
-  }
+  },
+  options?: { threadId?: string }
 ): Promise<{ passed: boolean; score: number }> {
   const opik = getOpikClient();
 
@@ -406,6 +415,7 @@ export async function evaluateTaskCompletion(
 
   const trace = opik.trace({
     name: "evaluation-task-completion",
+    threadId: options?.threadId || sessionId,
     metadata: {
       sessionId,
       patientId,

@@ -55,7 +55,8 @@ export interface SpanResult<T> {
 export async function traceAnalysis<T>(
   name: string,
   metadata: TraceMetadata,
-  fn: () => Promise<T>
+  fn: () => Promise<T>,
+  options?: { threadId?: string }
 ): Promise<SpanResult<T>> {
   const opik = getOpikClient();
   const startTime = Date.now();
@@ -74,6 +75,7 @@ export async function traceAnalysis<T>(
   try {
     trace = opik.trace({
       name,
+      threadId: options?.threadId,
       metadata,
     });
 
@@ -161,7 +163,8 @@ function extractAnalysisMetrics(result: unknown): Record<string, number | string
 export async function traceDataSourceCall<T>(
   source: "FHIR" | "FDA" | "CMS" | "Guidelines",
   patientId: string,
-  fn: () => Promise<T>
+  fn: () => Promise<T>,
+  options?: { threadId?: string }
 ): Promise<SpanResult<T>> {
   return traceAnalysis(
     `data-source-${source.toLowerCase()}`,
@@ -170,7 +173,8 @@ export async function traceDataSourceCall<T>(
       dataSource: source,
       category: "data_fetch",
     },
-    fn
+    fn,
+    options
   );
 }
 
@@ -181,7 +185,8 @@ export async function traceDataSourceCall<T>(
 export async function traceGeminiCall<T>(
   operation: string,
   patientId: string,
-  fn: () => Promise<T>
+  fn: () => Promise<T>,
+  options?: { threadId?: string }
 ): Promise<SpanResult<T>> {
   return traceAnalysis(
     `llm-gemini-${operation}`,
@@ -191,7 +196,8 @@ export async function traceGeminiCall<T>(
       category: "llm_call",
       operation,
     },
-    fn
+    fn,
+    options
   );
 }
 
@@ -203,7 +209,8 @@ export async function traceLLMCall<T>(
   operation: string,
   patientId: string,
   llmOptions: LLMTraceOptions,
-  fn: () => Promise<T & { tokenUsage?: TokenUsage }>
+  fn: () => Promise<T & { tokenUsage?: TokenUsage }>,
+  options?: { threadId?: string }
 ): Promise<SpanResult<T>> {
   const opik = getOpikClient();
   const startTime = Date.now();
@@ -231,6 +238,7 @@ export async function traceLLMCall<T>(
   try {
     trace = opik.trace({
       name: `llm-${operation}`,
+      threadId: options?.threadId,
       metadata: {
         patientId,
         model: llmOptions.model,
@@ -323,7 +331,8 @@ export async function logEvaluationScore(
   patientId: string,
   score: number,
   expectedScore?: number,
-  metadata?: Record<string, string | number | boolean>
+  metadata?: Record<string, string | number | boolean>,
+  options?: { threadId?: string }
 ): Promise<void> {
   const opik = getOpikClient();
   if (!opik) {
@@ -333,6 +342,7 @@ export async function logEvaluationScore(
 
   const trace = opik.trace({
     name: `evaluation-${name}`,
+    threadId: options?.threadId,
     metadata: {
       patientId,
       category: "evaluation",
@@ -453,13 +463,14 @@ export async function traceError(
       traceback: errorStack ?? errorMessage,
     };
 
+    const { threadId, ...restMetadata } = metadata || {};
     const trace = opik.trace({
       name: `error-${source}`,
+      threadId,
       metadata: {
         category: "error",
         source,
-        threadId: metadata?.threadId,
-        ...metadata,
+        ...restMetadata,
       },
     });
 

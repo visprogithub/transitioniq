@@ -238,6 +238,10 @@ export class LLMProvider {
       traceId?: string;
       spanName?: string;
       metadata?: Record<string, unknown>;
+      /** Separate system prompt for providers that support role-based messages.
+       *  When provided, sent as role:"system" (OpenAI/HF), system param (Anthropic),
+       *  or systemInstruction (Gemini). Prompt becomes the user message only. */
+      systemPrompt?: string;
     }
   ): Promise<LLMResponse> {
     const startTime = Date.now();
@@ -277,19 +281,19 @@ export class LLMProvider {
       let tokenUsage: LLMResponse["tokenUsage"];
 
       if (this.config.provider === "gemini") {
-        const result = await this.generateGemini(prompt);
+        const result = await this.generateGemini(prompt, options?.systemPrompt);
         content = result.content;
         tokenUsage = result.tokenUsage;
       } else if (this.config.provider === "huggingface") {
-        const result = await this.generateHuggingFace(prompt);
+        const result = await this.generateHuggingFace(prompt, options?.systemPrompt);
         content = result.content;
         tokenUsage = result.tokenUsage;
       } else if (this.config.provider === "openai") {
-        const result = await this.generateOpenAI(prompt);
+        const result = await this.generateOpenAI(prompt, options?.systemPrompt);
         content = result.content;
         tokenUsage = result.tokenUsage;
       } else if (this.config.provider === "anthropic") {
-        const result = await this.generateAnthropic(prompt);
+        const result = await this.generateAnthropic(prompt, options?.systemPrompt);
         content = result.content;
         tokenUsage = result.tokenUsage;
       } else {
@@ -531,7 +535,7 @@ export class LLMProvider {
   /**
    * Generate using Gemini
    */
-  private async generateGemini(prompt: string): Promise<{
+  private async generateGemini(prompt: string, systemPrompt?: string): Promise<{
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
@@ -542,6 +546,7 @@ export class LLMProvider {
         temperature: this.config.temperature,
         maxOutputTokens: this.config.maxTokens || 4096,
       },
+      ...(systemPrompt ? { systemInstruction: systemPrompt } : {}),
     }, {
       timeout: 30_000, // 30s timeout — prevents server hang
     });
@@ -570,7 +575,7 @@ export class LLMProvider {
    * Uses router.huggingface.co/v1/chat/completions (OpenAI-compatible)
    * Docs: https://huggingface.co/docs/inference-providers/en/tasks/chat-completion
    */
-  private async generateHuggingFace(prompt: string): Promise<{
+  private async generateHuggingFace(prompt: string, systemPrompt?: string): Promise<{
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
@@ -586,6 +591,13 @@ export class LLMProvider {
     const isQwen3 = this.config.modelId.toLowerCase().includes("qwen3");
     const effectivePrompt = isQwen3 ? `${prompt}\n/no_think` : prompt;
 
+    // Build messages array with optional system message
+    const hfMessages: Array<{ role: string; content: string }> = [];
+    if (systemPrompt) {
+      hfMessages.push({ role: "system", content: systemPrompt });
+    }
+    hfMessages.push({ role: "user", content: effectivePrompt });
+
     let response: Response;
     try {
       response = await fetch(endpoint, {
@@ -596,12 +608,7 @@ export class LLMProvider {
         },
         body: JSON.stringify({
           model: this.config.modelId,
-          messages: [
-            {
-              role: "user",
-              content: effectivePrompt,
-            },
-          ],
+          messages: hfMessages,
           temperature: this.config.temperature || 0.7,
           max_tokens: this.config.maxTokens || 2048,
         }),
@@ -652,12 +659,19 @@ export class LLMProvider {
    * Generate using OpenAI API
    * Docs: https://platform.openai.com/docs/api-reference/chat
    */
-  private async generateOpenAI(prompt: string): Promise<{
+  private async generateOpenAI(prompt: string, systemPrompt?: string): Promise<{
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30_000);
+
+    // Build messages array with optional system message
+    const oaiMessages: Array<{ role: string; content: string }> = [];
+    if (systemPrompt) {
+      oaiMessages.push({ role: "system", content: systemPrompt });
+    }
+    oaiMessages.push({ role: "user", content: prompt });
 
     let response: Response;
     try {
@@ -669,12 +683,7 @@ export class LLMProvider {
         },
         body: JSON.stringify({
           model: this.config.modelId,
-          messages: [
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
+          messages: oaiMessages,
           temperature: this.config.temperature || 0.7,
           max_tokens: this.config.maxTokens || 4096,
         }),
@@ -711,12 +720,27 @@ export class LLMProvider {
    * Generate using Anthropic API
    * Docs: https://docs.anthropic.com/en/api/messages
    */
-  private async generateAnthropic(prompt: string): Promise<{
+  private async generateAnthropic(prompt: string, systemPrompt?: string): Promise<{
     content: string;
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30_000);
+
+    // Anthropic uses a top-level `system` param for system messages
+    const anthropicBody: Record<string, unknown> = {
+      model: this.config.modelId,
+      max_tokens: this.config.maxTokens || 4096,
+      messages: [
+        {
+          role: "user" as const,
+          content: prompt,
+        },
+      ],
+    };
+    if (systemPrompt) {
+      anthropicBody.system = systemPrompt;
+    }
 
     let response: Response;
     try {
@@ -727,16 +751,7 @@ export class LLMProvider {
           "anthropic-version": "2023-06-01",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          model: this.config.modelId,
-          max_tokens: this.config.maxTokens || 4096,
-          messages: [
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
-        }),
+        body: JSON.stringify(anthropicBody),
         signal: controller.signal,
       });
     } catch (fetchError) {
