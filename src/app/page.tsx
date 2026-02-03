@@ -682,7 +682,7 @@ export default function DashboardPage() {
                 {/* Left Column - Score */}
                 <div className="bg-white rounded-xl shadow-sm p-6">
                   <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-semibold text-gray-900">Discharge Readiness Score</h3>
+                    <h3 className="text-lg font-semibold text-gray-900">Transition Readiness Score</h3>
                     {!isAnalyzing && (
                       <Tooltip content={analysis ? "Run analysis again with current model" : "Assess discharge readiness using AI"} position="bottom">
                         <button
@@ -832,7 +832,7 @@ export default function DashboardPage() {
                             className="flex items-center gap-2 mx-auto px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-lg font-medium hover:from-emerald-600 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg"
                           >
                             <FileText className="w-5 h-5" />
-                            Generate Discharge Plan
+                            Generate Transition Plan
                           </button>
                         </Tooltip>
                       )}
@@ -846,7 +846,7 @@ export default function DashboardPage() {
                       className="mt-6 text-center"
                     >
                       <RefreshCw className="w-6 h-6 text-emerald-500 animate-spin mx-auto mb-2" />
-                      <p className="text-sm text-gray-500">Generating discharge plan...</p>
+                      <p className="text-sm text-gray-500">Generating transition plan...</p>
                     </motion.div>
                   )}
                 </div>

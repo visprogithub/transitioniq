@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 import { generateDischargePlan } from "@/lib/integrations/analysis";
-import { traceGeminiCall, traceError } from "@/lib/integrations/opik";
+import { traceAnalysis, traceError } from "@/lib/integrations/opik";
 import { setActiveModel, resetLLMProvider } from "@/lib/integrations/llm-provider";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
     if (process.env.GEMINI_API_KEY) {
       try {
         // Generate plan with Gemini and Opik tracing
-        const planResult = await traceGeminiCall("generate-plan", patientId, async () => {
+        const planResult = await traceAnalysis("generate-plan", { patientId, category: "plan_generation" }, async () => {
           return await generateDischargePlan(patient, analysis);
         });
 
@@ -78,9 +78,9 @@ function generatePlanWithoutLLM(patientName: string, analysis: DischargeAnalysis
   const moderateRisks = analysis.riskFactors.filter((rf) => rf.severity === "moderate");
 
   const lines: string[] = [
-    `DISCHARGE PLANNING CHECKLIST`,
+    `TRANSITION PLANNING CHECKLIST`,
     `Patient: ${patientName}`,
-    `Readiness Score: ${analysis.score}/100 (${analysis.status.toUpperCase().replace("_", " ")})`,
+    `Transition Readiness Score: ${analysis.score}/100`,
     `Generated: ${new Date().toLocaleString()}`,
     "",
     "═══════════════════════════════════════════════════════",
@@ -89,7 +89,7 @@ function generatePlanWithoutLLM(patientName: string, analysis: DischargeAnalysis
 
   // High Priority Items
   if (highRisks.length > 0) {
-    lines.push("🔴 HIGH PRIORITY - MUST ADDRESS BEFORE DISCHARGE");
+    lines.push("🔴 HIGH PRIORITY - MUST ADDRESS BEFORE TRANSITION");
     lines.push("-".repeat(50));
     highRisks.forEach((rf, i) => {
       lines.push(`${i + 1}. ${rf.title}`);
@@ -133,7 +133,7 @@ function generatePlanWithoutLLM(patientName: string, analysis: DischargeAnalysis
 
   const drugInteractions = analysis.riskFactors.filter((rf) => rf.category === "drug_interaction");
   if (drugInteractions.length > 0) {
-    lines.push("□ Pharmacy consult: Before discharge");
+    lines.push("□ Pharmacy consult: Before transition");
   }
 
   const careGaps = analysis.riskFactors.filter((rf) => rf.category === "care_gap");

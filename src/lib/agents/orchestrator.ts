@@ -544,11 +544,13 @@ function generateResponse(
     };
   }
 
-  const statusText = analysis.status === "ready"
-    ? "Patient is ready for discharge"
-    : analysis.status === "caution"
-    ? "Patient may be discharged with caution"
-    : "Patient is NOT ready for discharge";
+  // Use supportive clinical language — this is decision SUPPORT, not a verdict
+  const statusNarrativeMap: Record<string, string> = {
+    ready: "Assessment indicates patient is on track for transition",
+    caution: "Assessment identified items for review before transition",
+    not_ready: "Assessment identified significant concerns requiring further review",
+  };
+  const statusText = statusNarrativeMap[analysis.status] || "Assessment in progress";
 
   const highRisks = analysis.riskFactors.filter((r) => r.severity === "high");
   const riskSummary = highRisks.length > 0

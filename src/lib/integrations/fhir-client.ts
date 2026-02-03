@@ -331,11 +331,3 @@ export async function fetchAllergiesFromFHIR(patientId: string): Promise<string[
   }
 }
 
-// List of test patients available in the SMART sandbox
-export const SMART_TEST_PATIENTS = [
-  { id: "smart-1288992", name: "Amy V. Shaw", description: "Adult female, multiple conditions" },
-  { id: "smart-1482713", name: "Mr. Al Stein", description: "Adult male, diabetes" },
-  { id: "smart-1551992", name: "Daniel X. Adams", description: "Adult male, heart disease" },
-  { id: "smart-1727024", name: "Mariana Acosta", description: "Adult female, pregnancy" },
-  { id: "smart-2169591", name: "Brian Z. Gracia", description: "Adult male, COPD" },
-];

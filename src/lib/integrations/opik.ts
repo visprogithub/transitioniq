@@ -388,9 +388,6 @@ export async function runEvaluation(
   failed: number;
   averageScoreDiff: number;
 }> {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- client initialized for future tracing integration
-  const _opik = getOpikClient();
-
   let passed = 0;
   let failed = 0;
   let totalScoreDiff = 0;
