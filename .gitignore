@@ -50,3 +50,6 @@ SLIDE_DECK_SHORT.md
 .claude/settings.local.json
 DEMO_SCRIPT_SHORT.md
 nul
+
+# generated code manifest (rebuilt at build time)
+src/generated/
