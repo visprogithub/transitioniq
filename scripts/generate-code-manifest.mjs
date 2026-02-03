@@ -106,6 +106,13 @@ async function main() {
 
   files.sort((a, b) => a.path.localeCompare(b.path));
 
+  // Unshallow Vercel's shallow clone so we get full history
+  try {
+    execSync('git fetch --unshallow', { cwd: ROOT, encoding: 'utf-8' });
+  } catch {
+    // Already a full clone (local dev) — ignore
+  }
+
   // Capture full git history
   let gitLog = '';
   try {
