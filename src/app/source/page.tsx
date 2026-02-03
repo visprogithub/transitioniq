@@ -19,6 +19,7 @@ import {
   FileCode,
   FileJson,
   FileType,
+  GitCommitHorizontal,
 } from 'lucide-react';
 
 /* ------------------------------------------------------------------ */
@@ -32,10 +33,18 @@ interface FileEntry {
   size: number;
 }
 
+interface GitCommit {
+  hash: string;
+  author: string;
+  date: string;
+  message: string;
+}
+
 interface Manifest {
   generatedAt: string;
   fileCount: number;
   files: FileEntry[];
+  gitHistory: GitCommit[];
 }
 
 interface TreeNode {
@@ -439,6 +448,23 @@ export default function SourceViewerPage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar: file tree */}
         <aside className="w-72 bg-zinc-900/50 border-r border-zinc-800 overflow-y-auto shrink-0 py-2">
+          {/* Git History entry */}
+          <button
+            onClick={() => setSelectedFile('__GIT_HISTORY__')}
+            className={`w-full flex items-center gap-1.5 py-1.5 px-3 text-sm rounded transition-colors text-left mb-1 ${
+              selectedFile === '__GIT_HISTORY__'
+                ? 'bg-blue-600/20 text-blue-300'
+                : 'hover:bg-white/5 text-zinc-400'
+            }`}
+          >
+            <GitCommitHorizontal size={14} className={`shrink-0 ${selectedFile === '__GIT_HISTORY__' ? 'text-blue-400' : 'text-zinc-500'}`} />
+            <span>Git History</span>
+            {manifest?.gitHistory && (
+              <span className="ml-auto text-xs text-zinc-600">{manifest.gitHistory.length}</span>
+            )}
+          </button>
+          <div className="border-b border-zinc-800 mb-1" />
+
           {tree.map((node) => (
             <FileTreeNode
               key={node.path}
@@ -453,7 +479,50 @@ export default function SourceViewerPage() {
 
         {/* Main: file content */}
         <main className="flex-1 overflow-y-auto">
-          {currentFile ? (
+          {selectedFile === '__GIT_HISTORY__' ? (
+            <div>
+              <div className="sticky top-0 bg-zinc-900/90 backdrop-blur border-b border-zinc-800 px-4 py-2 flex items-center justify-between z-10">
+                <span className="text-zinc-300 text-sm font-mono flex items-center gap-2">
+                  <GitCommitHorizontal size={14} />
+                  Git History
+                </span>
+                <span className="text-zinc-600 text-xs">
+                  {manifest?.gitHistory?.length || 0} commits
+                </span>
+              </div>
+              <div
+                className="select-none p-4"
+                style={{ userSelect: 'none', WebkitUserSelect: 'none' } as React.CSSProperties}
+                onCopy={(e) => e.preventDefault()}
+                onDragStart={(e) => e.preventDefault()}
+              >
+                <div className="max-w-3xl space-y-0">
+                  {manifest?.gitHistory?.map((commit, i) => (
+                    <div key={commit.hash + i} className="flex items-start gap-4 group">
+                      {/* Timeline line + dot */}
+                      <div className="flex flex-col items-center shrink-0 pt-1">
+                        <div className={`w-2.5 h-2.5 rounded-full border-2 ${
+                          i === 0 ? 'border-blue-400 bg-blue-400/30' : 'border-zinc-600 bg-zinc-800'
+                        }`} />
+                        {i < (manifest?.gitHistory?.length ?? 0) - 1 && (
+                          <div className="w-px h-full min-h-8 bg-zinc-800" />
+                        )}
+                      </div>
+                      {/* Commit info */}
+                      <div className="pb-6 min-w-0">
+                        <p className="text-zinc-200 text-sm leading-snug break-words">{commit.message}</p>
+                        <div className="flex items-center gap-3 mt-1.5 text-xs text-zinc-500">
+                          <code className="text-amber-400/80 bg-zinc-800/80 px-1.5 py-0.5 rounded font-mono text-xs">{commit.hash}</code>
+                          <span>{commit.author}</span>
+                          <span>{commit.date}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : currentFile ? (
             <div>
               {/* File header bar */}
               <div className="sticky top-0 bg-zinc-900/90 backdrop-blur border-b border-zinc-800 px-4 py-2 flex items-center justify-between z-10">

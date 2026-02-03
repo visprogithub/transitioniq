@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readdir, readFile, stat, writeFile, mkdir } from 'fs/promises';
 import { join, relative, extname } from 'path';
+import { execSync } from 'child_process';
 
 const ROOT = process.cwd();
 const OUTPUT_DIR = join(ROOT, 'src', 'generated');
@@ -105,10 +106,31 @@ async function main() {
 
   files.sort((a, b) => a.path.localeCompare(b.path));
 
+  // Capture full git history
+  let gitLog = '';
+  try {
+    gitLog = execSync(
+      'git log --pretty=format:"%h|%an|%ad|%s" --date=short',
+      { cwd: ROOT, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 },
+    );
+    console.log(`Captured ${gitLog.split('\n').length} git commits`);
+  } catch (err) {
+    console.warn('Could not capture git history:', err.message);
+  }
+
+  const gitHistory = gitLog
+    .split('\n')
+    .filter(Boolean)
+    .map(line => {
+      const [hash, author, date, ...msgParts] = line.split('|');
+      return { hash, author, date, message: msgParts.join('|') };
+    });
+
   const manifest = {
     generatedAt: new Date().toISOString(),
     fileCount: files.length,
     files,
+    gitHistory,
   };
 
   await mkdir(OUTPUT_DIR, { recursive: true });
