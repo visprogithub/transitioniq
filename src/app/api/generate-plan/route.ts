@@ -80,7 +80,7 @@ function generatePlanWithoutLLM(patientName: string, analysis: DischargeAnalysis
   const lines: string[] = [
     `TRANSITION PLANNING CHECKLIST`,
     `Patient: ${patientName}`,
-    `Transition Readiness Score: ${analysis.score}/100`,
+    `Discharge Readiness Score: ${analysis.score}/100`,
     `Generated: ${new Date().toLocaleString()}`,
     "",
     "═══════════════════════════════════════════════════════",
