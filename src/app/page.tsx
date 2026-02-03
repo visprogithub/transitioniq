@@ -14,7 +14,7 @@ import { DischargePlan } from "@/components/DischargePlan";
 import { Tooltip } from "@/components/Tooltip";
 import { JudgeScoreBadge, type JudgeEvaluation } from "@/components/JudgeScoreBadge";
 import type { Patient } from "@/lib/types/patient";
-import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
+import type { DischargeAnalysis, RiskFactor, ClinicianEdits } from "@/lib/types/analysis";
 
 // Extended analysis type with model and agent info
 interface AnalysisWithModel extends DischargeAnalysis {
@@ -151,6 +151,11 @@ export default function DashboardPage() {
   // Rate limit state for discharge plan generation
   const [planRateLimitReset, setPlanRateLimitReset] = useState<number | null>(null);
   const [planRateLimitCountdown, setPlanRateLimitCountdown] = useState("");
+  // Clinician edits overlay on AI-generated discharge plan
+  const [clinicianEdits, setClinicianEdits] = useState<ClinicianEdits>({
+    customItems: [],
+    dismissedItemKeys: [],
+  });
 
   // Initialize session cookie on first visit (for server-side rate limiting)
   useEffect(() => {
@@ -193,6 +198,7 @@ export default function DashboardPage() {
       setError(null);
       setAnalysis(null);
       setDischargePlan(null);
+      setClinicianEdits({ customItems: [], dismissedItemKeys: [] });
       setJudgeEvaluation(null);
       setJudgeError(null);
       setPatientSummary(null); // Clear cached summary when patient changes
@@ -221,6 +227,7 @@ export default function DashboardPage() {
     setError(null);
     setModelLimitError(null);
     setDischargePlan(null);
+    setClinicianEdits({ customItems: [], dismissedItemKeys: [] });
     setPlanRateLimitReset(null);
     setJudgeEvaluation(null);
     setJudgeError(null);
@@ -359,6 +366,38 @@ export default function DashboardPage() {
     }
   }
 
+  // Clinician edit handlers
+  function addCustomItem(text: string, priority: "high" | "moderate" | "standard") {
+    setClinicianEdits((prev) => ({
+      ...prev,
+      customItems: [
+        ...prev.customItems,
+        { id: crypto.randomUUID(), text, priority, addedAt: new Date().toISOString() },
+      ],
+    }));
+  }
+
+  function dismissItem(key: string) {
+    setClinicianEdits((prev) => ({
+      ...prev,
+      dismissedItemKeys: [...prev.dismissedItemKeys, key],
+    }));
+  }
+
+  function restoreItem(key: string) {
+    setClinicianEdits((prev) => ({
+      ...prev,
+      dismissedItemKeys: prev.dismissedItemKeys.filter((k) => k !== key),
+    }));
+  }
+
+  function removeCustomItem(id: string) {
+    setClinicianEdits((prev) => ({
+      ...prev,
+      customItems: prev.customItems.filter((i) => i.id !== id),
+    }));
+  }
+
   const toggleRiskFactor = (id: string) => {
     setExpandedRiskFactors((prev) => {
       const next = new Set(prev);
@@ -453,6 +492,7 @@ export default function DashboardPage() {
                   if (analysis) {
                     setAnalysis(null);
                     setDischargePlan(null);
+                    setClinicianEdits({ customItems: [], dismissedItemKeys: [] });
                     setPlanRateLimitReset(null);
                     setJudgeEvaluation(null);
                     setJudgeError(null);
@@ -567,6 +607,7 @@ export default function DashboardPage() {
             isLoading={isLoadingPatient}
             cachedSummary={patientSummary}
             onSummaryGenerated={setPatientSummary}
+            clinicianEdits={clinicianEdits}
           />
         )}
 
@@ -904,6 +945,11 @@ export default function DashboardPage() {
                   <DischargePlan
                     plan={dischargePlan}
                     patientName={patient?.name}
+                    clinicianEdits={clinicianEdits}
+                    onAddCustomItem={addCustomItem}
+                    onDismissItem={dismissItem}
+                    onRestoreItem={restoreItem}
+                    onRemoveCustomItem={removeCustomItem}
                   />
                 </motion.div>
               )}

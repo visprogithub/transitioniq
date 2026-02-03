@@ -64,3 +64,16 @@ export interface FollowUpAppointment {
   scheduled: boolean;
   reason: string;
 }
+
+// Clinician edits overlay — additions and dismissals on top of AI-generated plan
+export interface ClinicianEdit {
+  id: string;
+  text: string;
+  priority: "high" | "moderate" | "standard";
+  addedAt: string;
+}
+
+export interface ClinicianEdits {
+  customItems: ClinicianEdit[];
+  dismissedItemKeys: string[]; // keys like "0-2" (sectionIdx-itemIdx)
+}

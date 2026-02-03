@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   FileText,
   CheckCircle,
@@ -13,12 +13,21 @@ import {
   ChevronDown,
   ChevronRight,
   Printer,
+  Plus,
+  X,
+  Undo2,
 } from "lucide-react";
 import { Tooltip } from "@/components/Tooltip";
+import type { ClinicianEdits } from "@/lib/types/analysis";
 
 interface DischargePlanProps {
   plan: string;
   patientName?: string;
+  clinicianEdits?: ClinicianEdits;
+  onAddCustomItem?: (text: string, priority: "high" | "moderate" | "standard") => void;
+  onDismissItem?: (key: string) => void;
+  onRestoreItem?: (key: string) => void;
+  onRemoveCustomItem?: (id: string) => void;
 }
 
 interface ChecklistItem {
@@ -134,13 +143,31 @@ function getSectionStyle(priority: PlanSection["priority"]) {
   }
 }
 
-export function DischargePlan({ plan, patientName }: DischargePlanProps) {
+// Map custom item priority to section priority for matching
+function mapCustomPriority(priority: "high" | "moderate" | "standard"): PlanSection["priority"] {
+  return priority;
+}
+
+export function DischargePlan({
+  plan,
+  patientName,
+  clinicianEdits,
+  onAddCustomItem,
+  onDismissItem,
+  onRestoreItem,
+  onRemoveCustomItem,
+}: DischargePlanProps) {
   const [checkedItems, setCheckedItems] = useState<Set<string>>(new Set());
   const [expandedSections, setExpandedSections] = useState<Set<number>>(
     new Set([0, 1]) // Expand first two sections by default
   );
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newItemText, setNewItemText] = useState("");
+  const [newItemPriority, setNewItemPriority] = useState<"high" | "moderate" | "standard">("high");
 
   const sections = parsePlan(plan);
+  const dismissed = clinicianEdits?.dismissedItemKeys ?? [];
+  const customItems = clinicianEdits?.customItems ?? [];
 
   // If parsing failed, show raw plan with basic formatting
   if (sections.length === 0 || sections.every((s) => s.items.length === 0)) {
@@ -149,6 +176,19 @@ export function DischargePlan({ plan, patientName }: DischargePlanProps) {
 
   const toggleItem = (sectionIdx: number, itemIdx: number) => {
     const key = `${sectionIdx}-${itemIdx}`;
+    setCheckedItems((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const toggleCustomItem = (id: string) => {
+    const key = `custom-${id}`;
     setCheckedItems((prev) => {
       const next = new Set(prev);
       if (next.has(key)) {
@@ -172,9 +212,40 @@ export function DischargePlan({ plan, patientName }: DischargePlanProps) {
     });
   };
 
-  const totalItems = sections.reduce((sum, s) => sum + s.items.length, 0);
-  const completedItems = checkedItems.size;
+  const handleAddItem = () => {
+    if (!newItemText.trim() || !onAddCustomItem) return;
+    onAddCustomItem(newItemText.trim(), newItemPriority);
+    setNewItemText("");
+    setShowAddForm(false);
+  };
+
+  // Calculate progress excluding dismissed items
+  const activeAIItems = sections.reduce((sum, s, sIdx) => {
+    return sum + s.items.filter((_, iIdx) => !dismissed.includes(`${sIdx}-${iIdx}`)).length;
+  }, 0);
+  const totalItems = activeAIItems + customItems.length;
+
+  const checkedAIItems = sections.reduce((sum, s, sIdx) => {
+    return sum + s.items.filter((_, iIdx) => {
+      const key = `${sIdx}-${iIdx}`;
+      return !dismissed.includes(key) && checkedItems.has(key);
+    }).length;
+  }, 0);
+  const checkedCustomItems = customItems.filter((ci) => checkedItems.has(`custom-${ci.id}`)).length;
+  const completedItems = checkedAIItems + checkedCustomItems;
   const progress = totalItems > 0 ? (completedItems / totalItems) * 100 : 0;
+
+  // Group custom items by matching section priority
+  const customByPriority: Record<string, typeof customItems> = {};
+  for (const ci of customItems) {
+    const mapped = mapCustomPriority(ci.priority);
+    if (!customByPriority[mapped]) customByPriority[mapped] = [];
+    customByPriority[mapped].push(ci);
+  }
+
+  // Check if any custom items don't match existing sections — they'll go in a "Custom" section
+  const existingPriorities = new Set(sections.map((s) => s.priority));
+  const unmatchedCustom = customItems.filter((ci) => !existingPriorities.has(mapCustomPriority(ci.priority)));
 
   return (
     <div className="space-y-4">
@@ -189,7 +260,7 @@ export function DischargePlan({ plan, patientName }: DischargePlanProps) {
             <p className="text-sm text-gray-500 mt-1">For {patientName}</p>
           )}
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2">
           <div className="text-right">
             <p className="text-sm font-medium text-gray-700">
               {completedItems} / {totalItems} completed
@@ -203,6 +274,20 @@ export function DischargePlan({ plan, patientName }: DischargePlanProps) {
               />
             </div>
           </div>
+          {onAddCustomItem && (
+            <Tooltip content="Add custom checklist item" position="bottom">
+              <button
+                onClick={() => setShowAddForm(!showAddForm)}
+                className={`p-2 rounded-lg transition-colors ${
+                  showAddForm
+                    ? "bg-blue-100 text-blue-700"
+                    : "text-gray-500 hover:text-blue-600 hover:bg-blue-50"
+                }`}
+              >
+                <Plus className="w-5 h-5" />
+              </button>
+            </Tooltip>
+          )}
           <Tooltip content="Print discharge checklist" position="bottom">
             <button
               onClick={() => window.print()}
@@ -214,15 +299,81 @@ export function DischargePlan({ plan, patientName }: DischargePlanProps) {
         </div>
       </div>
 
+      {/* Add Custom Item Form */}
+      <AnimatePresence>
+        {showAddForm && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
+              <input
+                type="text"
+                value={newItemText}
+                onChange={(e) => setNewItemText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleAddItem(); }}
+                placeholder="Enter custom checklist item..."
+                className="w-full px-3 py-2 border border-blue-300 rounded-lg text-sm text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                autoFocus
+              />
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-semibold text-gray-700">Priority:</label>
+                  <select
+                    value={newItemPriority}
+                    onChange={(e) => setNewItemPriority(e.target.value as "high" | "moderate" | "standard")}
+                    className="text-sm border border-gray-300 rounded-md px-2 py-1 bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="high">High Priority</option>
+                    <option value="moderate">Moderate</option>
+                    <option value="standard">Standard</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => { setShowAddForm(false); setNewItemText(""); }}
+                    className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAddItem}
+                    disabled={!newItemText.trim()}
+                    className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Add Item
+                  </button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Sections */}
       <div className="space-y-3">
         {sections.map((section, sectionIdx) => {
           const style = getSectionStyle(section.priority);
           const Icon = style.icon;
           const isExpanded = expandedSections.has(sectionIdx);
-          const sectionCompleted = section.items.filter(
-            (_, itemIdx) => checkedItems.has(`${sectionIdx}-${itemIdx}`)
-          ).length;
+
+          // Get custom items for this section's priority
+          const sectionCustomItems = customByPriority[section.priority] || [];
+
+          // Count active (non-dismissed) AI items + custom items
+          const activeItems = section.items.filter(
+            (_, iIdx) => !dismissed.includes(`${sectionIdx}-${iIdx}`)
+          );
+          const sectionTotalActive = activeItems.length + sectionCustomItems.length;
+          const sectionCompleted =
+            activeItems.filter((_, iIdx) => {
+              // Find actual index in original array
+              const origIdx = section.items.indexOf(activeItems[iIdx]);
+              return checkedItems.has(`${sectionIdx}-${origIdx}`);
+            }).length +
+            sectionCustomItems.filter((ci) => checkedItems.has(`custom-${ci.id}`)).length;
 
           return (
             <motion.div
@@ -250,27 +401,89 @@ export function DischargePlan({ plan, patientName }: DischargePlanProps) {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className={`text-xs px-2 py-1 rounded-full ${style.badgeColor}`}>
-                    {sectionCompleted}/{section.items.length}
+                    {sectionCompleted}/{sectionTotalActive}
                   </span>
                 </div>
               </button>
 
               {/* Section Items */}
-              {isExpanded && section.items.length > 0 && (
+              {isExpanded && (section.items.length > 0 || sectionCustomItems.length > 0) && (
                 <div className="p-4 space-y-2">
+                  {/* AI-generated items */}
                   {section.items.map((item, itemIdx) => {
-                    const isChecked = checkedItems.has(`${sectionIdx}-${itemIdx}`);
+                    const key = `${sectionIdx}-${itemIdx}`;
+                    const isDismissed = dismissed.includes(key);
+                    const isChecked = checkedItems.has(key);
+
                     return (
-                      <label
+                      <div
                         key={itemIdx}
-                        className={`flex items-start gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
+                        className={`flex items-start gap-3 p-3 rounded-lg transition-colors ${
+                          isDismissed
+                            ? "opacity-40"
+                            : isChecked
+                              ? "bg-emerald-50 text-emerald-800"
+                              : "hover:bg-gray-50 text-gray-700"
+                        }`}
+                      >
+                        <button
+                          onClick={() => !isDismissed && toggleItem(sectionIdx, itemIdx)}
+                          className="flex-shrink-0 mt-0.5"
+                          disabled={isDismissed}
+                        >
+                          {isChecked && !isDismissed ? (
+                            <CheckCircle className="w-5 h-5 text-emerald-600" />
+                          ) : (
+                            <Circle className="w-5 h-5 text-gray-400" />
+                          )}
+                        </button>
+                        <span className={`flex-1 ${isDismissed || isChecked ? "line-through" : ""} ${isDismissed ? "text-gray-400" : ""}`}>
+                          {formatItemText(item.text)}
+                        </span>
+                        {/* Dismiss / Restore button */}
+                        {isDismissed ? (
+                          onRestoreItem && (
+                            <Tooltip content="Restore item" position="left">
+                              <button
+                                onClick={() => onRestoreItem(key)}
+                                className="flex-shrink-0 p-1 text-gray-400 hover:text-blue-600 rounded transition-colors"
+                              >
+                                <Undo2 className="w-4 h-4" />
+                              </button>
+                            </Tooltip>
+                          )
+                        ) : (
+                          onDismissItem && (
+                            <Tooltip content="Dismiss item" position="left">
+                              <button
+                                onClick={() => onDismissItem(key)}
+                                className="flex-shrink-0 p-1 text-gray-300 hover:text-red-500 rounded transition-colors"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </Tooltip>
+                          )
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {/* Custom items appended to this section */}
+                  {sectionCustomItems.map((ci) => {
+                    const isChecked = checkedItems.has(`custom-${ci.id}`);
+                    return (
+                      <motion.div
+                        key={`custom-${ci.id}`}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className={`flex items-start gap-3 p-3 rounded-lg transition-colors ${
                           isChecked
                             ? "bg-emerald-50 text-emerald-800"
                             : "hover:bg-gray-50 text-gray-700"
                         }`}
                       >
                         <button
-                          onClick={() => toggleItem(sectionIdx, itemIdx)}
+                          onClick={() => toggleCustomItem(ci.id)}
                           className="flex-shrink-0 mt-0.5"
                         >
                           {isChecked ? (
@@ -279,10 +492,23 @@ export function DischargePlan({ plan, patientName }: DischargePlanProps) {
                             <Circle className="w-5 h-5 text-gray-400" />
                           )}
                         </button>
-                        <span className={isChecked ? "line-through opacity-70" : ""}>
-                          {formatItemText(item.text)}
+                        <span className={`flex-1 ${isChecked ? "line-through opacity-70" : ""}`}>
+                          {ci.text}
                         </span>
-                      </label>
+                        <span className="flex-shrink-0 text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">
+                          Custom
+                        </span>
+                        {onRemoveCustomItem && (
+                          <Tooltip content="Remove custom item" position="left">
+                            <button
+                              onClick={() => onRemoveCustomItem(ci.id)}
+                              className="flex-shrink-0 p-1 text-gray-300 hover:text-red-500 rounded transition-colors"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </Tooltip>
+                        )}
+                      </motion.div>
                     );
                   })}
                 </div>
@@ -290,6 +516,81 @@ export function DischargePlan({ plan, patientName }: DischargePlanProps) {
             </motion.div>
           );
         })}
+
+        {/* Extra section for custom items that don't match any existing section */}
+        {unmatchedCustom.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="border-l-4 border-l-blue-500 rounded-lg overflow-hidden bg-white shadow-sm"
+          >
+            <button
+              onClick={() => toggleSection(sections.length)}
+              className="w-full flex items-center justify-between p-4 bg-blue-50 hover:opacity-90 transition-opacity"
+            >
+              <div className="flex items-center gap-3">
+                {expandedSections.has(sections.length) ? (
+                  <ChevronDown className="w-5 h-5 text-blue-700" />
+                ) : (
+                  <ChevronRight className="w-5 h-5 text-blue-700" />
+                )}
+                <Plus className="w-5 h-5 text-blue-700" />
+                <span className="font-semibold text-blue-700">
+                  Custom Instructions
+                </span>
+              </div>
+              <span className="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800">
+                {unmatchedCustom.filter((ci) => checkedItems.has(`custom-${ci.id}`)).length}/{unmatchedCustom.length}
+              </span>
+            </button>
+            {expandedSections.has(sections.length) && (
+              <div className="p-4 space-y-2">
+                {unmatchedCustom.map((ci) => {
+                  const isChecked = checkedItems.has(`custom-${ci.id}`);
+                  return (
+                    <motion.div
+                      key={`custom-${ci.id}`}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className={`flex items-start gap-3 p-3 rounded-lg transition-colors ${
+                        isChecked
+                          ? "bg-emerald-50 text-emerald-800"
+                          : "hover:bg-gray-50 text-gray-700"
+                      }`}
+                    >
+                      <button
+                        onClick={() => toggleCustomItem(ci.id)}
+                        className="flex-shrink-0 mt-0.5"
+                      >
+                        {isChecked ? (
+                          <CheckCircle className="w-5 h-5 text-emerald-600" />
+                        ) : (
+                          <Circle className="w-5 h-5 text-gray-400" />
+                        )}
+                      </button>
+                      <span className={`flex-1 ${isChecked ? "line-through opacity-70" : ""}`}>
+                        {ci.text}
+                      </span>
+                      <span className="flex-shrink-0 text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">
+                        Custom
+                      </span>
+                      {onRemoveCustomItem && (
+                        <Tooltip content="Remove custom item" position="left">
+                          <button
+                            onClick={() => onRemoveCustomItem(ci.id)}
+                            className="flex-shrink-0 p-1 text-gray-300 hover:text-red-500 rounded transition-colors"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </Tooltip>
+                      )}
+                    </motion.div>
+                  );
+                })}
+              </div>
+            )}
+          </motion.div>
+        )}
       </div>
     </div>
   );
@@ -351,7 +652,7 @@ function RawPlanDisplay({ plan }: { plan: string }) {
           if (trimmed.startsWith("-")) {
             return (
               <div key={i} className="flex items-start gap-2 pl-2">
-                <span className="text-gray-400">•</span>
+                <span className="text-gray-400">&bull;</span>
                 <span className="text-gray-700">{trimmed.slice(1).trim()}</span>
               </div>
             );

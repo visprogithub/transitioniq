@@ -20,7 +20,7 @@ import {
   HelpCircle,
 } from "lucide-react";
 import type { Patient } from "@/lib/types/patient";
-import type { DischargeAnalysis } from "@/lib/types/analysis";
+import type { DischargeAnalysis, ClinicianEdits } from "@/lib/types/analysis";
 import { PatientChat } from "./PatientChat";
 
 // ============================================================================
@@ -110,6 +110,7 @@ interface PatientRecoveryCoachProps {
   isLoading?: boolean;
   cachedSummary?: PatientSummary | null;
   onSummaryGenerated?: (summary: PatientSummary) => void;
+  clinicianEdits?: ClinicianEdits;
 }
 
 export interface PatientSummary {
@@ -146,6 +147,7 @@ export function PatientRecoveryCoach({
   isLoading = false,
   cachedSummary,
   onSummaryGenerated,
+  clinicianEdits,
 }: PatientRecoveryCoachProps) {
   const [patientSummary, setPatientSummary] = useState<PatientSummary | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -313,6 +315,17 @@ export function PatientRecoveryCoach({
         priority: "medium" as const,
       },
     ];
+
+    // Append clinician-added custom items
+    if (clinicianEdits?.customItems.length) {
+      for (const item of clinicianEdits.customItems) {
+        nextSteps.push({
+          task: item.text,
+          completed: false,
+          priority: item.priority === "high" ? "high" as const : "medium" as const,
+        });
+      }
+    }
 
     return {
       readinessLevel,
@@ -482,8 +495,25 @@ export function PatientRecoveryCoach({
   }
 
   const colors = getReadinessColor(patientSummary.readinessLevel);
+
+  // Merge clinician custom items into the display steps (for both LLM and fallback paths)
+  const displaySteps = [...patientSummary.nextSteps];
+  if (clinicianEdits?.customItems.length) {
+    // Only add custom items that aren't already in the summary (by text match)
+    const existingTasks = new Set(displaySteps.map((s) => s.task.toLowerCase()));
+    for (const item of clinicianEdits.customItems) {
+      if (!existingTasks.has(item.text.toLowerCase())) {
+        displaySteps.push({
+          task: item.text,
+          completed: false,
+          priority: item.priority === "high" ? "high" as const : "medium" as const,
+        });
+      }
+    }
+  }
+
   const completedCount = completedSteps.size;
-  const totalSteps = patientSummary.nextSteps.length;
+  const totalSteps = displaySteps.length;
   const progress = totalSteps > 0 ? (completedCount / totalSteps) * 100 : 0;
 
   return (
@@ -760,14 +790,14 @@ export function PatientRecoveryCoach({
             >
               <div className="p-5 space-y-5">
                 {/* Must Do Before Leaving — high priority items */}
-                {patientSummary.nextSteps.some((s) => s.priority === "high") && (
+                {displaySteps.some((s) => s.priority === "high") && (
                   <div>
                     <h4 className="text-sm font-semibold text-red-700 mb-3 flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-red-500" />
                       Must Do Before Leaving
                     </h4>
                     <div className="space-y-3">
-                      {patientSummary.nextSteps.map((step, i) => {
+                      {displaySteps.map((step, i) => {
                         if (step.priority !== "high") return null;
                         const isCompleted = completedSteps.has(i);
                         return (
@@ -807,14 +837,14 @@ export function PatientRecoveryCoach({
                 )}
 
                 {/* Helpful For Your Recovery — non-high priority items */}
-                {patientSummary.nextSteps.some((s) => s.priority !== "high") && (
+                {displaySteps.some((s) => s.priority !== "high") && (
                   <div>
                     <h4 className="text-sm font-semibold text-gray-600 mb-3 flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-gray-400" />
                       Helpful For Your Recovery
                     </h4>
                     <div className="space-y-3">
-                      {patientSummary.nextSteps.map((step, i) => {
+                      {displaySteps.map((step, i) => {
                         if (step.priority === "high") return null;
                         const isCompleted = completedSteps.has(i);
                         return (
