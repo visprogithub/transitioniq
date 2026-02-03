@@ -1,10 +1,8 @@
 # TransitionIQ - AI Discharge Readiness Assessment
 
-**PROPRIETARY AND CONFIDENTIAL**
+**Proprietary and Confidential** — Copyright (c) 2026. All Rights Reserved.
 
-Copyright (c) 2026. All Rights Reserved.
-
-This software and its source code are proprietary and confidential. Unauthorized copying, modification, distribution, or use of this software, in whole or in part, is strictly prohibited. This project is NOT open source and is NOT licensed for public use.
+This project is not open source. Clinical decision-support tools require rigorous validation, regulatory oversight, and controlled deployment to ensure patient safety — open-sourcing clinical AI without proper governance could lead to unvalidated use in care settings. Unauthorized copying, modification, or distribution is prohibited. Source code is available for hackathon review via the built-in [source viewer](/source).
 
 ---
 
@@ -308,4 +306,4 @@ Built for the Encode Club "Commit To Change" (Comet Resolution V2) Hackathon, ta
 
 ---
 
-**NOTICE**: This software is proprietary. No license is granted for use, modification, or distribution.
+**Notice**: This software is proprietary and copyrighted. Clinical AI tools require validated, controlled deployment to protect patient safety. No license is granted for use, modification, or distribution. Source code is shared with hackathon judges for evaluation purposes only.
