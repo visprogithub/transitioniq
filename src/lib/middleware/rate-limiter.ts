@@ -15,7 +15,7 @@ import { getOpikClient, flushTraces } from "../integrations/opik";
 // Rate limit configuration per endpoint category
 // ---------------------------------------------------------------------------
 
-export type RateLimitCategory = "evaluation" | "judge" | "analyze" | "generate" | "chat" | "voice";
+export type RateLimitCategory = "evaluation" | "judge" | "analyze" | "generate" | "chat" | "voice" | "stt";
 
 interface CategoryConfig {
   maxRequests: number;
@@ -26,6 +26,10 @@ interface CategoryConfig {
 const VOICE_MAX_REQUESTS = parseInt(process.env.VOICE_RATE_LIMIT_MAX || "5", 10);
 const VOICE_WINDOW_MS = parseInt(process.env.VOICE_RATE_LIMIT_WINDOW_MIN || "1440", 10) * 60 * 1000; // default 24h
 
+// STT (Whisper) rate limits — server-side fallback for Firefox etc.
+const STT_MAX_REQUESTS = parseInt(process.env.STT_RATE_LIMIT_MAX || "10", 10);
+const STT_WINDOW_MS = parseInt(process.env.STT_RATE_LIMIT_WINDOW_MIN || "60", 10) * 60 * 1000; // default 1h
+
 const CATEGORY_CONFIGS: Record<RateLimitCategory, CategoryConfig> = {
   evaluation: { maxRequests: 3, windowMs: 15 * 60 * 1000 },  // 3 per 15 min
   judge:      { maxRequests: 5, windowMs: 10 * 60 * 1000 },   // 5 per 10 min
@@ -33,6 +37,7 @@ const CATEGORY_CONFIGS: Record<RateLimitCategory, CategoryConfig> = {
   generate:   { maxRequests: 10, windowMs: 5 * 60 * 1000 },    // 10 per 5 min
   chat:       { maxRequests: 20, windowMs: 15 * 60 * 1000 },   // 20 per 15 min
   voice:      { maxRequests: VOICE_MAX_REQUESTS, windowMs: VOICE_WINDOW_MS }, // env-configurable
+  stt:        { maxRequests: STT_MAX_REQUESTS, windowMs: STT_WINDOW_MS },     // env-configurable
 };
 
 // ---------------------------------------------------------------------------
