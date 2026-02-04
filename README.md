@@ -85,6 +85,7 @@ Open [http://localhost:3000](http://localhost:3000) — select a patient from th
 - **Animated Discharge Score** - Visual gauge (0-100) with status indicators and collapsible methodology explanation
 - **Risk Factor Cards** - Expandable cards with severity levels (high/moderate/low) and data source attribution (FDA, CMS, Guidelines, FHIR, RAG)
 - **AI-Generated Discharge Plans** - Comprehensive checklists tailored to patient risk factors
+- - Clinician ability to add or remove items from the checklist based on their clinical judgement.
 - **Smart Rate Limit Handling** - Automatic prompts to switch models when rate limited
 
 ### Patient View
