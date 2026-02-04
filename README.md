@@ -52,6 +52,32 @@ None of this diminishes what the prototype demonstrates — the clinical reasoni
 - **Memory**: In-memory session management with conversation history compaction
 - **Hosting**: Vercel
 
+## Quick Start
+
+**Prerequisites**: Node.js 18+ and npm
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/visprogithub/transitioniq.git
+cd transitioniq
+
+# 2. Copy the example environment file
+cp .env.example .env.local
+
+# 3. Fill in your API keys (see Environment Variables below)
+#    At minimum you need ONE LLM provider key + Opik key
+
+# 4. Install dependencies
+npm install
+
+# 5. Start the dev server
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) — select a patient from the dropdown and click "Analyze Readiness" to see the full pipeline in action.
+
+> **Voice features** (TTS/STT) require `OPENAI_API_KEY` in your `.env.local`. Without it, the app runs fine but the mic button and auto-play toggle won't work.
+
 ## Features
 
 ### Clinical View
@@ -111,24 +137,29 @@ User Request -> API Route -> Agent Orchestrator
 
 ## Environment Variables
 
-Create a `.env.local` file with at least one LLM provider:
+Copy `.env.example` to `.env.local` and fill in your keys:
 
-```env
-# LLM Providers (at least one required)
-OPENAI_API_KEY=your_openai_key          # OpenAI GPT-4o Mini
-HF_API_KEY=your_huggingface_key         # HuggingFace Qwen3 (free tier available)
-GEMINI_API_KEY=your_gemini_key          # Google Gemini 2.5 Flash
-
-# Observability (required for tracing)
-OPIK_API_KEY=your_opik_api_key
-OPIK_PROJECT_NAME=transitioniq
-
-# Optional: Override default model selection
-LLM_MODEL=openai-gpt-4o-mini
-
-# Optional: Admin bypass for rate limiting (see Rate Limiting section)
-ADMIN_SECRET=your_admin_secret
+```bash
+cp .env.example .env.local
 ```
+
+### Required
+
+| Variable | Where to get it | What it does |
+|----------|----------------|-------------|
+| `OPIK_API_KEY` | [comet.com/opik](https://www.comet.com/opik) | Opik observability — tracing, prompt versioning, evaluation |
+| `OPIK_PROJECT_NAME` | — | Opik project name (default: `transitioniq`) |
+| At least **one** LLM key below | | |
+
+### LLM Providers (at least one required)
+
+| Variable | Where to get it | Model(s) |
+|----------|----------------|----------|
+| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com) | GPT-4o Mini — **also powers voice TTS & STT** |
+| `HF_API_KEY` | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) | Qwen3 8B, Qwen3 30B (free tier available) |
+| `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) | Gemini 2.5 Flash, 2.5 Flash Lite |
+
+> **Note**: `OPENAI_API_KEY` serves double duty — it's both an LLM provider *and* the key for voice features (text-to-speech via `tts-1`, speech-to-text via Whisper). Without it, the app works fine for text but voice features will be disabled.
 
 ### Model Priority
 
@@ -138,6 +169,31 @@ When multiple API keys are configured, the default model is selected in this ord
 3. Gemini 2.5 Flash Lite (if `GEMINI_API_KEY` set)
 
 You can override this by setting `LLM_MODEL` or using the model selector in the UI.
+
+### Optional Configuration
+
+```env
+# Override default LLM model (see Available Models section)
+LLM_MODEL=openai-gpt-4o-mini
+
+# Admin bypass for rate limits during live demos (see Rate Limiting section)
+ADMIN_SECRET=your_secret_here
+
+# Enable the source code viewer at /source (default: disabled)
+CODE_VIEWER_ENABLED=true
+
+# Hide the evaluation tab from the UI (default: shown)
+NEXT_PUBLIC_DISABLE_EVALUATION=true
+
+# FHIR server URL (default: SMART Health IT Sandbox)
+FHIR_BASE_URL=https://launch.smarthealthit.org/v/r4/fhir
+
+# Voice rate limit overrides (defaults shown)
+VOICE_RATE_LIMIT_MAX=5              # Max TTS requests per window
+VOICE_RATE_LIMIT_WINDOW_MIN=1440    # TTS window in minutes (default: 24 hours)
+STT_RATE_LIMIT_MAX=10               # Max Whisper STT requests per window
+STT_RATE_LIMIT_WINDOW_MIN=60        # STT window in minutes (default: 1 hour)
+```
 
 ## Rate Limiting (Demo Protection)
 
@@ -178,16 +234,12 @@ Rate limits use in-memory storage which resets on serverless cold starts. This i
 
 ## Development
 
-```bash
-npm install
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) to view the dashboard.
+See [Quick Start](#quick-start) above for initial setup. Additional commands:
 
 ```bash
-npm run build        # Production build
+npm run build        # Production build (generates code manifest + Next.js build)
 npm run lint         # ESLint check
+npm run start        # Start production server (after build)
 ```
 
 ## API Endpoints
