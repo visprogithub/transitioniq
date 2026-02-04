@@ -17,11 +17,15 @@ import { checkDrugInteractions } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 
+const EVALUATION_DISABLED = process.env.NEXT_PUBLIC_DISABLE_EVALUATION === "true";
+const DISABLED_RESPONSE = { error: "Evaluation is currently disabled" };
+
 /**
  * GET /api/experiments
  * Returns available experiments and prompts
  */
 export async function GET() {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   return NextResponse.json({
     experiments: listExperiments(),
     prompts: listPrompts(),
@@ -36,6 +40,7 @@ export async function GET() {
  * Body: { experimentId: string }
  */
 export async function POST(request: NextRequest) {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   try {
     const body = await request.json();
     const { experimentId } = body;

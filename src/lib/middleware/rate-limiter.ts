@@ -15,12 +15,16 @@ import { getOpikClient, flushTraces } from "../integrations/opik";
 // Rate limit configuration per endpoint category
 // ---------------------------------------------------------------------------
 
-export type RateLimitCategory = "evaluation" | "judge" | "analyze" | "generate" | "chat";
+export type RateLimitCategory = "evaluation" | "judge" | "analyze" | "generate" | "chat" | "voice";
 
 interface CategoryConfig {
   maxRequests: number;
   windowMs: number;
 }
+
+// Voice rate limits are configurable via env to control TTS costs in demos
+const VOICE_MAX_REQUESTS = parseInt(process.env.VOICE_RATE_LIMIT_MAX || "5", 10);
+const VOICE_WINDOW_MS = parseInt(process.env.VOICE_RATE_LIMIT_WINDOW_MIN || "1440", 10) * 60 * 1000; // default 24h
 
 const CATEGORY_CONFIGS: Record<RateLimitCategory, CategoryConfig> = {
   evaluation: { maxRequests: 3, windowMs: 15 * 60 * 1000 },  // 3 per 15 min
@@ -28,6 +32,7 @@ const CATEGORY_CONFIGS: Record<RateLimitCategory, CategoryConfig> = {
   analyze:    { maxRequests: 10, windowMs: 5 * 60 * 1000 },    // 10 per 5 min
   generate:   { maxRequests: 10, windowMs: 5 * 60 * 1000 },    // 10 per 5 min
   chat:       { maxRequests: 20, windowMs: 15 * 60 * 1000 },   // 20 per 15 min
+  voice:      { maxRequests: VOICE_MAX_REQUESTS, windowMs: VOICE_WINDOW_MS }, // env-configurable
 };
 
 // ---------------------------------------------------------------------------

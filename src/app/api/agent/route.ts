@@ -12,7 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runAgent, continueConversation, getSession } from "@/lib/agents/orchestrator";
 import { logAgentGraph, logConversationMetrics, evaluateTaskCompletion } from "@/lib/agents/tracing";
-import { traceError } from "@/lib/integrations/opik";
+import { traceError, flushTraces } from "@/lib/integrations/opik";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 
 export async function POST(request: NextRequest) {
@@ -81,6 +81,9 @@ export async function POST(request: NextRequest) {
         );
       }
     }
+
+    // Single flush before returning — covers all LLM/tool spans from the agent loop
+    await flushTraces();
 
     return NextResponse.json(response);
   } catch (error) {

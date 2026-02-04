@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Send,
@@ -17,9 +17,36 @@ import {
   ChevronDown,
   RotateCcw,
   AlertTriangle,
+  Mic,
+  MicOff,
+  Volume2,
+  Square,
 } from "lucide-react";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
+
+// Web Speech API types (vendor-prefixed in most browsers)
+interface SpeechRecognitionEvent {
+  results: SpeechRecognitionResultList;
+  resultIndex: number;
+}
+declare global {
+  interface Window {
+    SpeechRecognition: new () => SpeechRecognitionInstance;
+    webkitSpeechRecognition: new () => SpeechRecognitionInstance;
+  }
+}
+interface SpeechRecognitionInstance {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+}
 
 interface PatientChatProps {
   patient: Patient;
@@ -56,6 +83,17 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   const [chatRateLimitReset, setChatRateLimitReset] = useState<number | null>(null);
   const [chatRateLimitCountdown, setChatRateLimitCountdown] = useState("");
   const isChatRateLimited = chatRateLimitReset !== null && chatRateLimitReset > Date.now();
+  // Voice state
+  const [isListening, setIsListening] = useState(false);
+  const [sttSupported, setSttSupported] = useState(false);
+  const [playingMessageIndex, setPlayingMessageIndex] = useState<number | null>(null);
+  const [ttsLoading, setTtsLoading] = useState<number | null>(null);
+  const [voiceRateLimitReset, setVoiceRateLimitReset] = useState<number | null>(null);
+  const [voiceRateLimitCountdown, setVoiceRateLimitCountdown] = useState("");
+  const isVoiceRateLimited = voiceRateLimitReset !== null && voiceRateLimitReset > Date.now();
+  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -70,6 +108,134 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
     setShowSuggestions(true);
     setLimitWarning(null);
     setChatRateLimitReset(null);
+    stopAudio();
+  }
+
+  // --- Voice: detect browser STT support ---
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    setSttSupported(!!SR);
+  }, []);
+
+  // --- Voice: countdown for voice rate limit ---
+  useEffect(() => {
+    if (!voiceRateLimitReset) {
+      setVoiceRateLimitCountdown("");
+      return;
+    }
+    const tick = () => {
+      const remaining = voiceRateLimitReset - Date.now();
+      if (remaining <= 0) {
+        setVoiceRateLimitReset(null);
+        setVoiceRateLimitCountdown("");
+        return;
+      }
+      const m = Math.floor(remaining / 60000);
+      const s = Math.ceil((remaining % 60000) / 1000);
+      setVoiceRateLimitCountdown(m > 0 ? `${m}m ${s}s` : `${s}s`);
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [voiceRateLimitReset]);
+
+  // --- Voice: STT toggle ---
+  const toggleListening = useCallback(() => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+
+    const recognition = new SR();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      let transcript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      setInputValue(transcript);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.onerror = (event: { error: string }) => {
+      console.error("[STT] Error:", event.error);
+      setIsListening(false);
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsListening(true);
+  }, [isListening]);
+
+  // --- Voice: TTS playback ---
+  function stopAudio() {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+    setPlayingMessageIndex(null);
+  }
+
+  async function playTTS(text: string, messageIndex: number) {
+    // If already playing this message, stop
+    if (playingMessageIndex === messageIndex) {
+      stopAudio();
+      return;
+    }
+
+    // Stop any current playback
+    stopAudio();
+    setTtsLoading(messageIndex);
+
+    try {
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+
+      if (response.status === 429) {
+        const errorData = await response.json().catch(() => ({}));
+        const resetTime = Date.now() + (errorData.retryAfterMs || 60000);
+        setVoiceRateLimitReset(resetTime);
+        setTtsLoading(null);
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error("TTS request failed");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        setPlayingMessageIndex(null);
+        audioRef.current = null;
+      };
+
+      audioRef.current = audio;
+      setPlayingMessageIndex(messageIndex);
+      setTtsLoading(null);
+      await audio.play();
+    } catch (error) {
+      console.error("[TTS] Error:", error);
+      setTtsLoading(null);
+      setPlayingMessageIndex(null);
+    }
   }
 
   // Generate suggested questions based on patient data
@@ -417,6 +583,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         </div>
       )}
 
+      {/* Voice Rate Limit Countdown Banner */}
+      {isVoiceRateLimited && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-purple-50 border-b border-purple-200">
+          <Volume2 className="w-4 h-4 text-purple-600 flex-shrink-0" />
+          <p className="text-xs text-purple-800 flex-1">
+            Voice limit reached. Listen again in <strong>{voiceRateLimitCountdown}</strong>.
+          </p>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         <AnimatePresence initial={false}>
@@ -463,9 +639,9 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
                   <>
                     <div className="text-sm">{renderMarkdown(message.content)}</div>
 
-                    {/* Tool indicators */}
-                    {message.toolsUsed && message.toolsUsed.length > 0 && (
-                      <div className="mt-2 pt-2 border-t border-gray-200/50">
+                    {/* Tool indicators + voice playback */}
+                    <div className="mt-2 pt-2 border-t border-gray-200/50 flex items-center justify-between gap-2">
+                      {message.toolsUsed && message.toolsUsed.length > 0 ? (
                         <div className="flex flex-wrap gap-1">
                           {message.toolsUsed.map((tool, i) => (
                             <span
@@ -477,8 +653,25 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
                             </span>
                           ))}
                         </div>
-                      </div>
-                    )}
+                      ) : <div />}
+                      {/* TTS play button for assistant messages */}
+                      {message.role === "assistant" && (
+                        <button
+                          onClick={() => playTTS(message.content, index)}
+                          disabled={ttsLoading === index || isVoiceRateLimited}
+                          className="flex-shrink-0 p-1 rounded-full text-gray-400 hover:text-indigo-600 hover:bg-white/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          title={playingMessageIndex === index ? "Stop" : "Listen"}
+                        >
+                          {ttsLoading === index ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : playingMessageIndex === index ? (
+                            <Square className="w-3.5 h-3.5" />
+                          ) : (
+                            <Volume2 className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      )}
+                    </div>
                   </>
                 )}
               </div>
@@ -544,14 +737,32 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         className="p-4 border-t border-gray-100 bg-gray-50"
       >
         <div className="flex gap-2">
+          {/* Mic button (STT) */}
+          {sttSupported && (
+            <button
+              type="button"
+              onClick={toggleListening}
+              disabled={isLoading || isChatRateLimited}
+              className={`px-3 py-3 rounded-xl transition-colors flex items-center justify-center ${
+                isListening
+                  ? "bg-red-500 text-white hover:bg-red-600 animate-pulse"
+                  : "bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700"
+              } disabled:bg-gray-100 disabled:text-gray-300 disabled:cursor-not-allowed`}
+              title={isListening ? "Stop listening" : "Speak your question"}
+            >
+              {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+            </button>
+          )}
           <input
             ref={inputRef}
             type="text"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            placeholder="Type your question..."
+            placeholder={isListening ? "Listening..." : "Type or speak your question..."}
             disabled={isLoading || isChatRateLimited}
-            className="flex-1 px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white text-gray-900 placeholder-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed"
+            className={`flex-1 px-4 py-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white text-gray-900 placeholder-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed ${
+              isListening ? "border-red-300 ring-1 ring-red-200" : "border-gray-200"
+            }`}
           />
           <button
             type="submit"

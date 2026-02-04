@@ -12,7 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import { createLLMProvider, getActiveModelId } from "@/lib/integrations/llm-provider";
-import { getOpikClient, traceError } from "@/lib/integrations/opik";
+import { getOpikClient, traceError, flushTraces } from "@/lib/integrations/opik";
 import { getPatient } from "@/lib/data/demo-patients";
 import {
   PATIENT_COACH_TOOLS,
@@ -944,6 +944,8 @@ Coach:`;
       },
     });
     trace?.end();
+    // Single flush at the end — covers all LLM spans created during this request
+    await flushTraces();
 
     return NextResponse.json(responseData);
   } catch (error) {
@@ -962,6 +964,7 @@ Coach:`;
     trace?.end();
 
     // Also log standalone error trace for aggregation/filtering
+    // (traceError calls flushTraces internally, so this also serves as the final flush)
     await traceError("api-patient-chat", error, {
       patientId,
       threadId: patientId ? `chat-${patientId}` : undefined,

@@ -4,7 +4,7 @@ import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
-import { traceDataSourceCall, traceError } from "@/lib/integrations/opik";
+import { traceDataSourceCall, traceError, flushTraces } from "@/lib/integrations/opik";
 import { getActiveModelId, setActiveModel, resetLLMProvider, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
 import { runAgent, getSession } from "@/lib/agents/orchestrator";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
@@ -178,6 +178,9 @@ export async function POST(request: NextRequest) {
       })),
       costEstimates
     );
+
+    // Flush all Opik traces before returning (single flush covers all LLM spans)
+    await flushTraces();
 
     // Include model info in response with fallback transparency
     return NextResponse.json({

@@ -13,6 +13,7 @@
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Opik } from "opik";
+import { getOpikClient } from "./opik";
 
 // Model configuration
 export type ModelProvider = "gemini" | "huggingface" | "openai" | "anthropic";
@@ -213,13 +214,8 @@ export class LLMProvider {
 
     this.config = config;
 
-    // Initialize Opik for tracing
-    if (process.env.OPIK_API_KEY) {
-      this.opik = new Opik({
-        apiKey: process.env.OPIK_API_KEY,
-        projectName: process.env.OPIK_PROJECT_NAME || "transitioniq",
-      });
-    }
+    // Reuse shared Opik singleton so route-level flushTraces() covers all spans
+    this.opik = getOpikClient();
   }
 
   /**
@@ -339,9 +335,6 @@ export class LLMProvider {
           },
         });
         llmSpan.end();
-
-        // Flush immediately after LLM span ends to ensure usage data is sent
-        await this.safeFlush();
       }
 
       // Update trace with summary
@@ -362,7 +355,8 @@ export class LLMProvider {
           },
         });
         trace.end();
-        await this.safeFlush();
+        // No flush here — the calling route handler flushes once at the end
+        // to avoid 1-2s blocking latency per LLM call (4-8s total on 2-call requests)
       }
 
       return {
@@ -395,7 +389,6 @@ export class LLMProvider {
           if (trace) {
             trace.update({ output: { error: "Request timed out" }, metadata: { success: false, timeout: true } });
             trace.end();
-            await this.safeFlush();
           }
         } catch (opikError) {
           console.error("[Opik] Failed to log timeout trace (non-fatal):", opikError);
@@ -443,7 +436,6 @@ export class LLMProvider {
             },
           });
           trace.end();
-          await this.safeFlush();
         }
       } catch (opikError) {
         console.error("[Opik] Failed to log error trace (non-fatal):", opikError);
