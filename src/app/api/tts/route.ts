@@ -9,7 +9,7 @@
  * and errors for every request.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import { getOpikClient, traceError, flushTraces } from "@/lib/integrations/opik";
 
@@ -139,8 +139,8 @@ export async function POST(request: NextRequest) {
       responseHeaders["Content-Length"] = contentLength;
     }
 
-    // Complete Opik tracing asynchronously — don't block the stream
-    const traceCleanup = () => {
+    // Complete Opik tracing — finalize spans and flush
+    const completeTrace = async () => {
       const totalLatencyMs = Date.now() - startTime;
       apiSpan?.update({
         totalEstimatedCost: estimatedCost,
@@ -162,13 +162,15 @@ export async function POST(request: NextRequest) {
         },
       });
       trace?.end();
-      flushTraces();
+      await flushTraces();
     };
 
     // If the response body is a ReadableStream, pipe it through
     if (ttsResponse.body) {
-      // Fire-and-forget trace completion so it doesn't block streaming
-      setTimeout(traceCleanup, 0);
+      // Use Next.js after() to flush Opik traces after the response is sent.
+      // This keeps the serverless function alive long enough to complete the flush
+      // without blocking the audio stream to the client.
+      after(completeTrace);
 
       return new NextResponse(ttsResponse.body, {
         status: 200,
@@ -178,7 +180,7 @@ export async function POST(request: NextRequest) {
 
     // Fallback: buffer if no stream (shouldn't happen with fetch)
     const audioBuffer = await ttsResponse.arrayBuffer();
-    traceCleanup();
+    await completeTrace();
 
     return new NextResponse(audioBuffer, {
       status: 200,

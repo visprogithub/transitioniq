@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 import { generateDischargePlan } from "@/lib/integrations/analysis";
-import { traceAnalysis, traceError } from "@/lib/integrations/opik";
+import { getOpikClient, traceAnalysis, traceError, flushTraces } from "@/lib/integrations/opik";
 import { setActiveModel, resetLLMProvider } from "@/lib/integrations/llm-provider";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
@@ -10,6 +10,14 @@ export async function POST(request: NextRequest) {
   // Rate limit: plan generation (single LLM call)
   const blocked = applyRateLimit(request, "generate");
   if (blocked) return blocked;
+
+  const opik = getOpikClient();
+  const trace = opik?.trace({
+    name: "generate-discharge-plan",
+    metadata: {
+      category: "plan_generation",
+    },
+  });
 
   try {
     const body = await request.json();
@@ -46,6 +54,10 @@ export async function POST(request: NextRequest) {
           return await generateDischargePlan(patient, analysis);
         });
 
+        trace?.update({ output: { success: true, source: "gemini" } });
+        trace?.end();
+        await flushTraces();
+
         return NextResponse.json({
           plan: planResult.result,
           tracingId: planResult.traceId,
@@ -59,9 +71,28 @@ export async function POST(request: NextRequest) {
 
     // Generate a structured plan without LLM (fallback)
     const plan = generatePlanWithoutLLM(patient.name, analysis);
+
+    trace?.update({ output: { success: true, source: "fallback" } });
+    trace?.end();
+    await flushTraces();
+
     return NextResponse.json({ plan });
   } catch (error) {
     console.error("Plan generation error:", error);
+
+    // Set errorInfo on the route-level trace so Opik dashboard counts this error
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
+    };
+    trace?.update({
+      errorInfo,
+      output: { error: errorMessage },
+    });
+    trace?.end();
+
     await traceError("api-generate-plan", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Plan generation failed" },

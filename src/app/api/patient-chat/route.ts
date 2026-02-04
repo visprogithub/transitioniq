@@ -951,16 +951,30 @@ Coach:`;
   } catch (error) {
     console.error("[Patient Chat] Error:", error);
 
+    // Build errorInfo so Opik dashboard counts this as an error trace
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
+    };
+
     // Create proper error span on the trace for visibility in Opik
     const errorSpan = trace?.span({
       name: "error",
       metadata: {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
         stack: error instanceof Error ? error.stack : undefined,
       },
     });
     errorSpan?.end();
+
+    // Set errorInfo on the trace itself (this is what the dashboard widget reads)
+    trace?.update({
+      errorInfo,
+      output: { error: errorMessage },
+    });
     trace?.end();
 
     // Also log standalone error trace for aggregation/filtering

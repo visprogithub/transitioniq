@@ -53,3 +53,4 @@ nul
 
 # generated code manifest (rebuilt at build time)
 src/generated/
+scripts/inspect-opik-dashboard.mjs
