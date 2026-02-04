@@ -92,6 +92,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   const [voiceRateLimitCountdown, setVoiceRateLimitCountdown] = useState("");
   const [autoPlayVoice, setAutoPlayVoice] = useState(false);
   const [sttTranscribing, setSttTranscribing] = useState(false); // Whisper processing
+  const [sttError, setSttError] = useState<string | null>(null);
   const [sttRateLimitReset, setSttRateLimitReset] = useState<number | null>(null);
   const [sttRateLimitCountdown, setSttRateLimitCountdown] = useState("");
   const isSttRateLimited = sttRateLimitReset !== null && sttRateLimitReset > Date.now();
@@ -99,9 +100,10 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsAbortRef = useRef<AbortController | null>(null);
   const lastAutoPlayedRef = useRef<number>(-1);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Calculate current turn count
@@ -215,6 +217,13 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       return;
     }
 
+    // Check if mediaDevices API is available (requires HTTPS, except Chrome localhost)
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setSttError("Mic requires HTTPS — works on the deployed site");
+      setTimeout(() => setSttError(null), 4000);
+      return;
+    }
+
     // Start recording
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -280,7 +289,11 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       mediaRecorder.start();
       setIsListening(true);
     } catch (err) {
-      console.error("[STT/Whisper] Mic access error:", err);
+      const message = err instanceof DOMException && err.name === "NotAllowedError"
+        ? "Mic access denied — check browser permissions"
+        : "Mic unavailable — try the deployed site (HTTPS)";
+      setSttError(message);
+      setTimeout(() => setSttError(null), 4000);
       setIsListening(false);
     }
   }, [isListening]);
@@ -296,12 +309,18 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
 
   // --- Voice: TTS playback ---
   function stopAudio() {
+    // Abort any inflight TTS fetch
+    if (ttsAbortRef.current) {
+      ttsAbortRef.current.abort();
+      ttsAbortRef.current = null;
+    }
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.src = "";
       audioRef.current = null;
     }
     setPlayingMessageIndex(null);
+    setTtsLoading(null);
   }
 
   async function playTTS(text: string, messageIndex: number) {
@@ -311,8 +330,11 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       return;
     }
 
-    // Stop any current playback
+    // Stop any current playback AND any inflight fetch
     stopAudio();
+
+    const abortController = new AbortController();
+    ttsAbortRef.current = abortController;
     setTtsLoading(messageIndex);
 
     try {
@@ -320,7 +342,11 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
+        signal: abortController.signal,
       });
+
+      // Check if aborted while fetching
+      if (abortController.signal.aborted) return;
 
       if (response.status === 429) {
         const errorData = await response.json().catch(() => ({}));
@@ -335,6 +361,10 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       }
 
       const blob = await response.blob();
+
+      // Check if aborted while reading blob
+      if (abortController.signal.aborted) return;
+
       const url = URL.createObjectURL(blob);
       const audio = new Audio();
 
@@ -344,6 +374,12 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         audio.onerror = () => reject(new Error("Audio failed to load"));
         audio.src = url;
       });
+
+      // Check if aborted while buffering
+      if (abortController.signal.aborted) {
+        URL.revokeObjectURL(url);
+        return;
+      }
 
       audio.onended = () => {
         URL.revokeObjectURL(url);
@@ -356,6 +392,8 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       setTtsLoading(null);
       await audio.play();
     } catch (error) {
+      // Ignore abort errors — they're intentional
+      if (error instanceof DOMException && error.name === "AbortError") return;
       console.error("[TTS] Error:", error);
       setTtsLoading(null);
       setPlayingMessageIndex(null);
@@ -413,9 +451,12 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
     },
   ];
 
-  // Scroll to bottom when new messages arrive
+  // Scroll chat container to bottom when new messages arrive (not the whole page)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    }
   }, [messages]);
 
   // Countdown timer for session-wide rate limit
@@ -757,7 +798,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         <AnimatePresence initial={false}>
           {messages.map((message, index) => (
             <motion.div
@@ -880,7 +921,6 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
           )}
         </AnimatePresence>
 
-        <div ref={messagesEndRef} />
       </div>
 
       {/* Show More Suggestions Toggle */}
@@ -952,6 +992,11 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
             )}
           </button>
         </div>
+        {sttError && (
+          <p className="text-xs text-red-500 text-center mt-2 animate-pulse">
+            {sttError}
+          </p>
+        )}
         <p className="text-xs text-gray-400 text-center mt-2">
           For emergencies, call 911 or press your nurse call button
         </p>
