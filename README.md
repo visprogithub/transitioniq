@@ -76,7 +76,7 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) — select a patient from the dropdown and click "Analyze Readiness" to see the full pipeline in action.
 
-> **Voice features** (TTS/STT) require `OPENAI_API_KEY` in your `.env.local`. Without it, the app runs fine but the mic button and auto-play toggle won't work.
+> **Voice and LLM As Judge features** (TTS/STT) require `OPENAI_API_KEY` in your `.env.local`. Without it, the app runs fine but the mic button and auto-play toggle won't work.
 
 ## Features
 
