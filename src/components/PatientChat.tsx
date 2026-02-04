@@ -90,9 +90,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   const [ttsLoading, setTtsLoading] = useState<number | null>(null);
   const [voiceRateLimitReset, setVoiceRateLimitReset] = useState<number | null>(null);
   const [voiceRateLimitCountdown, setVoiceRateLimitCountdown] = useState("");
+  const [autoPlayVoice, setAutoPlayVoice] = useState(false);
+  const [sttTranscribing, setSttTranscribing] = useState(false); // Whisper processing
+  const [sttRateLimitReset, setSttRateLimitReset] = useState<number | null>(null);
+  const [sttRateLimitCountdown, setSttRateLimitCountdown] = useState("");
+  const isSttRateLimited = sttRateLimitReset !== null && sttRateLimitReset > Date.now();
   const isVoiceRateLimited = voiceRateLimitReset !== null && voiceRateLimitReset > Date.now();
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lastAutoPlayedRef = useRef<number>(-1);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -139,8 +146,30 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
     return () => clearInterval(interval);
   }, [voiceRateLimitReset]);
 
-  // --- Voice: STT toggle ---
-  const toggleListening = useCallback(() => {
+  // --- Voice: countdown for STT (Whisper) rate limit ---
+  useEffect(() => {
+    if (!sttRateLimitReset) {
+      setSttRateLimitCountdown("");
+      return;
+    }
+    const tick = () => {
+      const remaining = sttRateLimitReset - Date.now();
+      if (remaining <= 0) {
+        setSttRateLimitReset(null);
+        setSttRateLimitCountdown("");
+        return;
+      }
+      const m = Math.floor(remaining / 60000);
+      const s = Math.ceil((remaining % 60000) / 1000);
+      setSttRateLimitCountdown(m > 0 ? `${m}m ${s}s` : `${s}s`);
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [sttRateLimitReset]);
+
+  // --- Voice: browser-native STT toggle (Chrome/Safari) ---
+  const toggleBrowserSTT = useCallback(() => {
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
@@ -176,6 +205,94 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
     recognition.start();
     setIsListening(true);
   }, [isListening]);
+
+  // --- Voice: server-side Whisper STT toggle (Firefox fallback) ---
+  const toggleWhisperSTT = useCallback(async () => {
+    // If already recording, stop and transcribe
+    if (isListening && mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+      // onStop handler will handle transcription
+      return;
+    }
+
+    // Start recording
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : "audio/webm",
+      });
+      const chunks: Blob[] = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        // Stop all tracks to release the mic
+        stream.getTracks().forEach((t) => t.stop());
+        setIsListening(false);
+
+        if (chunks.length === 0) return;
+
+        const blob = new Blob(chunks, { type: "audio/webm" });
+        setSttTranscribing(true);
+
+        try {
+          const formData = new FormData();
+          formData.append("audio", blob, "recording.webm");
+
+          const response = await fetch("/api/stt", {
+            method: "POST",
+            body: formData,
+          });
+
+          if (response.status === 429) {
+            const errorData = await response.json().catch(() => ({}));
+            const resetTime = Date.now() + (errorData.retryAfterMs || 60000);
+            setSttRateLimitReset(resetTime);
+            setSttTranscribing(false);
+            return;
+          }
+
+          if (!response.ok) {
+            throw new Error("STT request failed");
+          }
+
+          const data = await response.json();
+          if (data.transcript) {
+            setInputValue(data.transcript);
+          }
+        } catch (err) {
+          console.error("[STT/Whisper] Transcription error:", err);
+        } finally {
+          setSttTranscribing(false);
+        }
+      };
+
+      mediaRecorder.onerror = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setIsListening(false);
+      };
+
+      mediaRecorderRef.current = mediaRecorder;
+      mediaRecorder.start();
+      setIsListening(true);
+    } catch (err) {
+      console.error("[STT/Whisper] Mic access error:", err);
+      setIsListening(false);
+    }
+  }, [isListening]);
+
+  // Unified toggle — picks the right STT method
+  const toggleListening = useCallback(() => {
+    if (sttSupported) {
+      toggleBrowserSTT();
+    } else {
+      toggleWhisperSTT();
+    }
+  }, [sttSupported, toggleBrowserSTT, toggleWhisperSTT]);
 
   // --- Voice: TTS playback ---
   function stopAudio() {
@@ -237,6 +354,19 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       setPlayingMessageIndex(null);
     }
   }
+
+  // --- Voice: auto-play TTS for new assistant messages ---
+  useEffect(() => {
+    if (!autoPlayVoice || isVoiceRateLimited) return;
+    // Find the last non-loading assistant message
+    const lastAssistantIndex = messages.reduce<number>((acc, m, i) =>
+      m.role === "assistant" && !m.isLoading ? i : acc, -1);
+    if (lastAssistantIndex <= 0) return; // skip welcome message (index 0)
+    if (lastAssistantIndex === lastAutoPlayedRef.current) return; // already played
+    lastAutoPlayedRef.current = lastAssistantIndex;
+    playTTS(messages[lastAssistantIndex].content, lastAssistantIndex);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, autoPlayVoice, isVoiceRateLimited]);
 
   // Generate suggested questions based on patient data
   const suggestedQuestions: SuggestedQuestion[] = [
@@ -542,6 +672,22 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
           }`}>
             {turnCount}/{CHAT_LIMITS.MAX_CONVERSATION_TURNS} messages
           </span>
+          {/* Auto-play voice toggle */}
+          <button
+            onClick={() => {
+              if (autoPlayVoice) stopAudio();
+              setAutoPlayVoice(prev => !prev);
+            }}
+            disabled={isVoiceRateLimited}
+            className={`p-2 rounded-lg transition-colors ${
+              autoPlayVoice
+                ? "bg-blue-100 text-blue-600 hover:bg-blue-200"
+                : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+            } disabled:opacity-40 disabled:cursor-not-allowed`}
+            title={autoPlayVoice ? "Auto-play voice: ON" : "Auto-play voice: OFF"}
+          >
+            <Volume2 className="w-4 h-4" />
+          </button>
           {/* Reset button */}
           {messages.length > 1 && (
             <button
@@ -589,6 +735,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
           <Volume2 className="w-4 h-4 text-purple-600 flex-shrink-0" />
           <p className="text-xs text-purple-800 flex-1">
             Voice limit reached. Listen again in <strong>{voiceRateLimitCountdown}</strong>.
+          </p>
+        </div>
+      )}
+
+      {/* STT (Whisper) Rate Limit Countdown Banner */}
+      {isSttRateLimited && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-purple-50 border-b border-purple-200">
+          <Mic className="w-4 h-4 text-purple-600 flex-shrink-0" />
+          <p className="text-xs text-purple-800 flex-1">
+            Mic limit reached. Try again in <strong>{sttRateLimitCountdown}</strong>.
           </p>
         </div>
       )}
@@ -737,28 +893,41 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         className="p-4 border-t border-gray-100 bg-gray-50"
       >
         <div className="flex gap-2">
-          {/* Mic button (STT) */}
-          {sttSupported && (
-            <button
-              type="button"
-              onClick={toggleListening}
-              disabled={isLoading || isChatRateLimited}
-              className={`px-3 py-3 rounded-xl transition-colors flex items-center justify-center ${
-                isListening
-                  ? "bg-red-500 text-white hover:bg-red-600 animate-pulse"
-                  : "bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700"
-              } disabled:bg-gray-100 disabled:text-gray-300 disabled:cursor-not-allowed`}
-              title={isListening ? "Stop listening" : "Speak your question"}
-            >
-              {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-            </button>
-          )}
+          {/* Mic button (STT) — always visible, uses browser API or Whisper fallback */}
+          <button
+            type="button"
+            onClick={toggleListening}
+            disabled={isLoading || isChatRateLimited || sttTranscribing || isSttRateLimited}
+            className={`relative px-3 py-3 rounded-xl transition-all flex items-center justify-center ${
+              isListening
+                ? "bg-red-500 text-white hover:bg-red-600 shadow-lg shadow-red-500/30 scale-105"
+                : sttTranscribing
+                  ? "bg-indigo-100 text-indigo-500 border border-indigo-300"
+                  : "bg-blue-50 text-blue-600 hover:bg-blue-100 hover:text-blue-700 border border-blue-200"
+            } disabled:bg-gray-100 disabled:text-gray-300 disabled:border-gray-200 disabled:cursor-not-allowed disabled:shadow-none`}
+            title={
+              sttTranscribing ? "Transcribing..."
+                : isListening ? (sttSupported ? "Stop listening" : "Tap to stop & transcribe")
+                : "Speak your question"
+            }
+          >
+            {sttTranscribing ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : isListening ? (
+              <MicOff className="w-5 h-5" />
+            ) : (
+              <Mic className="w-5 h-5" />
+            )}
+            {isListening && (
+              <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-400 rounded-full animate-ping" />
+            )}
+          </button>
           <input
             ref={inputRef}
             type="text"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            placeholder={isListening ? "Listening..." : "Type or speak your question..."}
+            placeholder={sttTranscribing ? "Transcribing..." : isListening ? "🎙️ Listening... speak now" : "Type your question or tap 🎤"}
             disabled={isLoading || isChatRateLimited}
             className={`flex-1 px-4 py-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white text-gray-900 placeholder-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed ${
               isListening ? "border-red-300 ring-1 ring-red-200" : "border-gray-200"
