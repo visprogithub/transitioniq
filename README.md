@@ -380,7 +380,7 @@ All prompts are stored and versioned in Opik's Prompt Library with local fallbac
 - **Task Completion**: Automated checks for score, status, risk factors, and recommendations
 - **Conversation Metrics**: Turn count, tool usage, and task completion tracking
 
-## Source Code Viewer
+## Source Code Viewer (Was hoping to bypass public github repo requirement this is depreciated and wouldn't ship with actual product)
 
 Navigate to [`/source`](/source) to access the built-in source code viewer for hackathon review.
 
