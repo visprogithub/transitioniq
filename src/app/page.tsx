@@ -45,6 +45,9 @@ interface AnalysisWithModel extends DischargeAnalysis {
 
 type TabType = "dashboard" | "patient" | "evaluation";
 
+// Kill-switch: set NEXT_PUBLIC_DISABLE_EVALUATION=true to hide the evaluation tab
+const evaluationEnabled = process.env.NEXT_PUBLIC_DISABLE_EVALUATION !== "true";
+
 // ---------------------------------------------------------------------------
 // sessionStorage analysis cache — auto-clears on tab close; 10-min TTL
 // ---------------------------------------------------------------------------
@@ -462,6 +465,7 @@ export default function DashboardPage() {
                   <span className="text-xs sm:text-sm">Patient View</span>
                 </button>
               </Tooltip>
+              {evaluationEnabled && (
               <Tooltip content="Test and compare AI models" position="bottom">
                 <button
                   onClick={() => setActiveTab("evaluation")}
@@ -475,6 +479,7 @@ export default function DashboardPage() {
                   <span className="text-xs sm:text-sm">Evaluation</span>
                 </button>
               </Tooltip>
+              )}
             </nav>
 
             {/* Model Selector and Patient Selector - Row on mobile */}
@@ -597,7 +602,7 @@ export default function DashboardPage() {
         </AnimatePresence>
 
         {/* Evaluation Tab */}
-        {activeTab === "evaluation" && <EvaluationDashboard />}
+        {evaluationEnabled && activeTab === "evaluation" && <EvaluationDashboard />}
 
         {/* Patient View Tab */}
         {activeTab === "patient" && (

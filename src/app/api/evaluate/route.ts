@@ -6,6 +6,9 @@ import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 import type { Patient } from "@/lib/types/patient";
 
+const EVALUATION_DISABLED = process.env.NEXT_PUBLIC_DISABLE_EVALUATION === "true";
+const DISABLED_RESPONSE = { error: "Evaluation is currently disabled" };
+
 // Ground truth test cases with expected scores
 const TEST_CASES = [
   {
@@ -29,6 +32,7 @@ const TEST_CASES = [
 ];
 
 export async function GET() {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   return NextResponse.json({
     message: "Evaluation endpoint",
     testCases: TEST_CASES,
@@ -38,6 +42,7 @@ export async function GET() {
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function POST(_request: NextRequest) {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   try {
     const results: Array<{
       patientId: string;

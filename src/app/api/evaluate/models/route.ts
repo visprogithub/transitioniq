@@ -24,6 +24,9 @@ import { analyzeDischargeReadiness, resetLLMProvider } from "@/lib/integrations/
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
+const EVALUATION_DISABLED = process.env.NEXT_PUBLIC_DISABLE_EVALUATION === "true";
+const DISABLED_RESPONSE = { error: "Evaluation is currently disabled" };
+
 // 12 patients * ~10s each per model = up to 5 minutes for multi-model
 export const maxDuration = 300;
 
@@ -63,6 +66,7 @@ const EXPECTED_OUTCOMES: Record<string, { scoreRange: [number, number]; status: 
  * GET - List available models for evaluation
  */
 export async function GET() {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   const availableModels = getAvailableModels();
   const allModels = getAllModels();
   const configuredProviders = getConfiguredProviders();
@@ -102,6 +106,7 @@ export async function GET() {
  * - experimentName: string (optional - for Opik tracking)
  */
 export async function POST(request: NextRequest) {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   // Rate limit: most expensive endpoint (12 patients * N models)
   const blocked = applyRateLimit(request, "evaluation");
   if (blocked) return blocked;

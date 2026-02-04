@@ -4,6 +4,9 @@ import { getPatient } from "@/lib/data/demo-patients";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
+const EVALUATION_DISABLED = process.env.NEXT_PUBLIC_DISABLE_EVALUATION === "true";
+const DISABLED_RESPONSE = { error: "Evaluation is currently disabled" };
+
 interface SingleJudgeRequest {
   patientId: string;
   analysis: DischargeAnalysis;
@@ -25,6 +28,7 @@ interface BatchJudgeRequest {
  * Supports single evaluation or batch mode.
  */
 export async function POST(request: NextRequest) {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   // Rate limit: LLM-as-Judge calls
   const blocked = applyRateLimit(request, "judge");
   if (blocked) return blocked;
@@ -137,6 +141,7 @@ export async function POST(request: NextRequest) {
  * Returns information about the LLM-as-Judge evaluation system.
  */
 export async function GET() {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   return NextResponse.json({
     name: "LLM-as-Judge Evaluation",
     description:

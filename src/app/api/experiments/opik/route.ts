@@ -18,10 +18,14 @@ import {
 import { getAvailableModels } from "@/lib/integrations/llm-provider";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 
+const EVALUATION_DISABLED = process.env.NEXT_PUBLIC_DISABLE_EVALUATION === "true";
+const DISABLED_RESPONSE = { error: "Evaluation is currently disabled" };
+
 // Cloud uses 3 core patients (~30s/model). Still allow 5 min for multi-model.
 export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   // Rate limit: expensive multi-model experiment
   const blocked = applyRateLimit(request, "evaluation");
   if (blocked) return blocked;
@@ -153,6 +157,7 @@ export async function POST(request: NextRequest) {
  * This allows viewing the dataset in the Opik dashboard without running an experiment.
  */
 export async function PUT() {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   try {
     if (!process.env.OPIK_API_KEY) {
       return NextResponse.json(
@@ -198,6 +203,7 @@ export async function PUT() {
 }
 
 export async function GET() {
+  if (EVALUATION_DISABLED) return NextResponse.json(DISABLED_RESPONSE, { status: 403 });
   // Return Opik dashboard URLs and status
   const opikConfigured = !!process.env.OPIK_API_KEY;
   const projectName = process.env.OPIK_PROJECT_NAME || "transitioniq";
