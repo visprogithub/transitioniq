@@ -23,8 +23,8 @@ interface CategoryConfig {
 }
 
 // Voice rate limits are configurable via env to control TTS costs in demos
-const VOICE_MAX_REQUESTS = parseInt(process.env.VOICE_RATE_LIMIT_MAX || "20", 10);
-const VOICE_WINDOW_MS = parseInt(process.env.VOICE_RATE_LIMIT_WINDOW_MIN || "15", 10) * 60 * 1000;
+const VOICE_MAX_REQUESTS = parseInt(process.env.VOICE_RATE_LIMIT_MAX || "5", 10);
+const VOICE_WINDOW_MS = parseInt(process.env.VOICE_RATE_LIMIT_WINDOW_MIN || "1440", 10) * 60 * 1000; // default 24h
 
 const CATEGORY_CONFIGS: Record<RateLimitCategory, CategoryConfig> = {
   evaluation: { maxRequests: 3, windowMs: 15 * 60 * 1000 },  // 3 per 15 min
