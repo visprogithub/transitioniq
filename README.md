@@ -76,7 +76,7 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) — select a patient from the dropdown and click "Analyze Readiness" to see the full pipeline in action.
 
-> **Voice features** (TTS/STT) require `OPENAI_API_KEY` in your `.env.local`. Without it, the app runs fine but the mic button and auto-play toggle won't work.
+> **Voice and LLM As Judge features** (TTS/STT) and Judge require `OPENAI_API_KEY` in your `.env.local`. Without it, the app runs fine but the mic button, auto-play toggle, and judge evaluation won't work.
 
 ## Features
 
@@ -85,6 +85,7 @@ Open [http://localhost:3000](http://localhost:3000) — select a patient from th
 - **Animated Discharge Score** - Visual gauge (0-100) with status indicators and collapsible methodology explanation
 - **Risk Factor Cards** - Expandable cards with severity levels (high/moderate/low) and data source attribution (FDA, CMS, Guidelines, FHIR, RAG)
 - **AI-Generated Discharge Plans** - Comprehensive checklists tailored to patient risk factors
+- - Clinician ability to add or remove items from the checklist based on their clinical judgement.
 - **Smart Rate Limit Handling** - Automatic prompts to switch models when rate limited
 
 ### Patient View
