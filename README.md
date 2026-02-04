@@ -26,6 +26,22 @@ For this hackathon submission, all three views (Clinical, Patient, Evaluation) e
 - **Patient View** would be a separate **mobile app** or integrated into a patient portal like **MyChart**, where patients receive their personalized going-home preparation guide and can chat with the Recovery Coach.
 - **Evaluation tab** would be an **internal dashboard** for the TransitionIQ team to monitor model performance, run A/B experiments, track accuracy metrics, and manage prompt versions — not visible to clinicians or patients.
 
+### Proof-of-Concept Shortcuts
+
+This is a hackathon prototype built under time, cost, and infrastructure constraints (free Vercel tier, limited API budgets). Several components are intentional placeholders that would need proper solutions before production:
+
+- **Knowledge base / RAG** — Uses a zero-dependency TF-IDF vector search with basic medical NLP (synonym expansion, stemming). A production system would use proper embedding models (e.g. OpenAI `text-embedding-3-small`) backed by a vector database (Pinecone, Weaviate, pgvector) with chunking, re-ranking, and a much larger clinical corpus.
+- **Conversation memory** — All session state, conversation history, and patient assessments live in in-memory `Map`s with TTL-based cleanup. There's no persistence — a Vercel cold start wipes everything. Production would use Redis or a database for session state and conversation history.
+- **Rate limiting** — Cookie-based, in-memory per serverless instance. Not distributed, not tamper-proof — anyone can clear cookies and get a fresh quota. Exists purely to cap demo API costs. A real system would use distributed rate limiting (e.g. Upstash Redis) with proper authentication.
+- **Patient data** — Hardcoded demo patients with synthetic FHIR-like records. The data source clients (FDA, CMS, guidelines) simulate external API calls with realistic but pre-built responses. Production would integrate with real FHIR servers, live FDA/openFDA APIs, and CMS pricing feeds.
+- **Authentication** — There is none. No login, no RBAC, no HIPAA-compliant access controls. The cookie-based session is purely for rate limit tracking.
+- **Model selection** — Constrained to models available on free or cheap tiers (GPT-4o Mini, HuggingFace Qwen3, Gemini Flash). Model routing is manual (user picks from a dropdown). Production would likely use a single validated model with proper eval benchmarks, or an intelligent router.
+- **Voice** — STT uses the browser's built-in Web Speech API (free, no server cost, but inconsistent across browsers). TTS uses OpenAI `tts-1` which is cheap but adds latency. A production mobile app would likely use a dedicated speech pipeline (Whisper for STT, streaming TTS) with proper audio handling.
+- **Hosting** — Vercel free tier has a 60-second function timeout, 100K monthly invocations, and no persistent storage. The multi-model evaluation endpoint (`/api/evaluate/models`) can push against that timeout when testing many models. Production would need proper infrastructure sizing.
+- **Opik flush strategy** — Traces are flushed once per request at the route level. If the serverless function is killed mid-request (timeout, crash), in-flight traces may be lost. Acceptable for a demo; production would use async trace shipping or a collector sidecar.
+
+None of this diminishes what the prototype demonstrates — the clinical reasoning pipeline, multi-agent orchestration, observability integration, and evaluation framework are all real. The shortcuts above are just the plumbing that would get specced out properly with time and budget.
+
 ## Tech Stack
 
 - **Frontend**: Next.js 16 with App Router, TypeScript, Tailwind CSS, Framer Motion
