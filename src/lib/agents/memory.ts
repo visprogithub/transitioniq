@@ -105,6 +105,90 @@ const longTermStore: LongTermMemory = {
   },
 };
 
+// --- Memory limits & cleanup ---
+const MEMORY_LIMITS = {
+  /** Max short-term sessions before cleanup triggers */
+  MAX_SESSIONS: 50,
+  /** Sessions older than this (ms) are evicted */
+  SESSION_TTL_MS: 30 * 60 * 1000, // 30 minutes
+  /** Max assessments kept per patient */
+  MAX_ASSESSMENTS_PER_PATIENT: 10,
+  /** Max total patients tracked in long-term memory */
+  MAX_PATIENTS: 100,
+  /** Max risk patterns tracked */
+  MAX_RISK_PATTERNS: 50,
+  /** How often cleanup runs (ms) */
+  CLEANUP_INTERVAL_MS: 5 * 60 * 1000, // 5 minutes
+};
+let lastMemoryCleanup = Date.now();
+
+/**
+ * Periodic cleanup of stale sessions and bounded long-term storage.
+ * Called opportunistically on memory access — not on a timer — so it
+ * costs nothing when the app is idle.
+ */
+function cleanupMemory(): void {
+  const now = Date.now();
+  if (now - lastMemoryCleanup < MEMORY_LIMITS.CLEANUP_INTERVAL_MS) return;
+  lastMemoryCleanup = now;
+
+  // 1. Evict stale short-term sessions
+  for (const [id, session] of shortTermStore.entries()) {
+    const lastAccess = new Date(session.lastAccessedAt).getTime();
+    if (now - lastAccess > MEMORY_LIMITS.SESSION_TTL_MS) {
+      shortTermStore.delete(id);
+    }
+  }
+
+  // 2. If still over limit after TTL eviction, drop oldest sessions
+  if (shortTermStore.size > MEMORY_LIMITS.MAX_SESSIONS) {
+    const sorted = [...shortTermStore.entries()].sort(
+      (a, b) => new Date(a[1].lastAccessedAt).getTime() - new Date(b[1].lastAccessedAt).getTime()
+    );
+    const toRemove = sorted.slice(0, shortTermStore.size - MEMORY_LIMITS.MAX_SESSIONS);
+    for (const [id] of toRemove) {
+      shortTermStore.delete(id);
+    }
+  }
+
+  // 3. Cap assessments per patient (keep most recent)
+  for (const [patientId, history] of longTermStore.patientAssessments.entries()) {
+    if (history.length > MEMORY_LIMITS.MAX_ASSESSMENTS_PER_PATIENT) {
+      longTermStore.patientAssessments.set(
+        patientId,
+        history.slice(-MEMORY_LIMITS.MAX_ASSESSMENTS_PER_PATIENT)
+      );
+    }
+  }
+
+  // 4. Cap total patients tracked (evict least-recently assessed)
+  if (longTermStore.patientAssessments.size > MEMORY_LIMITS.MAX_PATIENTS) {
+    const patientsByRecency = [...longTermStore.patientAssessments.entries()]
+      .map(([id, history]) => ({
+        id,
+        lastDate: history.length > 0
+          ? new Date(history[history.length - 1].assessmentDate).getTime()
+          : 0,
+      }))
+      .sort((a, b) => a.lastDate - b.lastDate);
+
+    const toEvict = patientsByRecency.slice(
+      0,
+      longTermStore.patientAssessments.size - MEMORY_LIMITS.MAX_PATIENTS
+    );
+    for (const { id } of toEvict) {
+      longTermStore.patientAssessments.delete(id);
+    }
+  }
+
+  // 5. Cap risk patterns
+  if (longTermStore.riskPatterns.length > MEMORY_LIMITS.MAX_RISK_PATTERNS) {
+    longTermStore.riskPatterns = longTermStore.riskPatterns
+      .sort((a, b) => b.frequency - a.frequency)
+      .slice(0, MEMORY_LIMITS.MAX_RISK_PATTERNS);
+  }
+}
+
 // Opik client for memory tracing
 let opikClient: Opik | null = null;
 
@@ -123,6 +207,8 @@ function getOpik(): Opik | null {
  * Create a new short-term memory session
  */
 export function createMemorySession(sessionId: string, goal: string): ShortTermMemory {
+  cleanupMemory();
+
   const memory: ShortTermMemory = {
     sessionId,
     conversationHistory: [],
@@ -144,6 +230,8 @@ export function createMemorySession(sessionId: string, goal: string): ShortTermM
  * Get short-term memory for a session
  */
 export function getMemorySession(sessionId: string): ShortTermMemory | undefined {
+  cleanupMemory();
+
   const memory = shortTermStore.get(sessionId);
   if (memory) {
     memory.lastAccessedAt = new Date().toISOString();
