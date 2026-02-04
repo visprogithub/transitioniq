@@ -336,7 +336,14 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
 
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
+      const audio = new Audio();
+
+      // Wait for enough audio to be buffered before playing (prevents clipping)
+      await new Promise<void>((resolve, reject) => {
+        audio.oncanplaythrough = () => resolve();
+        audio.onerror = () => reject(new Error("Audio failed to load"));
+        audio.src = url;
+      });
 
       audio.onended = () => {
         URL.revokeObjectURL(url);

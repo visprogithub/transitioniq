@@ -67,6 +67,13 @@ None of this diminishes what the prototype demonstrates — the clinical reasoni
 - **Prioritized Checklist** - Separated into "Must Do Before Leaving" and "Helpful For Your Recovery" sections
 - **Suggested Questions** - Pre-built question cards for common patient concerns
 
+### Voice Features
+- **Text-to-Speech** - Any coach response can be read aloud via OpenAI `tts-1` (nova voice). Audio is streamed from the API for fast playback with buffered start to prevent clipping.
+- **Auto-Play Toggle** - Speaker icon in the chat header. When enabled, every new coach response is automatically read aloud.
+- **Speech-to-Text (Chrome/Safari/Edge)** - Tap the 🎤 mic button to speak your question using the browser's built-in Web Speech API (free, real-time transcription).
+- **Speech-to-Text (Firefox/Other)** - Tap 🎤 to record, tap again to stop. Audio is sent to the server and transcribed via OpenAI Whisper — works in any browser that supports `MediaRecorder`.
+- **Rate Limiting** - TTS and STT are independently rate-limited to control API costs during the demo. Countdown banners appear when limits are reached.
+
 ### Observability & Evaluation
 - **Real-time Opik Tracing** - Token usage, cost estimates, and latency tracking for all LLM calls
 - **Error Tracing** - All API route errors logged to Opik with source identification and stack traces
@@ -145,6 +152,8 @@ When sharing the demo link publicly, cookie-based rate limiting protects expensi
 | **Analyze** (`/api/analyze`, `/api/agent`) | 10 requests | 5 min | Running discharge readiness analysis |
 | **Generate Plan** (`/api/generate-plan`) | 10 requests | 5 min | Generating discharge checklists |
 | **Patient Chat** (`/api/patient-chat`) | 1s cooldown | per message | Sending Recovery Coach messages |
+| **Voice TTS** (`/api/tts`) | 5 requests | 24 hours | Playing coach responses aloud (env: `VOICE_RATE_LIMIT_MAX`, `VOICE_RATE_LIMIT_WINDOW_MIN`) |
+| **Voice STT** (`/api/stt`) | 10 requests | 1 hour | Using mic-to-text on Firefox/other (env: `STT_RATE_LIMIT_MAX`, `STT_RATE_LIMIT_WINDOW_MIN`) |
 
 When rate-limited, the UI shows a disabled state with a countdown timer and a banner message.
 
@@ -193,6 +202,8 @@ npm run lint         # ESLint check
 | `/api/agent` | GET | Get session status by sessionId |
 | `/api/model/switch` | POST | Switch active LLM model |
 | `/api/model/switch` | GET | Get current model and available models |
+| `/api/tts` | POST | Text-to-speech via OpenAI `tts-1` (streams MP3 audio) |
+| `/api/stt` | POST | Speech-to-text via OpenAI Whisper (accepts audio blob) |
 | `/api/evaluate/models` | GET | List all models with availability |
 | `/api/experiments` | POST | Run Opik experiments for model evaluation |
 
@@ -284,7 +295,9 @@ npm run lint         # ESLint check
 | `src/lib/knowledge-base/knowledge-index.ts` | Knowledge base indexer (~400 clinical documents) |
 | `src/components/DischargeScore.tsx` | Animated circular score gauge with methodology explanation |
 | `src/components/PatientRecoveryCoach.tsx` | Patient-facing preparation guide and checklist |
-| `src/components/PatientChat.tsx` | Multi-turn recovery coach chat with tool use |
+| `src/components/PatientChat.tsx` | Multi-turn recovery coach chat with voice I/O |
+| `src/app/api/tts/route.ts` | Text-to-speech endpoint (OpenAI `tts-1`, streamed MP3) |
+| `src/app/api/stt/route.ts` | Speech-to-text endpoint (OpenAI Whisper, Firefox fallback) |
 | `src/components/ModelSelector.tsx` | UI for switching between LLM models |
 | `src/components/RiskFactorCard.tsx` | Expandable risk factor cards with data source badges |
 

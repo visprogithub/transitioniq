@@ -128,39 +128,63 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Stream the audio back
+    // Stream the audio directly to the client — don't buffer the whole file
+    const responseHeaders: Record<string, string> = {
+      "Content-Type": "audio/mpeg",
+      "Cache-Control": "private, max-age=300",
+    };
+    // Forward Content-Length if OpenAI provides it (helps browser buffer estimation)
+    const contentLength = ttsResponse.headers.get("content-length");
+    if (contentLength) {
+      responseHeaders["Content-Length"] = contentLength;
+    }
+
+    // Complete Opik tracing asynchronously — don't block the stream
+    const traceCleanup = () => {
+      const totalLatencyMs = Date.now() - startTime;
+      apiSpan?.update({
+        totalEstimatedCost: estimatedCost,
+        metadata: {
+          success: true,
+          api_latency_ms: apiLatencyMs,
+          audio_size_bytes: contentLength ? parseInt(contentLength, 10) : -1,
+        },
+      });
+      apiSpan?.end();
+      trace?.update({
+        output: {
+          success: true,
+          char_count: charCount,
+          audio_size_bytes: contentLength ? parseInt(contentLength, 10) : -1,
+          api_latency_ms: apiLatencyMs,
+          total_latency_ms: totalLatencyMs,
+          estimated_cost_usd: estimatedCost,
+        },
+      });
+      trace?.end();
+      flushTraces();
+    };
+
+    // If the response body is a ReadableStream, pipe it through
+    if (ttsResponse.body) {
+      // Fire-and-forget trace completion so it doesn't block streaming
+      setTimeout(traceCleanup, 0);
+
+      return new NextResponse(ttsResponse.body, {
+        status: 200,
+        headers: responseHeaders,
+      });
+    }
+
+    // Fallback: buffer if no stream (shouldn't happen with fetch)
     const audioBuffer = await ttsResponse.arrayBuffer();
-    const totalLatencyMs = Date.now() - startTime;
-
-    apiSpan?.update({
-      totalEstimatedCost: estimatedCost,
-      metadata: {
-        success: true,
-        api_latency_ms: apiLatencyMs,
-        audio_size_bytes: audioBuffer.byteLength,
-      },
-    });
-    apiSpan?.end();
-
-    trace?.update({
-      output: {
-        success: true,
-        char_count: charCount,
-        audio_size_bytes: audioBuffer.byteLength,
-        api_latency_ms: apiLatencyMs,
-        total_latency_ms: totalLatencyMs,
-        estimated_cost_usd: estimatedCost,
-      },
-    });
-    trace?.end();
-    await flushTraces();
+    traceCleanup();
 
     return new NextResponse(audioBuffer, {
       status: 200,
       headers: {
-        "Content-Type": "audio/mpeg",
+        ...responseHeaders,
         "Content-Length": String(audioBuffer.byteLength),
-        "Cache-Control": "private, max-age=300", // cache 5 min — same text = same audio
       },
     });
   } catch (error) {
