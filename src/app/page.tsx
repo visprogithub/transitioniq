@@ -374,8 +374,19 @@ export default function DashboardPage() {
                   break;
 
                 case "error":
-                  setAnalysisStreamingError(event.error);
-                  throw new Error(event.error);
+                  // Make rate limit and timeout errors more user-friendly
+                  let userFriendlyError = event.error;
+
+                  if (event.error.includes("rate limit") || event.error.includes("RATE_LIMITED")) {
+                    userFriendlyError = `⚠️ The ${currentModel} model is currently rate limited. Please wait a moment and try again, or switch to a different model using the dropdown above.`;
+                  } else if (event.error.includes("timed out") || event.error.includes("timeout")) {
+                    userFriendlyError = `⏱️ The ${currentModel} model took too long to respond (>30s). This model may be overloaded. Please try again or switch to a different model.`;
+                  } else if (event.error.includes("quota") || event.error.includes("insufficient_quota")) {
+                    userFriendlyError = `💳 API quota exceeded for ${currentModel}. Please check your API credits or switch to a different model.`;
+                  }
+
+                  setAnalysisStreamingError(userFriendlyError);
+                  throw new Error(userFriendlyError);
               }
             } catch (parseError) {
               if (parseError instanceof Error && parseError.message !== data) {

@@ -73,7 +73,7 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
     modelId: "gemini-2.5-flash",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
-    maxTokens: 8192,
+    maxTokens: 16384, // Increased from 8192 to allow full discharge analysis
   },
   // Flash-Lite: faster & cheaper, good for cost-sensitive calls
   "gemini-2.5-flash-lite": {
@@ -81,7 +81,7 @@ const MODEL_CONFIGS: Record<string, ModelConfig> = {
     modelId: "gemini-2.5-flash-lite",
     apiKey: process.env.GEMINI_API_KEY || "",
     temperature: 0.7,
-    maxTokens: 8192,
+    maxTokens: 16384, // Increased from 8192 to allow full discharge analysis
   },
 
   // === HUGGING FACE MODELS (requires HF_API_KEY) ===
@@ -379,7 +379,7 @@ export class LLMProvider {
       );
 
       if (isTimeout) {
-        console.error(`[LLM] Request to ${this.config.provider}/${this.config.modelId} timed out after 30s`);
+        console.error(`[LLM] Request to ${this.config.provider}/${this.config.modelId} timed out after 90s`);
         // Log to Opik before throwing — wrapped to prevent Opik errors from crashing server
         try {
           if (llmSpan) {
@@ -393,7 +393,7 @@ export class LLMProvider {
         } catch (opikError) {
           console.error("[Opik] Failed to log timeout trace (non-fatal):", opikError);
         }
-        throw new Error(`Request to ${this.config.provider}/${this.config.modelId} timed out after 30s. The model may be overloaded — try again or switch models.`);
+        throw new Error(`Request to ${this.config.provider}/${this.config.modelId} timed out after 90s. The model may be overloaded — try again or switch models.`);
       }
 
       // Check for rate limit / quota errors
@@ -540,7 +540,7 @@ export class LLMProvider {
       },
       ...(systemPrompt ? { systemInstruction: systemPrompt } : {}),
     }, {
-      timeout: 30_000, // 30s timeout — prevents server hang
+      timeout: 90_000, // 90s timeout — prevents server hang
     });
 
     const result = await model.generateContent(prompt);
@@ -576,7 +576,7 @@ export class LLMProvider {
     const endpoint = "https://router.huggingface.co/v1/chat/completions";
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+    const timeoutId = setTimeout(() => controller.abort(), 90_000);
 
     // Qwen3 models default to thinking mode which wastes tokens on <think> blocks.
     // Append /no_think to disable thinking when we need structured JSON output.
@@ -656,7 +656,7 @@ export class LLMProvider {
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+    const timeoutId = setTimeout(() => controller.abort(), 90_000);
 
     // Build messages array with optional system message
     const oaiMessages: Array<{ role: string; content: string }> = [];
@@ -730,7 +730,7 @@ export class LLMProvider {
     tokenUsage?: LLMResponse["tokenUsage"];
   }> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+    const timeoutId = setTimeout(() => controller.abort(), 90_000);
 
     // Anthropic uses a top-level `system` param for system messages
     const anthropicBody: Record<string, unknown> = {

@@ -58,12 +58,12 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     grade: "A",
     applicableConditions: ["I50", "heart failure"],
     check: (patient) => {
-      const hasHeartFailure = patient.diagnoses.some(
+      const hasHeartFailure = patient.diagnoses?.some(
         (d) => d.code.startsWith("I50") || d.display.toLowerCase().includes("heart failure")
       );
       if (!hasHeartFailure) return "not_applicable";
 
-      const hasACEorARB = patient.medications.some((m) => {
+      const hasACEorARB = patient.medications?.some((m) => {
         const name = m.name.toLowerCase();
         return (
           name.includes("lisinopril") ||
@@ -86,12 +86,12 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     grade: "A",
     applicableConditions: ["I50", "heart failure"],
     check: (patient) => {
-      const hasHeartFailure = patient.diagnoses.some(
+      const hasHeartFailure = patient.diagnoses?.some(
         (d) => d.code.startsWith("I50") || d.display.toLowerCase().includes("heart failure")
       );
       if (!hasHeartFailure) return "not_applicable";
 
-      const hasBetaBlocker = patient.medications.some((m) => {
+      const hasBetaBlocker = patient.medications?.some((m) => {
         const name = m.name.toLowerCase();
         return (
           name.includes("carvedilol") ||
@@ -113,7 +113,7 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     grade: "A",
     applicableConditions: ["E11", "diabetes"],
     check: (patient) => {
-      const hasDiabetes = patient.diagnoses.some(
+      const hasDiabetes = patient.diagnoses?.some(
         (d) => d.code.startsWith("E11") || d.display.toLowerCase().includes("diabetes")
       );
       if (!hasDiabetes) return "not_applicable";
@@ -136,12 +136,12 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     minAge: 40,
     maxAge: 75,
     check: (patient) => {
-      const hasDiabetes = patient.diagnoses.some(
+      const hasDiabetes = patient.diagnoses?.some(
         (d) => d.code.startsWith("E11") || d.display.toLowerCase().includes("diabetes")
       );
       if (!hasDiabetes || patient.age < 40 || patient.age > 75) return "not_applicable";
 
-      const hasStatin = patient.medications.some((m) => {
+      const hasStatin = patient.medications?.some((m) => {
         const name = m.name.toLowerCase();
         return (
           name.includes("statin") ||
@@ -165,12 +165,12 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     grade: "A",
     applicableConditions: ["I48", "atrial fibrillation", "afib"],
     check: (patient) => {
-      const hasAfib = patient.diagnoses.some(
+      const hasAfib = patient.diagnoses?.some(
         (d) => d.code.startsWith("I48") || d.display.toLowerCase().includes("atrial fibrillation")
       );
       if (!hasAfib) return "not_applicable";
 
-      const hasAnticoag = patient.medications.some((m) => {
+      const hasAnticoag = patient.medications?.some((m) => {
         const name = m.name.toLowerCase();
         return (
           name.includes("warfarin") ||
@@ -195,7 +195,7 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     applicableConditions: ["atrial fibrillation", "I48"],
     applicableMedications: ["warfarin"],
     check: (patient) => {
-      const onWarfarin = patient.medications.some((m) =>
+      const onWarfarin = patient.medications?.some((m) =>
         m.name.toLowerCase().includes("warfarin")
       );
       if (!onWarfarin) return "not_applicable";
@@ -218,12 +218,12 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     grade: "A",
     applicableConditions: ["J44", "copd", "chronic obstructive"],
     check: (patient) => {
-      const hasCOPD = patient.diagnoses.some(
+      const hasCOPD = patient.diagnoses?.some(
         (d) => d.code.startsWith("J44") || d.display.toLowerCase().includes("copd")
       );
       if (!hasCOPD) return "not_applicable";
 
-      const hasInhaler = patient.medications.some((m) => {
+      const hasInhaler = patient.medications?.some((m) => {
         const name = m.name.toLowerCase();
         return (
           name.includes("albuterol") ||
@@ -248,7 +248,7 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     grade: "A",
     applicableConditions: ["I10", "hypertension"],
     check: (patient) => {
-      const hasHTN = patient.diagnoses.some(
+      const hasHTN = patient.diagnoses?.some(
         (d) => d.code.startsWith("I10") || d.display.toLowerCase().includes("hypertension")
       );
       if (!hasHTN) return "not_applicable";
@@ -286,7 +286,7 @@ const CLINICAL_GUIDELINES: GuidelineRule[] = [
     applicableConditions: [],
     check: (patient) => {
       // If patient has medications documented, assume reconciliation started
-      return patient.medications.length > 0 ? "met" : "unmet";
+      return patient.medications?.length ?? 0 > 0 ? "met" : "unmet";
     },
     recommendation: "Complete medication reconciliation comparing admission, inpatient, and discharge medications.",
     evidence: "Reduces medication errors and adverse drug events post-discharge",

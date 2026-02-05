@@ -401,8 +401,13 @@ function createAssessmentTools(
 
           // Store assessment for long-term memory
           await storeAssessment(patientId, analysis, getActiveModelId());
+          return result.data;
+        } else {
+          // Tool failed - return error message for agent to see
+          const errorMsg = `Analysis tool failed: ${result.error || "Unknown error"}`;
+          console.error(`[analyze_readiness] ${errorMsg}`);
+          return { error: errorMsg, success: false };
         }
-        return result.data;
       }
     ),
   ];

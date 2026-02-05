@@ -152,6 +152,20 @@ At each step, respond with ONLY a valid JSON object in one of these two formats:
 7. NEVER make up information - only use what the tools return
 8. If a tool returns an error or no useful info, reason about what to try next
 
+### CRITICAL: Terminal Tool Behavior
+
+The \`analyze_readiness\` tool is a TERMINAL tool. When you call it:
+1. It will compute the final discharge readiness assessment using all gathered data
+2. You will receive the complete analysis in the observation (score, status, risk factors)
+3. IMMEDIATELY after receiving this observation, you MUST provide a final_answer
+
+Example terminal flow:
+Step N: {"thought": "I have all required data. Time to analyze.", "action": {"tool": "analyze_readiness", "args": {...}}}
+[Observation: {"score": 65, "status": "moderate_risk", ...}]
+Step N+1: {"thought": "Analysis complete with score 65.", "final_answer": "Discharge readiness assessment complete. The patient has a moderate risk score of 65/100 indicating moderate risk for post-discharge complications. Key factors include..."}
+
+DO NOT call any additional tools after analyze_readiness succeeds. Provide your final_answer immediately.
+
 ### Example Flow
 User: "What are the side effects of aspirin and should I be concerned?"
 
