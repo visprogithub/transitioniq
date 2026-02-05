@@ -183,13 +183,21 @@ function parseReActResponse(content: string): {
     const parsed = extractJsonObject<{
       thought?: string;
       action?: { tool: string; args: Record<string, unknown> };
-      final_answer?: string;
+      final_answer?: string | object;
     }>(cleanContent);
+
+    // Ensure final_answer is always a string (LLM may return object instead of string)
+    let finalAnswer: string | null = null;
+    if (parsed.final_answer) {
+      finalAnswer = typeof parsed.final_answer === "string"
+        ? parsed.final_answer
+        : JSON.stringify(parsed.final_answer, null, 2);
+    }
 
     return {
       thought: parsed.thought || "Analyzing...",
       action: parsed.action || null,
-      finalAnswer: parsed.final_answer || null,
+      finalAnswer,
     };
   } catch (error) {
     // Return parse error so caller can retry with LLM

@@ -44,6 +44,13 @@ interface PlanSection {
 // Parse the markdown plan into structured sections
 function parsePlan(plan: string): PlanSection[] {
   const sections: PlanSection[] = [];
+
+  // Guard against non-string input (e.g., if API returned object instead of string)
+  if (typeof plan !== "string") {
+    console.error("[DischargePlan] Expected string but got:", typeof plan, plan);
+    return sections;
+  }
+
   const lines = plan.split("\n");
 
   let currentSection: PlanSection | null = null;

@@ -361,7 +361,10 @@ export default function DashboardPage() {
       }
 
       if (!response.ok) throw new Error(data.error || "Plan generation failed");
-      setDischargePlan(data.plan);
+
+      // Ensure plan is a string (ReAct may return object if JSON parsing issue)
+      const plan = typeof data.plan === "string" ? data.plan : JSON.stringify(data.plan, null, 2);
+      setDischargePlan(plan);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Plan generation failed");
     } finally {

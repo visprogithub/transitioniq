@@ -109,15 +109,22 @@ Critically evaluate the assessment for safety, accuracy, actionability, and comp
 
 IMPORTANT: You are verifying against REAL external FDA/RxNorm APIs, not static data. The FDA data is authoritative.
 
-## Output Format
-Your final answer MUST be a JSON object with this exact structure:
+## Output Format - CRITICAL
+When you have gathered enough information from the tools, respond with a ReAct final answer containing ONLY the evaluation JSON object.
+
+Your final_answer MUST be EXACTLY this JSON structure (no additional text):
 {
-  "safety": {"score": 0.0-1.0, "reasoning": "explanation"},
-  "accuracy": {"score": 0.0-1.0, "reasoning": "explanation"},
-  "actionability": {"score": 0.0-1.0, "reasoning": "explanation"},
-  "completeness": {"score": 0.0-1.0, "reasoning": "explanation"},
-  "summary": "Overall assessment summary"
+  "safety": {"score": 0.85, "reasoning": "Your specific reasoning about safety..."},
+  "accuracy": {"score": 0.75, "reasoning": "Your specific reasoning about accuracy..."},
+  "actionability": {"score": 0.80, "reasoning": "Your specific reasoning about actionability..."},
+  "completeness": {"score": 0.70, "reasoning": "Your specific reasoning about completeness..."},
+  "summary": "One sentence overall assessment"
 }
+
+IMPORTANT:
+- Scores must be decimal numbers between 0.0 and 1.0 (e.g., 0.85 not 85%)
+- Each reasoning must be a specific explanation, not generic text
+- The final_answer field must contain ONLY this JSON, no other text
 
 Be CRITICAL but fair. Deduct points for missed risks or inaccuracies.`;
 }
@@ -498,17 +505,17 @@ export async function evaluateWithLLMJudge(
 
     // Run the ReAct judge loop
     const reactResult = await runReActLoop(
-      `Please evaluate this discharge assessment. First verify the claims using the available tools, then provide your evaluation scores.
+      `Evaluate this discharge assessment. Use the available tools to verify claims, then provide evaluation scores.
 
 ${context}
 
-Remember to:
-1. Verify drug interactions - check if any were missed
-2. Check medication coverage
-3. Validate risk factor severities
-4. Check guideline compliance for the patient's conditions
+Steps:
+1. Call verify_drug_interactions_fda to check for missed interactions
+2. Call check_medication_coverage to verify all meds were considered
+3. Call check_boxed_warnings if high-risk medications are present
+4. After gathering evidence, provide your final_answer as ONLY this JSON object:
 
-Then provide your final evaluation as a JSON object.`,
+{"safety":{"score":0.0-1.0,"reasoning":"..."},"accuracy":{"score":0.0-1.0,"reasoning":"..."},"actionability":{"score":0.0-1.0,"reasoning":"..."},"completeness":{"score":0.0-1.0,"reasoning":"..."},"summary":"..."}`,
       {
         systemPrompt: buildJudgeSystemPrompt(),
         tools,
@@ -530,16 +537,51 @@ Then provide your final evaluation as a JSON object.`,
       summary: string;
     };
 
+    // Ensure answer is a string before processing
+    const answerStr = typeof reactResult.answer === "string"
+      ? reactResult.answer
+      : JSON.stringify(reactResult.answer);
+
+    console.log(`[LLM Judge] ReAct completed in ${reactResult.iterations} iterations, tools: ${reactResult.toolsUsed.join(", ")}`);
+    console.log(`[LLM Judge] Answer (first 500 chars): ${answerStr.slice(0, 500)}`);
+
     try {
-      judgeResult = extractJsonObject(reactResult.answer);
+      const parsed = extractJsonObject<Record<string, unknown>>(answerStr);
+
+      // Validate that the parsed object has the expected structure
+      // LLM might return the scores nested differently or with different keys
+      const safetyData = (parsed.safety as JudgeScore | undefined) || (parsed.Safety as JudgeScore | undefined);
+      const accuracyData = (parsed.accuracy as JudgeScore | undefined) || (parsed.Accuracy as JudgeScore | undefined);
+      const actionabilityData = (parsed.actionability as JudgeScore | undefined) || (parsed.Actionability as JudgeScore | undefined);
+      const completenessData = (parsed.completeness as JudgeScore | undefined) || (parsed.Completeness as JudgeScore | undefined);
+
+      // Check if we got at least one valid dimension
+      const hasValidData = safetyData?.score !== undefined ||
+                           accuracyData?.score !== undefined ||
+                           actionabilityData?.score !== undefined ||
+                           completenessData?.score !== undefined;
+
+      if (!hasValidData) {
+        console.warn(`[LLM Judge] Parsed JSON but missing expected dimensions. Keys: ${Object.keys(parsed).join(", ")}`);
+        console.warn(`[LLM Judge] Raw answer: ${answerStr.slice(0, 500)}`);
+      }
+
+      judgeResult = {
+        safety: safetyData || { score: 0.5, reasoning: "Unable to extract safety evaluation from LLM response" },
+        accuracy: accuracyData || { score: 0.5, reasoning: "Unable to extract accuracy evaluation from LLM response" },
+        actionability: actionabilityData || { score: 0.5, reasoning: "Unable to extract actionability evaluation from LLM response" },
+        completeness: completenessData || { score: 0.5, reasoning: "Unable to extract completeness evaluation from LLM response" },
+        summary: (parsed.summary as string) || "Evaluation completed",
+      };
     } catch (parseError) {
-      console.error(`[LLM Judge] JSON parse failed, using defaults. Raw: ${reactResult.answer.slice(0, 300)}`);
+      const rawPreview = typeof answerStr === "string" ? answerStr.slice(0, 300) : String(answerStr);
+      console.error(`[LLM Judge] JSON parse failed, using defaults. Raw: ${rawPreview}`);
       // Provide reasonable defaults if parsing fails
       judgeResult = {
-        safety: { score: 0.5, reasoning: "Unable to fully evaluate safety" },
-        accuracy: { score: 0.5, reasoning: "Unable to fully evaluate accuracy" },
-        actionability: { score: 0.5, reasoning: "Unable to fully evaluate actionability" },
-        completeness: { score: 0.5, reasoning: "Unable to fully evaluate completeness" },
+        safety: { score: 0.5, reasoning: "Unable to fully evaluate safety - JSON parse error" },
+        accuracy: { score: 0.5, reasoning: "Unable to fully evaluate accuracy - JSON parse error" },
+        actionability: { score: 0.5, reasoning: "Unable to fully evaluate actionability - JSON parse error" },
+        completeness: { score: 0.5, reasoning: "Unable to fully evaluate completeness - JSON parse error" },
         summary: "Evaluation completed with parsing issues - scores may be approximate",
       };
     }

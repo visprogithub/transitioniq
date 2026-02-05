@@ -54,7 +54,7 @@ ${analysis.riskFactors.map((rf) => `- [${rf.severity.toUpperCase()}] ${rf.title}
 4. Generate a comprehensive, actionable discharge plan
 
 ## Plan Requirements
-Your final plan MUST include:
+Your final plan MUST include these sections:
 1. HIGH PRIORITY items that must be addressed before discharge
 2. MEDICATION instructions with specific timing and warnings
 3. FOLLOW-UP appointments with timeframes
@@ -62,7 +62,32 @@ Your final plan MUST include:
 5. ACTIVITY RESTRICTIONS specific to their conditions
 6. DIETARY guidelines if applicable
 
-Make the plan specific to THIS patient - not generic boilerplate.`;
+## OUTPUT FORMAT - CRITICAL
+Your final_answer MUST be a MARKDOWN CHECKLIST, not JSON. Use this exact format:
+
+**High Priority - Must Complete Before Discharge**
+- [ ] First high priority item
+- [ ] Second high priority item
+
+**Medication Instructions**
+- [ ] Furosemide 80mg: Take in the morning. Watch for low potassium.
+- [ ] Lisinopril 10mg: Take in the morning. May cause dry cough.
+
+**Follow-Up Appointments**
+- [ ] Cardiology within 7 days
+- [ ] Primary care within 14 days
+
+**Warning Signs - Seek Immediate Care If**
+- [ ] Shortness of breath or chest pain
+- [ ] Sudden weight gain of 2-3 lbs
+
+**Activity Restrictions**
+- [ ] Limit to light activity for first week
+
+**Dietary Guidelines**
+- [ ] Low sodium diet (under 2000mg/day)
+
+IMPORTANT: Output ONLY the markdown checklist. NO JSON. Each section uses **Bold Headers** and - [ ] checkbox items.`;
 }
 
 /**
