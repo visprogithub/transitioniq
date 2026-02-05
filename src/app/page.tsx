@@ -699,6 +699,14 @@ export default function DashboardPage() {
                     setPlanRateLimitReset(null);
                     setJudgeEvaluation(null);
                     setJudgeError(null);
+
+                    // Clear plan streaming state to remove stale thinking steps UI
+                    setPlanStreamingSteps([]);
+                    setPlanStreamingError(null);
+
+                    // Clear analysis streaming state for consistency
+                    setAnalysisStreamingSteps([]);
+                    setAnalysisStreamingError(null);
                   }
                 }}
               />}
