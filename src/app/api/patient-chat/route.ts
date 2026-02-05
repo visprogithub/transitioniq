@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import { getOpikClient, traceError, flushTraces } from "@/lib/integrations/opik";
+import { applyInputGuardrails, applyOutputGuardrails } from "@/lib/guardrails";
 import { getPatient } from "@/lib/data/demo-patients";
 import {
   runReActLoop,
@@ -42,7 +43,7 @@ import type { DischargeAnalysis } from "@/lib/types/analysis";
  */
 const LIMITS = {
   MAX_HISTORY_MESSAGES: 10,
-  MAX_REACT_ITERATIONS: 6,
+  MAX_REACT_ITERATIONS: 12, // Increased from 6 to allow agent to properly use tool results
   MAX_CONVERSATION_TURNS: 15,
   MIN_REQUEST_INTERVAL_MS: 500,
 };
@@ -129,6 +130,37 @@ Adjust your language based on the patient's age:
 - Adults: Clear plain language, brief medical term explanations
 - Seniors (65+): Patient, clear steps, involve family when helpful
 - Elderly (80+): Short focused explanations, repeat key points
+
+## How to Synthesize Tool Results
+
+Tools return RAW DATA (JSON with lists, medical terms, numbers). Your job is to transform this into helpful patient responses:
+
+1. **Transform to patient-friendly language:**
+   - Medical: "Myocardial infarction" → "heart attack"
+   - Foods: ["salmon", "quinoa"] → "**grilled salmon** (omega-3s help your heart) and **quinoa** (protein without salt)"
+
+2. **Personalize for THIS ${patient.age} year old:**
+   - Reference their age: "At ${patient.age}, gentle activities like..."
+   - Mention conditions: "For your [condition], try..."
+   - Note medications: "Since you take [med], watch for..."
+
+3. **Format with markdown:**
+   - **bold** for food names, medications, timeframes, warning signs
+   - Line breaks between suggestions
+   - Short paragraphs (2-3 sentences)
+
+4. **Synthesize multiple tools together:**
+   If you called both dietary + medication tools: "For your heart failure (medication tool), try **salmon** (dietary tool) but avoid **grapefruit** (interacts with Lipitor)."
+
+5. **Keep it concise:**
+   - Under 150 words
+   - Answer their specific question
+   - Give 3-5 actionable items
+
+**Example:**
+Tool: {suggestedFoods: ["salmon", "quinoa"], patientAge: 68, conditions: ["heart failure"]}
+❌ BAD: "The tool suggests salmon and quinoa."
+✅ GOOD: "For your heart failure, try **grilled salmon** 2-3x weekly (omega-3s reduce inflammation) and **quinoa** instead of rice (protein without sodium). At 68, these gentle foods support your heart health."
 
 ## Important Guardrails
 NEVER:
@@ -275,14 +307,36 @@ export async function POST(request: NextRequest) {
     }
     addConversationTurn(memorySessionId, { role: "user", content: message });
 
+    // Apply PII guardrails to user input BEFORE processing
+    const inputGuardrail = applyInputGuardrails(message, {
+      sanitizePII: true,
+      usePlaceholders: true,
+      blockCriticalPII: true,
+      logToOpik: true,
+      traceName: "guardrail-patient-chat-input",
+    });
+
+    if (inputGuardrail.wasBlocked) {
+      return NextResponse.json(
+        {
+          response: "I cannot process that message as it contains sensitive personal information. Please rephrase without including SSN, credit card numbers, or other private details.",
+          blocked: true,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Use sanitized message for all further processing
+    const sanitizedMessage = inputGuardrail.output;
+
     // Build context
     const conversationContext = buildConversationContext(conversationHistory, LIMITS.MAX_HISTORY_MESSAGES);
     const memoryContext = buildContextForLLM(memorySessionId);
 
-    // Build the user message with context
-    let userMessage = message;
+    // Build the user message with context (using sanitized message)
+    let userMessage = sanitizedMessage;
     if (conversationContext || memoryContext) {
-      userMessage = `${memoryContext ? `## Memory Context\n${memoryContext}\n\n` : ""}${conversationContext ? `${conversationContext}\n\n` : ""}## Current Question\nPatient: ${message}`;
+      userMessage = `${memoryContext ? `## Memory Context\n${memoryContext}\n\n` : ""}${conversationContext ? `${conversationContext}\n\n` : ""}## Current Question\nPatient: ${sanitizedMessage}`;
     }
 
     trace?.update({
@@ -337,6 +391,16 @@ export async function POST(request: NextRequest) {
     // Non-streaming path: Run the ReAct loop and return JSON
     const reactResult = await runReActLoop(userMessage, reactOptions);
 
+    // Apply PII guardrails to output BEFORE returning to user
+    const outputGuardrail = applyOutputGuardrails(reactResult.answer, {
+      sanitizePII: true,
+      usePlaceholders: true,
+      logToOpik: true,
+      traceName: "guardrail-patient-chat-output",
+    });
+
+    const sanitizedAnswer = outputGuardrail.output;
+
     // Extract tools used
     const toolsUsed: Array<{ name: string; result: unknown }> = reactResult.steps
       .filter((s) => s.action && s.observation)
@@ -345,10 +409,10 @@ export async function POST(request: NextRequest) {
         result: s.observation ? JSON.parse(s.observation) : null,
       }));
 
-    // Store assistant response in memory
+    // Store sanitized assistant response in memory
     addConversationTurn(memorySessionId, {
       role: "assistant",
-      content: reactResult.answer,
+      content: sanitizedAnswer,
       metadata: {
         toolCalls: toolsUsed.map((t) => ({ tool: t.name, success: true })),
         model: getActiveModelId(),
@@ -357,7 +421,7 @@ export async function POST(request: NextRequest) {
     });
 
     const responseData: PatientChatResponse = {
-      response: reactResult.answer,
+      response: sanitizedAnswer,  // Use sanitized output
       toolsUsed,
       conversationId: turnId,
       turnNumber,

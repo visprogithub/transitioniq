@@ -689,12 +689,25 @@ export class LLMProvider {
 
     if (!response.ok) {
       const error = await response.text();
+      console.error(`[LLM] OpenAI API error ${response.status}:`, error);
       throw new Error(`OpenAI API error: ${response.status} - ${error}`);
     }
 
     const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || "";
+
+    // Debug log for OpenAI response structure
+    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+      console.error(`[LLM] OpenAI response missing expected structure:`, JSON.stringify(data).slice(0, 500));
+      throw new Error(`OpenAI returned unexpected response format`);
+    }
+
+    const content = data.choices[0].message.content || "";
     const usage = data.usage;
+
+    // Warn if content is empty
+    if (!content || content.trim().length === 0) {
+      console.warn(`[LLM] OpenAI returned empty content for model ${this.config.modelId}`);
+    }
 
     return {
       content,

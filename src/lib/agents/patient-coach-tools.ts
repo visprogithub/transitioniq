@@ -40,140 +40,99 @@ import {
   getFoodGuidanceForPatient,
 } from "@/lib/integrations/food-drug-interactions";
 import {
-  getPreventiveRecommendations,
-  identifyPreventiveCareGaps,
-} from "@/lib/integrations/myhealthfinder-client";
+  evaluateCareGaps,
+  getUnmetCareGaps,
+} from "@/lib/integrations/guidelines-client";
 
 /**
- * LLM filter to make external API content patient-friendly and contextual
- * This ensures all medical information is:
- * 1. Written in plain language (6th grade reading level)
- * 2. Contextualized to the patient's specific situation
- * 3. Concise and actionable
- * 4. Safe (with appropriate disclaimers)
+ * SHARED UTILITIES - Extract patient context once, reuse everywhere
  */
-async function makePatientFriendly(
-  content: string,
-  context: {
-    contentType: "medication" | "symptom" | "dietary" | "preventive_care" | "medical_term";
-    patientContext?: {
-      age?: number;
-      conditions?: string[];
-      medications?: string[];
-      recentSurgery?: string;
-    };
-    originalQuery?: string;
-  }
-): Promise<string> {
-  if (!content || content.trim().length === 0) {
-    return content;
-  }
 
-  const llm = createLLMProvider();
-  const patientInfo = context.patientContext
-    ? `Patient: ${context.patientContext.age ? `${context.patientContext.age} years old` : "adult"}${
-        context.patientContext.conditions?.length
-          ? `, conditions: ${context.patientContext.conditions.join(", ")}`
-          : ""
-      }${
-        context.patientContext.medications?.length
-          ? `, taking: ${context.patientContext.medications.join(", ")}`
-          : ""
-      }${context.patientContext.recentSurgery ? `, recent surgery: ${context.patientContext.recentSurgery}` : ""}`
-    : "";
-
-  const contentTypeInstructions: Record<string, string> = {
-    medication: "Focus on what the medication does, key side effects to watch for, and any important warnings. Keep it reassuring but informative.",
-    symptom: "Explain what might cause this, when to be concerned, and what actions to take. Be clear about when to seek emergency care vs. when to call the doctor vs. when to monitor at home.",
-    dietary: "Give practical, specific food recommendations. Focus on what TO eat (not just restrictions). Make it easy to follow with everyday foods.",
-    preventive_care: "Explain why this screening/vaccine matters and what to expect. Make it feel manageable, not scary.",
-    medical_term: "Define this in simple terms anyone can understand. Use an analogy if helpful.",
-  };
-
-  const prompt = `You are a patient health educator. Rewrite this medical information to be patient-friendly.
-
-RULES:
-- Use simple, everyday language (6th grade reading level)
-- Keep it concise (max 3-4 short paragraphs)
-- Be warm and reassuring, not clinical
-- ${contentTypeInstructions[context.contentType] || "Make it easy to understand and actionable."}
-- If the original mentions specific foods, activities, or medications, keep those specifics
-- DO NOT add medical disclaimers or "consult your doctor" unless safety-critical
-- DO NOT use bullet points or markdown formatting - write in natural sentences
-${patientInfo ? `- Personalize for this patient: ${patientInfo}` : ""}
-${context.originalQuery ? `- The patient asked about: "${context.originalQuery}"` : ""}
-
-ORIGINAL CONTENT:
-${content.slice(0, 2000)}
-
-REWRITTEN (patient-friendly):`;
-
-  try {
-    const response = await llm.generate(prompt);
-    const text = response.content?.trim();
-    if (text && text.length > 20) {
-      return text;
-    }
-  } catch (error) {
-    console.error("[makePatientFriendly] LLM filtering failed:", error);
-  }
-
-  // Fallback: return truncated original if LLM fails
-  return content.length > 500 ? content.slice(0, 497) + "..." : content;
+interface PatientContext {
+  age: number;
+  conditions: string[];
+  medications: string[];
+  recentSurgery?: string;
 }
 
 /**
- * Filter a list of items through LLM to make them patient-friendly
+ * Extract patient context once to avoid repetition in every tool
  */
-async function makeListPatientFriendly(
-  items: string[],
-  context: {
-    listType: "foods_to_eat" | "foods_to_avoid" | "tips" | "warnings" | "recommendations";
-    patientContext?: {
-      age?: number;
-      conditions?: string[];
-      recentSurgery?: string;
-    };
-  }
-): Promise<string[]> {
-  if (!items || items.length === 0) return items;
-
-  const llm = createLLMProvider();
-  const listTypeInstructions: Record<string, string> = {
-    foods_to_eat: "Make these sound appealing and doable. Add brief reasons why each is good.",
-    foods_to_avoid: "Explain briefly why to avoid each. Don't be scary, be practical.",
-    tips: "Make these actionable and specific. Start each with a verb.",
-    warnings: "Be clear but not alarmist. Focus on what to DO, not just what's bad.",
-    recommendations: "Prioritize by importance. Make each one feel achievable.",
+function extractPatientContext(patient: Patient): PatientContext {
+  return {
+    age: patient.age,
+    conditions: patient.diagnoses.map((d) => d.display),
+    medications: patient.medications.map((m) => m.name),
+    recentSurgery: patient.diagnoses.find((d) =>
+      d.display.toLowerCase().includes("surgery") ||
+      d.display.toLowerCase().includes("surgical") ||
+      d.display.toLowerCase().includes("ectomy")
+    )?.display,
   };
+}
 
-  const prompt = `Rewrite these medical recommendations to be patient-friendly and personalized.
-
-RULES:
-- Simple, everyday language
-- Keep each item to 1 sentence (max 15 words)
-- ${listTypeInstructions[context.listType] || "Make practical and easy to follow."}
-- Return ONLY a JSON array of strings, nothing else
-${context.patientContext?.recentSurgery ? `- Patient recently had: ${context.patientContext.recentSurgery}` : ""}
-${context.patientContext?.age ? `- Patient age: ${context.patientContext.age}` : ""}
-
-ORIGINAL LIST:
-${JSON.stringify(items.slice(0, 10))}
-
-REWRITTEN (JSON array only):`;
-
-  try {
-    const response = await llm.generate(prompt);
-    const text = response.content?.trim();
-    const parsed = extractJsonObject(text || "");
-    if (Array.isArray(parsed)) {
-      return parsed.map(String);
+/**
+ * Unified fallback handler - replaces triple-fallback pattern in every tool
+ * Tries in order: local KB → external API → LLM generation → hardcoded fallback
+ */
+async function executeWithFallback<T>(config: {
+  toolName: string;
+  localLookup?: () => T | null;
+  apiLookup?: () => Promise<T | null>;
+  llmPrompt?: string;
+  llmMetadata?: Record<string, unknown>;
+  hardcodedFallback: T;
+}): Promise<T> {
+  // Try local knowledge base first (fastest, no network)
+  if (config.localLookup) {
+    try {
+      const local = config.localLookup();
+      if (local) {
+        console.log(`[${config.toolName}] Found in local knowledge base`);
+        return local;
+      }
+    } catch (error) {
+      console.error(`[${config.toolName}] Local lookup failed:`, error);
     }
-  } catch (error) {
-    console.error("[makeListPatientFriendly] LLM filtering failed:", error);
   }
 
-  return items; // Fallback to original
+  // Try external API
+  if (config.apiLookup) {
+    try {
+      const api = await config.apiLookup();
+      if (api) {
+        console.log(`[${config.toolName}] Found via external API`);
+        return api;
+      }
+    } catch (error) {
+      console.error(`[${config.toolName}] API lookup failed:`, error);
+    }
+  }
+
+  // Try LLM generation
+  if (config.llmPrompt) {
+    try {
+      console.log(`[${config.toolName}] Using LLM fallback`);
+      const llm = createLLMProvider();
+      const response = await llm.generate(config.llmPrompt, {
+        spanName: `${config.toolName}-llm`,
+        metadata: { fallback: true, ...config.llmMetadata },
+      });
+      const parsed = extractJsonObject<T>(response.content);
+      // Check if LLM returned an error marker
+      if (parsed && typeof parsed === "object" && "error" in parsed) {
+        console.log(`[${config.toolName}] LLM returned error, using hardcoded fallback`);
+        return config.hardcodedFallback;
+      }
+      return parsed as T;
+    } catch (error) {
+      console.error(`[${config.toolName}] LLM fallback failed:`, error);
+    }
+  }
+
+  // Final hardcoded fallback
+  console.log(`[${config.toolName}] Using hardcoded fallback`);
+  return config.hardcodedFallback;
 }
 
 export interface PatientCoachToolDefinition {
@@ -395,7 +354,7 @@ export async function executePatientCoachTool(
 }
 
 /**
- * Look up medication information
+ * Look up medication information (REFACTORED - using shared utilities)
  * Priority order:
  * 1. Local knowledge base (FDB-style, fast, always available)
  * 2. FDA DailyMed API (real drug labels)
@@ -406,6 +365,7 @@ async function executeLookupMedication(
   patient: Patient
 ): Promise<ToolCallResult> {
   const normalizedName = medicationName.toLowerCase().trim();
+  const patientContext = extractPatientContext(patient);
 
   // Check if patient is actually taking this medication
   const patientMed = patient.medications.find(
@@ -414,12 +374,8 @@ async function executeLookupMedication(
       normalizedName.includes(m.name.toLowerCase())
   );
 
-  // STEP 1: Try local knowledge base first (fastest, no network)
-  const kbInfo = getPatientDrugInfo(normalizedName);
-  if (kbInfo) {
-    console.log(`[Patient Coach] Found ${medicationName} in local knowledge base`);
-
-    // Also check for drug interactions with patient's other medications
+  // Helper to check drug interactions (used by local KB path)
+  const getInteractionWarnings = () => {
     const allMeds = [
       normalizedName,
       ...patient.medications
@@ -427,82 +383,58 @@ async function executeLookupMedication(
         .map((m) => m.name),
     ];
     const interactions = checkMultipleDrugInteractions(allMeds);
-    const interactionWarnings = interactions.map((i) => getPatientFriendlyInteraction(i));
+    return interactions.map((i) => getPatientFriendlyInteraction(i));
+  };
 
-    return {
-      toolName: "lookupMedication",
-      result: {
-        medicationName,
-        isPatientMedication: !!patientMed,
-        patientDose: patientMed?.dose,
-        patientFrequency: patientMed?.frequency,
-        purpose: kbInfo.purpose,
-        sideEffects: kbInfo.sideEffects,
-        warnings: [
-          ...kbInfo.warnings,
-          ...interactionWarnings.map((iw) => `${iw.severity}: ${iw.message}`),
-        ],
-        patientTips: kbInfo.patientTips,
-        interactions: interactionWarnings.length > 0 ? interactionWarnings : undefined,
-        source: "KNOWLEDGE_BASE",
-      },
-      success: true,
-    };
+  // Define medication info interface
+  interface MedicationInfo {
+    purpose: string;
+    sideEffects: string[];
+    warnings: string[];
+    patientTips: string[];
+    source: string;
+    interactions?: Array<{ severity: string; message: string }>;
   }
 
-  // STEP 2: Try FDA DailyMed API
-  try {
-    console.log(`[Patient Coach] Trying FDA DailyMed for ${medicationName}`);
-    const fdaInfo = await getDailyMedDrugInfo(medicationName);
-    if (fdaInfo) {
-      // Filter through LLM for patient-friendly language
-      const patientContext = {
-        age: patient.age,
-        conditions: patient.diagnoses.map((d) => d.display),
-        medications: patient.medications.map((m) => m.name),
-      };
-
-      const [friendlyPurpose, friendlySideEffects, friendlyWarnings] = await Promise.all([
-        makePatientFriendly(fdaInfo.purpose, {
-          contentType: "medication",
-          patientContext,
-          originalQuery: medicationName,
-        }),
-        makeListPatientFriendly(fdaInfo.sideEffects.slice(0, 5), {
-          listType: "warnings",
-          patientContext,
-        }),
-        makeListPatientFriendly(fdaInfo.warnings.slice(0, 3), {
-          listType: "warnings",
-          patientContext,
-        }),
-      ]);
-
-      return {
-        toolName: "lookupMedication",
-        result: {
-          medicationName,
-          isPatientMedication: !!patientMed,
-          patientDose: patientMed?.dose,
-          patientFrequency: patientMed?.frequency,
-          purpose: friendlyPurpose,
-          sideEffects: friendlySideEffects,
-          warnings: friendlyWarnings.map((w) => `⚠️ ${w}`),
+  // Use unified fallback handler
+  const medicationInfo = await executeWithFallback<MedicationInfo>({
+    toolName: "lookupMedication",
+    // Local KB lookup
+    localLookup: () => {
+      const kbInfo = getPatientDrugInfo(normalizedName);
+      if (kbInfo) {
+        const interactionWarnings = getInteractionWarnings();
+        return {
+          purpose: kbInfo.purpose,
+          sideEffects: kbInfo.sideEffects,
+          warnings: [
+            ...kbInfo.warnings,
+            ...interactionWarnings.map((iw) => `${iw.severity}: ${iw.message}`),
+          ],
+          patientTips: kbInfo.patientTips,
+          interactions: interactionWarnings.length > 0 ? interactionWarnings : undefined,
+          source: "KNOWLEDGE_BASE",
+        };
+      }
+      return null;
+    },
+    // FDA API lookup
+    apiLookup: async () => {
+      const fdaInfo = await getDailyMedDrugInfo(medicationName);
+      if (fdaInfo) {
+        // Return raw FDA data - no LLM formatting
+        return {
+          purpose: fdaInfo.purpose,
+          sideEffects: fdaInfo.sideEffects.slice(0, 5),
+          warnings: fdaInfo.warnings.slice(0, 3),
           patientTips: fdaInfo.patientTips,
           source: "FDA_DAILYMED",
-        },
-        success: true,
-      };
-    }
-  } catch (error) {
-    console.error("[Patient Coach] FDA DailyMed lookup failed:", error);
-  }
-
-  // STEP 3: Use LLM as final fallback
-  try {
-    console.log(`[Patient Coach] Using LLM fallback for ${medicationName}`);
-    const provider = createLLMProvider();
-    const prompt = `You are a helpful pharmacist assistant. Provide patient-friendly information about the medication "${medicationName}".
+        };
+      }
+      return null;
+    },
+    // LLM fallback
+    llmPrompt: `You are a helpful pharmacist assistant. Provide patient-friendly information about the medication "${medicationName}".
 
 Respond ONLY with a valid JSON object (no other text):
 {
@@ -513,71 +445,10 @@ Respond ONLY with a valid JSON object (no other text):
 }
 
 Use simple, patient-friendly language. If this is not a real medication, respond with:
-{"error": "unknown medication"}`;
-
-    const response = await provider.generate(prompt, {
-      spanName: "medication-lookup-llm",
-      metadata: { medication: medicationName, fallback: true },
-    });
-
-    const parsed = extractJsonObject<{
-      error?: string;
-      purpose?: string;
-      sideEffects?: string[];
-      warnings?: string[];
-      patientTips?: string[];
-    }>(response.content);
-
-    if (parsed.error) {
-      return {
-        toolName: "lookupMedication",
-        result: {
-          medicationName,
-          isPatientMedication: !!patientMed,
-          patientDose: patientMed?.dose,
-          patientFrequency: patientMed?.frequency,
-          purpose: "I don't have specific information about this medication. Please ask your pharmacist or doctor for details.",
-          sideEffects: ["Ask your pharmacist about potential side effects"],
-          warnings: ["⚠️ Always take medications exactly as prescribed"],
-          patientTips: [
-            "Read the information that came with your prescription",
-            "Ask your pharmacist if you have questions",
-          ],
-          source: "FALLBACK",
-        },
-        success: true,
-      };
-    }
-
-    return {
-      toolName: "lookupMedication",
-      result: {
-        medicationName,
-        isPatientMedication: !!patientMed,
-        patientDose: patientMed?.dose,
-        patientFrequency: patientMed?.frequency,
-        purpose: parsed.purpose || "This medication was prescribed by your doctor.",
-        sideEffects: parsed.sideEffects || ["Ask your pharmacist about side effects"],
-        warnings: (parsed.warnings || ["Take exactly as prescribed"]).map((w: string) =>
-          w.startsWith("⚠️") ? w : `⚠️ ${w}`
-        ),
-        patientTips: parsed.patientTips || ["Follow your doctor's instructions"],
-        source: "LLM_GENERATED",
-      },
-      success: true,
-    };
-  } catch (error) {
-    console.error("[Patient Coach] LLM medication lookup failed:", error);
-  }
-
-  // Final fallback if everything fails
-  return {
-    toolName: "lookupMedication",
-    result: {
-      medicationName,
-      isPatientMedication: !!patientMed,
-      patientDose: patientMed?.dose,
-      patientFrequency: patientMed?.frequency,
+{"error": "unknown medication"}`,
+    llmMetadata: { medication: medicationName },
+    // Hardcoded fallback
+    hardcodedFallback: {
       purpose: "This medication was prescribed by your doctor for your specific condition.",
       sideEffects: ["Side effects vary - ask your pharmacist or doctor about common ones"],
       warnings: ["⚠️ Take exactly as prescribed", "⚠️ Don't stop taking without talking to your doctor first"],
@@ -587,6 +458,18 @@ Use simple, patient-friendly language. If this is not a real medication, respond
         "Keep a list of all your medications to show your doctors",
       ],
       source: "FALLBACK",
+    },
+  });
+
+  // Build final result
+  return {
+    toolName: "lookupMedication",
+    result: {
+      medicationName,
+      isPatientMedication: !!patientMed,
+      patientDose: patientMed?.dose,
+      patientFrequency: patientMed?.frequency,
+      ...medicationInfo,
     },
     success: true,
   };
@@ -690,33 +573,16 @@ async function executeCheckSymptom(
     console.log(`[Patient Coach] Trying MedlinePlus for ${symptom}`);
     const medlinePlusInfo = await getPatientSymptomAssessment(symptom, severity as "mild" | "moderate" | "severe");
     if (medlinePlusInfo) {
-      // Filter through LLM for patient-friendly, contextual response
-      const patientContext = {
-        age: patient.age,
-        conditions: patient.diagnoses.map((d) => d.display),
-        medications: patient.medications.map((m) => m.name),
-      };
-
-      const [friendlyMessage, friendlyActions] = await Promise.all([
-        makePatientFriendly(medlinePlusInfo.message + (medlinePlusInfo.medicalInfo ? ` ${medlinePlusInfo.medicalInfo}` : ""), {
-          contentType: "symptom",
-          patientContext,
-          originalQuery: symptom,
-        }),
-        makeListPatientFriendly(medlinePlusInfo.actions, {
-          listType: "recommendations",
-          patientContext,
-        }),
-      ]);
-
+      // Return raw MedlinePlus data - no LLM formatting
       return {
         toolName: "checkSymptom",
         result: {
           symptom,
           severity,
           urgencyLevel: medlinePlusInfo.urgencyLevel,
-          message: friendlyMessage,
-          actions: friendlyActions,
+          clinicalMessage: medlinePlusInfo.message,
+          medicalInfo: medlinePlusInfo.medicalInfo,
+          recommendedActions: medlinePlusInfo.actions,
           possibleMedicationRelated: possibleMedicationCause?.name || null,
           relatedRiskFactors:
             analysis?.riskFactors
@@ -747,23 +613,28 @@ async function executeCheckSymptom(
 
 ${medicationContext}
 
-Provide guidance in JSON format:
-{
-  "urgencyLevel": "emergency" | "call_doctor_today" | "call_doctor_soon" | "monitor",
-  "message": "Brief explanation of this symptom and when to be concerned",
-  "actions": ["Action 1", "Action 2", "Action 3"],
-  "selfCare": ["Self care tip 1", "Self care tip 2"],
-  "possibleMedicationRelated": true | false
-}
-
-Rules:
+CRITICAL RULES:
 - For ANY chest pain, difficulty breathing, or signs of stroke: urgencyLevel = "emergency"
 - For severe pain, high fever, or bleeding: urgencyLevel = "call_doctor_today"
 - Always include appropriate action for emergency situations
 - Use patient-friendly language
 - Consider if the symptom could be a medication side effect
+- Keep response CONCISE: message under 50 words, actions 2-3 items max, selfCare 2-3 items max
 
-Respond ONLY with the JSON object.`;
+URGENCY LEVELS (choose one):
+- "emergency" - Life-threatening, needs 911/ER now
+- "call_doctor_today" - Needs medical attention within 24 hours
+- "call_doctor_soon" - Schedule appointment within a few days
+- "monitor" - Watch for changes, no immediate action needed
+
+Provide guidance in JSON format (respond ONLY with the JSON object):
+{
+  "urgencyLevel": "one of: emergency, call_doctor_today, call_doctor_soon, monitor",
+  "message": "brief 1-2 sentence explanation (under 50 words)",
+  "actions": ["2-3 short action items"],
+  "selfCare": ["2-3 short self-care tips"],
+  "possibleMedicationRelated": true or false
+}`;
 
     const response = await provider.generate(prompt, {
       spanName: "symptom-check-llm",
@@ -922,19 +793,20 @@ PATIENT INFO:
 
 QUESTION: Patient is asking about "${appointmentType}" follow-up appointments.
 
-Provide personalized guidance. Consider:
+YOUR TASK: Provide personalized guidance considering:
 1. Their specific conditions and which specialists they might need
 2. Urgency based on their risk factors
 3. What they should bring and prepare
 4. Any condition-specific follow-up needs (e.g., INR monitoring for warfarin)
+5. Use markdown formatting: **bold** for important terms like timeframes, specialist names, and key actions
 
 Respond in JSON:
 {
-  "timeframe": "When they should schedule (be specific to their conditions)",
-  "importance": "Why this follow-up matters for THEIR specific situation",
-  "tips": ["3-4 personalized, actionable tips"],
-  "specialistsToSee": ["List specific types of doctors they should see based on their conditions"],
-  "questionsToAsk": ["2-3 questions they should ask at their appointment"]
+  "timeframe": "when they should schedule",
+  "importance": "why this matters for their situation",
+  "tips": ["array of 3-4 personalized tips"],
+  "specialistsToSee": ["array of specific doctors they should see"],
+  "questionsToAsk": ["array of 2-3 questions to ask at appointment"]
 }`;
 
     const response = await provider.generate(prompt, {
@@ -978,152 +850,9 @@ Respond in JSON:
   };
 }
 
-/**
- * Generate personalized post-surgical dietary guidance using LLM
- * Takes into account patient age, surgery type, medications, and any API context
- */
-async function generatePostSurgicalDietaryGuidance(
-  surgeryType: string,
-  patient: Patient,
-  topic: string,
-  apiContext: string | undefined,
-  foodDrugInteractions: Array<{ drug: string; food: string; severity: string; recommendation: string }>
-): Promise<{
-  topic: string;
-  surgeryType: string;
-  recommendation: string;
-  goodChoices: string[];
-  avoid: string[];
-  tips: string[];
-  warningSignsToReport: string[];
-} | null> {
-  const llm = createLLMProvider();
-
-  const foodInteractionContext = foodDrugInteractions.length > 0
-    ? `\nIMPORTANT FOOD-DRUG INTERACTIONS for this patient's medications:\n${foodDrugInteractions.map(i => `- ${i.food} with ${i.drug} (${i.severity}): ${i.recommendation}`).join("\n")}`
-    : "";
-
-  const prompt = `You are a pediatric/surgical recovery dietitian. Generate personalized dietary guidance for this patient.
-
-PATIENT:
-- Age: ${patient.age} years old
-- Recent surgery: ${surgeryType}
-- Current medications: ${patient.medications.map(m => m.name).join(", ") || "none listed"}
-- Conditions: ${patient.diagnoses.map(d => d.display).join(", ")}
-${foodInteractionContext}
-
-${apiContext ? `REFERENCE INFORMATION (from medical database):\n${apiContext.slice(0, 1000)}\n` : ""}
-
-PATIENT'S QUESTION: "${topic}"
-
-Generate dietary guidance that is:
-1. AGE-APPROPRIATE (${patient.age} years old - ${patient.age < 12 ? "child-friendly foods and language" : patient.age < 18 ? "teen-appropriate" : "adult"})
-2. SURGERY-SPECIFIC (${surgeryType} recovery needs)
-3. CONSIDERS THEIR MEDICATIONS (avoid foods that interact)
-4. PRACTICAL (everyday foods they can actually find)
-
-Respond with ONLY a valid JSON object (no markdown, no explanation):
-{
-  "recommendation": "A warm, personalized 2-3 sentence overview of what to eat during recovery",
-  "goodChoices": ["5-8 specific foods that are good for THIS patient - be specific, not generic"],
-  "avoid": ["4-6 specific foods/drinks to avoid and brief reason why"],
-  "tips": ["4-5 practical tips for eating during recovery"],
-  "warningSignsToReport": ["3-4 warning signs related to eating/drinking that need medical attention"]
-}`;
-
-  try {
-    console.log(`[generatePostSurgicalDietaryGuidance] Generating personalized guidance for ${patient.age}yo ${surgeryType} patient`);
-    const response = await llm.generate(prompt);
-    const parsed = extractJsonObject(response.content || "");
-
-    if (parsed && typeof parsed === "object" && "recommendation" in parsed) {
-      return {
-        topic,
-        surgeryType,
-        recommendation: String(parsed.recommendation || ""),
-        goodChoices: Array.isArray(parsed.goodChoices) ? parsed.goodChoices.map(String) : [],
-        avoid: Array.isArray(parsed.avoid) ? parsed.avoid.map(String) : [],
-        tips: Array.isArray(parsed.tips) ? parsed.tips.map(String) : [],
-        warningSignsToReport: Array.isArray(parsed.warningSignsToReport) ? parsed.warningSignsToReport.map(String) : [],
-      };
-    }
-  } catch (error) {
-    console.error("[generatePostSurgicalDietaryGuidance] LLM generation failed:", error);
-  }
-
-  return null; // Fallback to hardcoded
-}
-
-/**
- * Generate personalized general dietary guidance using LLM
- * For patients without specific surgical needs but who still need personalized advice
- */
-async function generateGeneralDietaryGuidance(
-  patient: Patient,
-  topic: string,
-  foodDrugInteractions: Array<{ drug: string; food: string; severity: string; recommendation: string; timing?: string }>
-): Promise<{
-  topic: string;
-  recommendation: string;
-  goodChoices: string[];
-  avoid: string[];
-  tips: string[];
-} | null> {
-  const llm = createLLMProvider();
-
-  const foodInteractionContext = foodDrugInteractions.length > 0
-    ? `\nIMPORTANT FOOD-DRUG INTERACTIONS for this patient's medications:\n${foodDrugInteractions.map(i => `- ${i.food} with ${i.drug} (${i.severity}): ${i.recommendation}`).join("\n")}`
-    : "";
-
-  const conditionContext = patient.diagnoses.length > 0
-    ? `Conditions: ${patient.diagnoses.map(d => d.display).join(", ")}`
-    : "No specific conditions listed";
-
-  const prompt = `You are a clinical dietitian. Generate personalized dietary guidance for this patient.
-
-PATIENT:
-- Age: ${patient.age} years old
-- ${conditionContext}
-- Current medications: ${patient.medications.map(m => m.name).join(", ") || "none listed"}
-${foodInteractionContext}
-
-PATIENT'S QUESTION: "${topic}"
-
-Generate dietary guidance that is:
-1. AGE-APPROPRIATE (${patient.age} years old)
-2. CONSIDERS THEIR CONDITIONS (${patient.diagnoses.map(d => d.display).join(", ") || "general health"})
-3. CONSIDERS THEIR MEDICATIONS (especially any food interactions listed above)
-4. ANSWERS THEIR SPECIFIC QUESTION about "${topic}"
-5. PRACTICAL (everyday foods they can actually find and prepare)
-
-Respond with ONLY a valid JSON object (no markdown, no explanation):
-{
-  "recommendation": "A warm, personalized 2-3 sentence response that directly addresses their question about ${topic}",
-  "goodChoices": ["5-7 specific foods that are good for THIS patient given their question - be specific"],
-  "avoid": ["3-5 specific foods/drinks to avoid based on their medications and conditions"],
-  "tips": ["3-4 practical tips related to their dietary question"]
-}`;
-
-  try {
-    console.log(`[generateGeneralDietaryGuidance] Generating personalized guidance for ${patient.age}yo patient, topic: ${topic}`);
-    const response = await llm.generate(prompt);
-    const parsed = extractJsonObject(response.content || "");
-
-    if (parsed && typeof parsed === "object" && "recommendation" in parsed) {
-      return {
-        topic,
-        recommendation: String(parsed.recommendation || ""),
-        goodChoices: Array.isArray(parsed.goodChoices) ? parsed.goodChoices.map(String) : [],
-        avoid: Array.isArray(parsed.avoid) ? parsed.avoid.map(String) : [],
-        tips: Array.isArray(parsed.tips) ? parsed.tips.map(String) : [],
-      };
-    }
-  } catch (error) {
-    console.error("[generateGeneralDietaryGuidance] LLM generation failed:", error);
-  }
-
-  return null;
-}
+// DELETED: generatePostSurgicalDietaryGuidance and generateGeneralDietaryGuidance
+// These functions called the LLM to format responses, violating the ReAct pattern.
+// The ReAct agent now receives raw data from executeGetDietaryGuidance and synthesizes its own response.
 
 /**
  * Fallback dietary guidance for post-surgical patients when API is unavailable
@@ -1268,497 +997,73 @@ function getPostSurgicalDietaryFallback(surgeryType: string): {
 }
 
 /**
- * Get dietary guidance - Uses USDA API for food lookups and condition-based recommendations
- * For post-surgical patients, uses MedlinePlus API with clinical guideline fallback
+ * Get dietary guidance - Returns RAW DATA for ReAct agent to synthesize
+ * NO LLM calls - just fetch structured data from APIs
  */
 async function executeGetDietaryGuidance(
   topic: string,
   patient: Patient
 ): Promise<ToolCallResult> {
-  // Check for specific conditions that affect diet
-  const hasWarfarin = patient.medications.some((m) => m.name.toLowerCase().includes("warfarin"));
-  const hasHeartFailure = patient.diagnoses.some((d) => d.display.toLowerCase().includes("heart failure"));
-  const hasDiabetes = patient.diagnoses.some(
-    (d) => d.display.toLowerCase().includes("diabetes") ||
-    patient.medications.some((m) => m.name.toLowerCase().includes("metformin") || m.name.toLowerCase().includes("insulin"))
-  );
-  const hasKidneyDisease = patient.diagnoses.some((d) =>
-    d.display.toLowerCase().includes("kidney") || d.display.toLowerCase().includes("renal")
-  );
-  const hasCOPD = patient.diagnoses.some((d) => d.display.toLowerCase().includes("copd"));
+  console.log(`[getDietaryGuidance] Fetching raw dietary data for: "${topic}"`);
 
-  // Check for post-surgical conditions that require special diets
-  const diagnosesLower = patient.diagnoses.map((d) => d.display.toLowerCase());
-  const hasTonsillectomy = diagnosesLower.some((d) =>
-    d.includes("tonsillectomy") || d.includes("tonsil") || d.includes("adenoid")
-  );
-  const hasThroatSurgery = diagnosesLower.some((d) =>
-    d.includes("throat") || d.includes("pharyn") || d.includes("laryn") || d.includes("esophag")
-  );
-  const hasAbdominalSurgery = diagnosesLower.some((d) =>
-    d.includes("appendectomy") || d.includes("abdominal") || d.includes("bowel") ||
-    d.includes("intestin") || d.includes("colectomy") || d.includes("hernia repair")
-  );
-  const hasDentalSurgery = diagnosesLower.some((d) =>
-    d.includes("dental") || d.includes("tooth") || d.includes("wisdom teeth") || d.includes("extraction")
-  );
+  // Fetch raw data from external sources
+  const foodInteractions = getAllFoodInteractionsForMedications(patient.medications);
 
-  const patientConditions = { hasHeartFailure, hasDiabetes, hasKidneyDisease, takesWarfarin: hasWarfarin, hasCOPD };
-  const topicLower = topic.toLowerCase();
-
-  // STEP 1: Check if asking about a specific food - use USDA API
-  const specificFoodPatterns = [
-    /can i (eat|have) (.+)/i,
-    /is (.+) (ok|okay|good|safe|bad)/i,
-    /what about (.+)/i,
-    /(.+) good for me/i,
-  ];
-
-  let specificFood: string | null = null;
-  for (const pattern of specificFoodPatterns) {
-    const match = topic.match(pattern);
-    if (match) {
-      specificFood = match[1] || match[2];
-      break;
-    }
-  }
-
-  // If asking about specific food, look it up in USDA AND check for food-drug interactions
-  if (specificFood) {
-    try {
-      console.log(`[getDietaryGuidance] Looking up specific food: ${specificFood}`);
-
-      // Check for food-drug interactions with patient's medications
-      const foodDrugInteractions = checkFoodDrugInteractions(patient.medications, specificFood);
-      const majorInteractions = foodDrugInteractions.filter((i) => i.severity === "major");
-
-      // Get USDA nutrition evaluation
-      const evaluation = await evaluateFoodChoice(specificFood, patientConditions);
-
-      // If there are major food-drug interactions, flag as not a good choice
-      let isGoodChoice = evaluation?.isGoodChoice ?? true;
-      const concerns: string[] = evaluation?.nutrientConcerns || [];
-      const reasons: string[] = evaluation?.reasons || [];
-
-      // Add food-drug interaction warnings
-      if (majorInteractions.length > 0) {
-        isGoodChoice = false;
-        for (const interaction of majorInteractions) {
-          concerns.push(`⚠️ MEDICATION INTERACTION with ${interaction.drug}: ${interaction.recommendation}`);
-        }
-      } else if (foodDrugInteractions.length > 0) {
-        // Moderate/minor interactions - add as concerns but may still be OK
-        for (const interaction of foodDrugInteractions) {
-          concerns.push(`Note (${interaction.drug}): ${interaction.recommendation}`);
-        }
-      }
-
-      const foodName = evaluation?.food || specificFood;
-
-      return {
-        toolName: "getDietaryGuidance",
-        result: {
-          topic,
-          specificFood: foodName,
-          isGoodChoice,
-          recommendation: !isGoodChoice
-            ? majorInteractions.length > 0
-              ? `⚠️ Caution with ${foodName} - it may interact with your medications.`
-              : `You may want to limit ${foodName} or choose alternatives.`
-            : `${foodName} can be a good choice for you.`,
-          reasons,
-          concerns,
-          foodDrugInteractions: foodDrugInteractions.length > 0
-            ? foodDrugInteractions.map((i) => ({
-                drug: i.drug,
-                severity: i.severity,
-                mechanism: i.mechanism,
-                recommendation: i.recommendation,
-                timing: i.timing,
-              }))
-            : undefined,
-          source: "USDA FoodData Central + Clinical Food-Drug Interaction Database",
-        },
-        success: true,
-      };
-    } catch (error) {
-      console.error("[getDietaryGuidance] Food lookup failed:", error);
-    }
-  }
-
-  // STEP 2: Map topic to condition-based guidance using USDA client
-  // This uses evidence-based clinical guidelines, not LLM
-  const conditionKeywords: Record<string, "heart_failure" | "diabetes" | "kidney_disease" | "warfarin"> = {
-    "heart": "heart_failure",
-    "sodium": "heart_failure",
-    "salt": "heart_failure",
-    "fluid": "heart_failure",
-    "swelling": "heart_failure",
-    "sugar": "diabetes",
+  // Map patient conditions to known condition types
+  const conditionMapping: Record<string, "heart_failure" | "diabetes" | "kidney_disease" | "warfarin"> = {
+    "heart failure": "heart_failure",
+    "congestive heart failure": "heart_failure",
+    "chf": "heart_failure",
     "diabetes": "diabetes",
-    "blood sugar": "diabetes",
-    "carb": "diabetes",
-    "glucose": "diabetes",
-    "kidney": "kidney_disease",
-    "potassium": "kidney_disease",
-    "phosphorus": "kidney_disease",
-    "renal": "kidney_disease",
-    "warfarin": "warfarin",
-    "blood thinner": "warfarin",
-    "vitamin k": "warfarin",
-    "coumadin": "warfarin",
-    "inr": "warfarin",
-    "greens": "warfarin",
-    "leafy": "warfarin",
+    "type 2 diabetes": "diabetes",
+    "kidney disease": "kidney_disease",
+    "chronic kidney disease": "kidney_disease",
+    "ckd": "kidney_disease",
   };
 
-  // Check if topic matches any condition keywords
-  for (const [keyword, condition] of Object.entries(conditionKeywords)) {
-    if (topicLower.includes(keyword)) {
-      console.log(`[getDietaryGuidance] Matched condition keyword: ${keyword} -> ${condition}`);
-      const suggestions = await getConditionBasedFoodSuggestions(condition);
-
-      // Also get food-drug interactions for ALL patient medications
-      const allFoodInteractions = getAllFoodInteractionsForMedications(patient.medications);
-      const medicationFoodWarnings: string[] = [];
-
-      if (allFoodInteractions.length > 0) {
-        // Group by severity for clearer presentation
-        const majorInteractions = allFoodInteractions.filter((i) => i.severity === "major");
-        const moderateInteractions = allFoodInteractions.filter((i) => i.severity === "moderate");
-
-        if (majorInteractions.length > 0) {
-          medicationFoodWarnings.push("⚠️ IMPORTANT Food-Medication Interactions:");
-          for (const interaction of majorInteractions) {
-            medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.recommendation}`);
-          }
-        }
-        if (moderateInteractions.length > 0) {
-          medicationFoodWarnings.push("📋 Other Food Considerations for Your Medications:");
-          for (const interaction of moderateInteractions) {
-            medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.timing || interaction.recommendation}`);
-          }
-        }
-      }
-
-      return {
-        toolName: "getDietaryGuidance",
-        result: {
-          topic,
-          condition,
-          ...suggestions,
-          medicationFoodWarnings: medicationFoodWarnings.length > 0 ? medicationFoodWarnings : undefined,
-          foodDrugInteractions: allFoodInteractions.length > 0
-            ? allFoodInteractions.map((i) => ({
-                drug: i.drug,
-                food: i.food,
-                severity: i.severity,
-                recommendation: i.recommendation,
-                timing: i.timing,
-              }))
-            : undefined,
-          source: "USDA/Clinical Guidelines + Food-Drug Interaction Database",
-        },
-        success: true,
-      };
-    }
-  }
-
-  // STEP 3: For general diet questions, provide guidance based on patient's actual conditions
-  // Gather all relevant condition-based suggestions
-  const allSuggestions: {
-    goodChoices: string[];
-    avoid: string[];
-    tips: string[];
-    conditions: string[];
-  } = {
-    goodChoices: [],
-    avoid: [],
-    tips: [],
-    conditions: [],
-  };
-
-  // Get suggestions for each condition the patient actually has
-  if (hasHeartFailure) {
-    const hfSuggestions = await getConditionBasedFoodSuggestions("heart_failure");
-    allSuggestions.goodChoices.push(...hfSuggestions.goodChoices.slice(0, 3));
-    allSuggestions.avoid.push(...hfSuggestions.avoid.slice(0, 3));
-    allSuggestions.tips.push(...hfSuggestions.tips.slice(0, 2));
-    allSuggestions.conditions.push("Heart Failure");
-  }
-
-  if (hasDiabetes) {
-    const diabetesSuggestions = await getConditionBasedFoodSuggestions("diabetes");
-    allSuggestions.goodChoices.push(...diabetesSuggestions.goodChoices.slice(0, 3));
-    allSuggestions.avoid.push(...diabetesSuggestions.avoid.slice(0, 3));
-    allSuggestions.tips.push(...diabetesSuggestions.tips.slice(0, 2));
-    allSuggestions.conditions.push("Diabetes");
-  }
-
-  if (hasKidneyDisease) {
-    const kidneySuggestions = await getConditionBasedFoodSuggestions("kidney_disease");
-    allSuggestions.goodChoices.push(...kidneySuggestions.goodChoices.slice(0, 3));
-    allSuggestions.avoid.push(...kidneySuggestions.avoid.slice(0, 3));
-    allSuggestions.tips.push(...kidneySuggestions.tips.slice(0, 2));
-    allSuggestions.conditions.push("Kidney Disease");
-  }
-
-  if (hasWarfarin) {
-    const warfarinSuggestions = await getConditionBasedFoodSuggestions("warfarin");
-    allSuggestions.goodChoices.push(...warfarinSuggestions.goodChoices.slice(0, 2));
-    allSuggestions.avoid.push(...warfarinSuggestions.avoid.slice(0, 2));
-    allSuggestions.tips.push(...warfarinSuggestions.tips.slice(0, 2));
-    allSuggestions.conditions.push("Warfarin therapy");
-  }
-
-  // If patient has conditions, return combined guidance with food-drug interaction warnings
-  if (allSuggestions.conditions.length > 0) {
-    console.log(`[getDietaryGuidance] Returning combined guidance for conditions: ${allSuggestions.conditions.join(", ")}`);
-
-    // Get food-drug interaction warnings for patient's medications
-    const foodGuidance = getFoodGuidanceForPatient(patient.medications);
-    const medicationFoodWarnings: string[] = [];
-
-    if (foodGuidance.mustAvoid.length > 0) {
-      medicationFoodWarnings.push("⚠️ FOODS TO AVOID due to your medications:");
-      for (const interaction of foodGuidance.mustAvoid.slice(0, 5)) {
-        medicationFoodWarnings.push(`  • ${interaction.food} (${interaction.drug}): ${interaction.recommendation}`);
+  // Find first matching condition
+  let mappedCondition: "heart_failure" | "diabetes" | "kidney_disease" | "warfarin" | null = null;
+  for (const diagnosis of patient.diagnoses) {
+    const diagnosisLower = diagnosis.display.toLowerCase();
+    for (const [key, value] of Object.entries(conditionMapping)) {
+      if (diagnosisLower.includes(key)) {
+        mappedCondition = value;
+        break;
       }
     }
-
-    if (foodGuidance.needsTiming.length > 0) {
-      const timingItems = foodGuidance.needsTiming.filter((t) => !foodGuidance.mustAvoid.includes(t)).slice(0, 3);
-      if (timingItems.length > 0) {
-        medicationFoodWarnings.push("⏰ TIMING MATTERS:");
-        for (const interaction of timingItems) {
-          medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.timing || interaction.recommendation}`);
-        }
-      }
-    }
-
-    return {
-      toolName: "getDietaryGuidance",
-      result: {
-        topic,
-        recommendation: `Based on your conditions (${allSuggestions.conditions.join(", ")}), here are dietary recommendations from clinical guidelines.`,
-        goodChoices: [...new Set(allSuggestions.goodChoices)], // Remove duplicates
-        avoid: [...new Set(allSuggestions.avoid)],
-        tips: [...new Set(allSuggestions.tips)],
-        forConditions: allSuggestions.conditions,
-        medicationFoodWarnings: medicationFoodWarnings.length > 0 ? medicationFoodWarnings : undefined,
-        source: "USDA/Clinical guidelines + Food-Drug Interaction Database",
-      },
-      success: true,
-    };
+    if (mappedCondition) break;
   }
 
-  // STEP 4: Try to extract any food words from the topic and look them up
-  // Common foods that might be mentioned
-  const commonFoods = [
-    "chicken", "fish", "beef", "pork", "turkey", "salmon", "tuna",
-    "rice", "bread", "pasta", "potato", "oatmeal", "cereal",
-    "apple", "banana", "orange", "berries", "grapes", "watermelon",
-    "broccoli", "spinach", "carrots", "tomato", "lettuce", "kale",
-    "milk", "cheese", "yogurt", "eggs", "butter",
-    "beans", "lentils", "nuts", "almonds", "peanuts",
-    "coffee", "tea", "juice", "soda", "alcohol", "wine", "beer",
-  ];
+  // Check if patient is on warfarin
+  const onWarfarin = patient.medications.some(m =>
+    m.name.toLowerCase().includes("warfarin") || m.name.toLowerCase().includes("coumadin")
+  );
+  if (onWarfarin && !mappedCondition) {
+    mappedCondition = "warfarin";
+  }
 
-  for (const food of commonFoods) {
-    if (topicLower.includes(food)) {
-      try {
-        console.log(`[getDietaryGuidance] Found food word in topic: ${food}`);
-
-        // Check food-drug interactions
-        const foodDrugInteractions = checkFoodDrugInteractions(patient.medications, food);
-        const majorInteractions = foodDrugInteractions.filter((i) => i.severity === "major");
-
-        const evaluation = await evaluateFoodChoice(food, patientConditions);
-
-        let isGoodChoice = evaluation?.isGoodChoice ?? true;
-        const concerns: string[] = evaluation?.nutrientConcerns || [];
-        const reasons: string[] = evaluation?.reasons || [];
-
-        // Add food-drug interaction warnings
-        if (majorInteractions.length > 0) {
-          isGoodChoice = false;
-          for (const interaction of majorInteractions) {
-            concerns.push(`⚠️ MEDICATION INTERACTION with ${interaction.drug}: ${interaction.recommendation}`);
-          }
-        } else if (foodDrugInteractions.length > 0) {
-          for (const interaction of foodDrugInteractions) {
-            concerns.push(`Note (${interaction.drug}): ${interaction.recommendation}`);
-          }
-        }
-
-        const foodName = evaluation?.food || food;
-
-        return {
-          toolName: "getDietaryGuidance",
-          result: {
-            topic,
-            specificFood: foodName,
-            isGoodChoice,
-            recommendation: !isGoodChoice
-              ? majorInteractions.length > 0
-                ? `⚠️ Caution with ${foodName} - it may interact with your medications.`
-                : `You may want to limit ${foodName} or choose alternatives.`
-              : `${foodName} can be a good choice for you.`,
-            reasons,
-            concerns,
-            foodDrugInteractions: foodDrugInteractions.length > 0
-              ? foodDrugInteractions.map((i) => ({
-                  drug: i.drug,
-                  severity: i.severity,
-                  mechanism: i.mechanism,
-                  recommendation: i.recommendation,
-                  timing: i.timing,
-                }))
-              : undefined,
-            source: "USDA FoodData Central + Clinical Food-Drug Interaction Database",
-          },
-          success: true,
-        };
-      } catch (error) {
-        console.error(`[getDietaryGuidance] USDA lookup for ${food} failed:`, error);
-      }
+  // Try to get condition-specific food suggestions
+  let conditionFoods = null;
+  if (mappedCondition) {
+    try {
+      conditionFoods = await getConditionBasedFoodSuggestions(mappedCondition);
+    } catch (error) {
+      console.log(`[getDietaryGuidance] USDA API call failed for ${mappedCondition}`);
     }
   }
 
-  // STEP 5: Post-surgical dietary guidance (takes priority for recovering patients)
-  // Try MedlinePlus API first for evidence-based guidance, fall back to clinical guidelines
-  const surgeryType = hasTonsillectomy
-    ? "tonsillectomy"
-    : hasThroatSurgery
-      ? "throat surgery"
-      : hasAbdominalSurgery
-        ? "abdominal surgery"
-        : hasDentalSurgery
-          ? "dental surgery"
-          : null;
-
-  if (surgeryType) {
-    console.log(`[getDietaryGuidance] Post-surgical patient detected: ${surgeryType}`);
-    const allFoodInteractions = getAllFoodInteractionsForMedications(patient.medications);
-
-    // Use LLM to generate personalized dietary guidance
-    // LLM has knowledge of post-surgical dietary needs + we provide patient context
-    // Note: MedlinePlus is a health topics API, not a dietary database -
-    // its search results are too unreliable for dietary guidance
-    const llmGuidance = await generatePostSurgicalDietaryGuidance(
-      surgeryType,
-      patient,
-      topic,
-      undefined, // No external API context - LLM knows post-surgical diets
-      allFoodInteractions
-    );
-
-    if (llmGuidance) {
-      return {
-        toolName: "getDietaryGuidance",
-        result: {
-          ...llmGuidance,
-          foodDrugInteractions: allFoodInteractions.length > 0
-            ? allFoodInteractions.map((i) => ({
-                drug: i.drug,
-                food: i.food,
-                severity: i.severity,
-                recommendation: i.recommendation,
-              }))
-            : undefined,
-          source: "AI-personalized guidance + Food-Drug Interaction Database",
-        },
-        success: true,
-      };
-    }
-
-    // Fallback to hardcoded if LLM fails
-    const fallbackGuidance = getPostSurgicalDietaryFallback(surgeryType);
-    return {
-      toolName: "getDietaryGuidance",
-      result: {
-        topic,
-        surgeryType,
-        ...fallbackGuidance,
-        foodDrugInteractions: allFoodInteractions.length > 0
-          ? allFoodInteractions.map((i) => ({
-              drug: i.drug,
-              food: i.food,
-              severity: i.severity,
-              recommendation: i.recommendation,
-            }))
-          : undefined,
-        source: "Clinical dietary guidelines (fallback)",
-      },
-      success: true,
-    };
-  }
-
-  // STEP 6: Use LLM to generate personalized dietary guidance
-  // This covers patients without specific conditions/surgery but still need personalized advice
-  console.log("[getDietaryGuidance] Generating personalized dietary guidance via LLM");
-
-  const allFoodInteractions = getAllFoodInteractionsForMedications(patient.medications);
-
-  // Try LLM for personalized guidance
-  const llmGuidance = await generateGeneralDietaryGuidance(patient, topic, allFoodInteractions);
-
-  if (llmGuidance) {
-    return {
-      toolName: "getDietaryGuidance",
-      result: {
-        ...llmGuidance,
-        foodDrugInteractions: allFoodInteractions.length > 0
-          ? allFoodInteractions.map((i) => ({
-              drug: i.drug,
-              food: i.food,
-              severity: i.severity,
-              recommendation: i.recommendation,
-              timing: i.timing,
-            }))
-          : undefined,
-        source: "AI-personalized dietary guidance + Food-Drug Interaction Database",
-      },
-      success: true,
-    };
-  }
-
-  // Hardcoded fallback only if LLM fails completely
-  console.log("[getDietaryGuidance] LLM failed, returning hardcoded fallback");
   return {
     toolName: "getDietaryGuidance",
     result: {
       topic,
-      recommendation: "Here are general healthy eating guidelines. Ask about specific foods for more personalized advice.",
-      goodChoices: [
-        "Fresh fruits and vegetables",
-        "Lean proteins (chicken, fish, beans)",
-        "Whole grains (brown rice, whole wheat bread, oatmeal)",
-        "Low-fat dairy or dairy alternatives",
-        "Nuts and seeds in moderation",
-      ],
-      avoid: [
-        "Highly processed foods",
-        "Foods high in added sugars",
-        "Excessive sodium (check labels)",
-        "Trans fats and excessive saturated fats",
-      ],
-      tips: [
-        "Read nutrition labels to understand what you're eating",
-        "Drink plenty of water throughout the day",
-        "Eat regular meals - don't skip meals if on medications",
-        "Ask your doctor or a dietitian for personalized advice",
-      ],
-      foodDrugInteractions: allFoodInteractions.length > 0
-        ? allFoodInteractions.map((i) => ({
-            drug: i.drug,
-            food: i.food,
-            severity: i.severity,
-            recommendation: i.recommendation,
-            timing: i.timing,
-          }))
-        : undefined,
-      source: "General nutrition guidelines (fallback)",
+      patientAge: patient.age,
+      patientConditions: patient.diagnoses.map(d => d.display),
+      medications: patient.medications.map(m => ({ name: m.name, dose: m.dose })),
+      foodInteractions,  // Raw interaction data
+      suggestedFoods: conditionFoods?.goodChoices || [],  // Raw food list
+      restrictedFoods: conditionFoods?.avoid || [],  // Raw restriction list
+      nutritionTips: conditionFoods?.tips || [],
+      source: conditionFoods ? "Evidence-Based Guidelines + Food-Drug Interaction DB" : "Food-Drug Interaction DB"
     },
     success: true,
   };
@@ -1842,21 +1147,23 @@ ${conditionContext.length > 0 ? conditionContext.map(c => `- ${c}`).join("\n") :
 
 QUESTION: Patient is asking about "${activity}" after discharge.
 
-Provide PERSONALIZED guidance considering:
+YOUR TASK: Provide PERSONALIZED guidance considering:
 1. Their specific conditions and how they affect this activity
 2. Medications that might impact safety (especially drowsiness, bleeding risk)
 3. Their age and overall health status
 4. Realistic timeframes based on their situation
 5. Specific warning signs relevant to THEIR conditions
+6. Use markdown formatting: **bold** for important terms, timeframes, drug names, and warnings
+7. Be warm and conversational in tone
 
 Respond in JSON:
 {
-  "recommendation": "Personalized recommendation specific to this patient's situation",
-  "timeframe": "When they can likely resume this activity based on their conditions",
-  "safetyTips": ["3-5 specific tips personalized to their situation - mention their medications/conditions where relevant"],
-  "warningToStop": ["3-4 warning signs to watch for - personalized to their conditions"],
-  "medicationConsiderations": "Any medication-related advice for this activity (or null if not relevant)",
-  "doctorDiscussion": "What they should specifically discuss with their doctor about this activity"
+  "recommendation": "your personalized recommendation in 2-3 sentences",
+  "timeframe": "when they can resume this activity",
+  "safetyTips": ["array of 3-5 specific safety tips"],
+  "warningToStop": ["array of 3-4 warning signs"],
+  "medicationConsiderations": "medication advice or null if not applicable",
+  "doctorDiscussion": "what to discuss with doctor before resuming"
 }`;
 
     const response = await provider.generate(prompt, {
@@ -1942,118 +1249,52 @@ async function executeGetPreventiveCare(
   try {
     console.log(`[getPreventiveCare] Fetching recommendations for patient ${patient.id}, age ${patient.age}`);
 
-    // Get all recommendations from MyHealthfinder API
-    const allRecommendations = await getPreventiveRecommendations(patient);
+    // Get all care gaps from CMS guidelines
+    const allCareGaps = await evaluateCareGaps(patient);
 
-    // Identify potential care gaps
-    const careGaps = await identifyPreventiveCareGaps(patient);
+    // Get unmet care gaps
+    const unmetGaps = await getUnmetCareGaps(patient);
 
-    // If a specific topic was requested, filter the recommendations
-    let filteredRecommendations = allRecommendations;
+    // Filter by topic if provided
+    let relevantGaps = allCareGaps;
     if (topic) {
       const topicLower = topic.toLowerCase();
-      filteredRecommendations = allRecommendations.filter(
-        (rec) =>
-          rec.title.toLowerCase().includes(topicLower) ||
-          rec.category.toLowerCase().includes(topicLower) ||
-          rec.description.toLowerCase().includes(topicLower)
+      relevantGaps = allCareGaps.filter(
+        (gap) =>
+          gap.guideline.toLowerCase().includes(topicLower) ||
+          gap.recommendation.toLowerCase().includes(topicLower)
       );
 
-      // If no matches found for specific topic, return all with a note
-      if (filteredRecommendations.length === 0) {
-        console.log(`[getPreventiveCare] No specific matches for "${topic}", returning all recommendations`);
-        filteredRecommendations = allRecommendations;
+      if (relevantGaps.length === 0) {
+        console.log(`[getPreventiveCare] No specific matches for "${topic}", returning all`);
+        relevantGaps = allCareGaps;
       }
     }
 
-    // Organize recommendations by category
-    const byCategory: Record<string, typeof allRecommendations> = {};
-    for (const rec of filteredRecommendations) {
-      const cat = rec.category || "General";
-      if (!byCategory[cat]) byCategory[cat] = [];
-      byCategory[cat].push(rec);
-    }
-
-    // Build patient-friendly response
-    const screeningsDue: string[] = [];
-    const vaccinesDue: string[] = [];
-    const generalHealth: string[] = [];
-
-    for (const rec of filteredRecommendations) {
-      const title = rec.title;
-      const catLower = (rec.category || "").toLowerCase();
-
-      if (catLower.includes("screen") || catLower.includes("cancer") || title.toLowerCase().includes("screen")) {
-        screeningsDue.push(title);
-      } else if (catLower.includes("immun") || catLower.includes("vaccin") || title.toLowerCase().includes("vaccin")) {
-        vaccinesDue.push(title);
-      } else {
-        generalHealth.push(title);
-      }
-    }
-
-    // Build care gap summary
-    const gapSummary = careGaps.length > 0
-      ? careGaps.map((g) => ({
-          recommendation: g.recommendation.title,
-          status: g.status,
-          reason: g.reason,
-        }))
-      : [];
-
-    // Filter descriptions through LLM for patient-friendly language
-    const patientContext = {
-      age: patient.age,
-      conditions: patient.diagnoses.map((d) => d.display),
-    };
-
-    // Make the details patient-friendly
-    const friendlyDetails = await Promise.all(
-      filteredRecommendations.slice(0, 10).map(async (rec) => {
-        const friendlyDescription = rec.description
-          ? await makePatientFriendly(rec.description, {
-              contentType: "preventive_care",
-              patientContext,
-              originalQuery: rec.title,
-            })
-          : "";
-        return {
-          title: rec.title,
-          category: rec.category,
-          description: friendlyDescription,
-          frequency: rec.frequency,
-          grade: rec.uspstfGrade,
-          learnMore: rec.actionUrl,
-        };
-      })
-    );
-
+    // Return raw structured data - no LLM formatting
     return {
       toolName: "getPreventiveCare",
       result: {
         topic: topic || "all preventive care",
         patientAge: patient.age,
         patientGender: patient.gender === "M" ? "Male" : patient.gender === "F" ? "Female" : "Other",
-        totalRecommendations: filteredRecommendations.length,
-        recommendations: {
-          screenings: screeningsDue.length > 0 ? screeningsDue : ["None specific to your age/gender"],
-          vaccinations: vaccinesDue.length > 0 ? vaccinesDue : ["Check with your doctor about routine vaccines"],
-          generalHealth: generalHealth.length > 0 ? generalHealth : [],
-        },
-        careGaps: gapSummary.length > 0
-          ? {
-              count: gapSummary.length,
-              items: gapSummary.slice(0, 5), // Limit to top 5
-              note: "These are screenings that may be due based on your age and record. Please discuss with your doctor.",
-            }
-          : {
-              count: 0,
-              note: "No obvious care gaps identified. Continue with regular checkups.",
-            },
-        details: friendlyDetails,
-        importantNote:
-          "These are general recommendations based on national guidelines. Your individual needs may vary. Always discuss preventive care with your healthcare provider.",
-        source: "MyHealthfinder (ODPHP) - USPSTF Guidelines",
+        patientConditions: patient.diagnoses.map(d => d.display),
+        totalGuidelines: relevantGaps.length,
+        careGaps: relevantGaps.map(gap => ({
+          guideline: gap.guideline,
+          organization: gap.organization,
+          recommendation: gap.recommendation,
+          grade: gap.grade,
+          status: gap.status,
+          evidence: gap.evidence,
+          dueDate: gap.dueDate,
+        })),
+        unmetCareGaps: unmetGaps.map(gap => ({
+          guideline: gap.guideline,
+          recommendation: gap.recommendation,
+          grade: gap.grade,
+        })),
+        source: "CMS Preventive Care Guidelines"
       },
       success: true,
     };

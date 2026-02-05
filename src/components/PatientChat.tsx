@@ -401,17 +401,19 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       if (abortController.signal.aborted) return;
 
       const url = URL.createObjectURL(blob);
-      const audio = new Audio();
+      const audio = new Audio(); // Create empty audio element first
 
-      // Preload the entire audio file
+      // Set audio properties BEFORE loading URL to avoid autoplay issues
       audio.preload = "auto";
+      audio.currentTime = 0;
 
-      // Wait for the audio to be fully loaded (not just canplaythrough)
+      // Set the source and wait for it to be ready to play
+      audio.src = url;
+
+      // Wait for 'canplay' event (enough data has been decoded to start playing)
       await new Promise<void>((resolve, reject) => {
-        audio.onloadeddata = () => resolve();
-        audio.onerror = () => reject(new Error("Audio failed to load"));
-        audio.src = url;
-        audio.load(); // Explicitly trigger loading
+        audio.addEventListener("canplay", () => resolve(), { once: true });
+        audio.addEventListener("error", () => reject(new Error("Audio failed to load")), { once: true });
       });
 
       // Check if aborted while loading
@@ -420,8 +422,14 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         return;
       }
 
-      // Ensure we're at the very beginning
-      audio.currentTime = 0;
+      // Longer delay to ensure decoder is fully ready (100ms is still imperceptible)
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Check if aborted after delay
+      if (abortController.signal.aborted) {
+        URL.revokeObjectURL(url);
+        return;
+      }
 
       audio.onended = () => {
         URL.revokeObjectURL(url);
@@ -433,15 +441,14 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       setPlayingMessageIndex(messageIndex);
       setTtsLoading(null);
 
-      // Small delay after setting currentTime to ensure seek completes
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      // Check if aborted during delay
+      // Final check before play
       if (abortController.signal.aborted) {
         URL.revokeObjectURL(url);
         return;
       }
 
+      // Ensure we're at position 0 and play
+      audio.currentTime = 0;
       await audio.play();
     } catch (error) {
       // Ignore abort errors — they're intentional

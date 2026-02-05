@@ -63,31 +63,35 @@ Your final plan MUST include these sections:
 6. DIETARY guidelines if applicable
 
 ## OUTPUT FORMAT - CRITICAL
-Your final_answer MUST be a MARKDOWN CHECKLIST, not JSON. Use this exact format:
+Your final_answer MUST be a MARKDOWN CHECKLIST, not JSON. Use this exact format with **bold** for medication names, dosages, key terms, warning signs, and important details:
 
 **High Priority - Must Complete Before Discharge**
-- [ ] First high priority item
-- [ ] Second high priority item
+- [ ] Schedule **follow-up appointment** with **cardiologist within 7 days**
+- [ ] Confirm patient can identify **warning signs** that require **immediate care**
 
 **Medication Instructions**
-- [ ] Furosemide 80mg: Take in the morning. Watch for low potassium.
-- [ ] Lisinopril 10mg: Take in the morning. May cause dry cough.
+- [ ] **Furosemide 80mg**: Take in the **morning**. Watch for **low potassium** symptoms (weakness, irregular heartbeat).
+- [ ] **Lisinopril 10mg**: Take in the **morning**. May cause **dry cough** - report if persistent.
 
 **Follow-Up Appointments**
-- [ ] Cardiology within 7 days
-- [ ] Primary care within 14 days
+- [ ] **Cardiology** appointment within **7 days** - call **555-0100** to schedule
+- [ ] **Primary care** visit within **14 days** for medication review
 
 **Warning Signs - Seek Immediate Care If**
-- [ ] Shortness of breath or chest pain
-- [ ] Sudden weight gain of 2-3 lbs
+- [ ] **Shortness of breath** or **chest pain**
+- [ ] **Sudden weight gain** of **2-3 lbs in one day** or **5 lbs in a week**
 
 **Activity Restrictions**
-- [ ] Limit to light activity for first week
+- [ ] Limit to **light activity** for first **week** - no **heavy lifting over 10 lbs**
 
 **Dietary Guidelines**
-- [ ] Low sodium diet (under 2000mg/day)
+- [ ] **Low sodium diet** (under **2000mg/day**) - avoid **processed foods**, **canned soups**, **deli meats**
 
-IMPORTANT: Output ONLY the markdown checklist. NO JSON. Each section uses **Bold Headers** and - [ ] checkbox items.`;
+IMPORTANT:
+- Output ONLY the markdown checklist. NO JSON.
+- Each section uses **Bold Headers** and - [ ] checkbox items
+- Use **bold** throughout for medication names, dosages, timeframes, warning signs, and key terms
+- Be specific and actionable in every item`;
 }
 
 /**

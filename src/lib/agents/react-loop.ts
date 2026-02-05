@@ -15,6 +15,7 @@
 
 import { createLLMProvider, getActiveModelId } from "@/lib/integrations/llm-provider";
 import { getOpikClient } from "@/lib/integrations/opik";
+import { applyOutputGuardrails } from "@/lib/guardrails";
 import { extractJsonObject } from "@/lib/utils/llm-json";
 import { verifyGrounding, quickGroundingCheck, type GroundingResult } from "@/lib/verification/grounding";
 
@@ -147,7 +148,7 @@ At each step, respond with ONLY a valid JSON object in one of these two formats:
 3. Use the observation from each tool to inform your next thought
 4. When you have gathered enough information, provide a final_answer
 5. Be thorough - call multiple tools if needed to give a complete answer
-6. Your final_answer should synthesize all the information you gathered
+6. Synthesize tool responses into a natural, conversational answer - don't just copy/paste
 7. NEVER make up information - only use what the tools return
 8. If a tool returns an error or no useful info, reason about what to try next
 
@@ -443,7 +444,18 @@ Please fix and respond with valid JSON only:`;
 
           try {
             const result = await tool.execute(action.args);
-            step.observation = JSON.stringify(result, null, 2);
+
+            // Sanitize tool observation to prevent PII leakage in subsequent iterations
+            const rawObservation = JSON.stringify(result, null, 2);
+            const sanitizedObservation = applyOutputGuardrails(rawObservation, {
+              sanitizePII: true,
+              usePlaceholders: true,
+              logToOpik: false, // Don't spam Opik with observation logs
+              traceName: "guardrail-tool-observation",
+            });
+
+            // Keep observations as clean JSON - let the agent synthesize naturally
+            step.observation = sanitizedObservation.output;
             toolsUsed.push(action.tool);
 
             toolSpan?.update({
@@ -481,49 +493,65 @@ Please fix and respond with valid JSON only:`;
     // If we hit max iterations without a final answer, make a synthesis LLM call
     console.log(`[ReAct] Max iterations reached - synthesizing final answer from ${steps.length} steps`);
 
-    // Collect the observations (tool results) for synthesis - summarize rather than dump raw JSON
+    // Collect ALL observations (tool results) for synthesis with better structured data preservation
     const synthesisObservations = steps
       .filter((s) => s.observation)
-      .map((s) => {
+      .map((s, idx) => {
         try {
           const parsed = JSON.parse(s.observation!);
           if (typeof parsed === "object" && parsed !== null) {
-            if (parsed.plan) return `Plan: ${String(parsed.plan).slice(0, 500)}`;
-            if (parsed.content) return String(parsed.content).slice(0, 500);
-            if (parsed.summary) return String(parsed.summary).slice(0, 500);
-            if (parsed.answer) return String(parsed.answer).slice(0, 500);
-            if (Array.isArray(parsed)) return `[${parsed.length} items retrieved]`;
+            // Preserve structured data more intelligently - prioritize patient-facing content
+            if (parsed.response) return `Response:\n${String(parsed.response)}`; // Dietary/activity guidance
+            if (parsed.plan) return `Plan:\n${String(parsed.plan)}`;
+            if (parsed.content) return `Content:\n${String(parsed.content)}`;
+            if (parsed.summary) return `Summary:\n${String(parsed.summary)}`;
+            if (parsed.answer) return `Answer:\n${String(parsed.answer)}`;
+            if (parsed.recommendation) return `Recommendation:\n${String(parsed.recommendation)}`; // Medical guidance
+            if (parsed.purpose) return `Purpose:\n${String(parsed.purpose)}`; // Medication info
+            if (Array.isArray(parsed)) {
+              // For arrays, show first few items with details
+              return `Data (${parsed.length} items):\n${JSON.stringify(parsed.slice(0, 3), null, 2)}${parsed.length > 3 ? "\n..." : ""}`;
+            }
+            // For other objects, show full JSON (truncated if very large)
+            const jsonStr = JSON.stringify(parsed, null, 2);
+            return jsonStr.length > 3000 ? jsonStr.slice(0, 3000) + "\n..." : jsonStr;
           }
-          return s.observation!.slice(0, 300);
+          return s.observation!;
         } catch {
-          return s.observation!.slice(0, 300);
+          // Not JSON - return raw observation
+          return s.observation!;
         }
-      })
-      .slice(-5);
+      });
 
-    // Make a final synthesis call to produce a proper formatted answer
+    // Include ALL thoughts to preserve reasoning chain
+    const allThoughts = steps.map((s, i) => `${i + 1}. ${s.thought}`).join("\n");
+
+    // Make a final synthesis call to produce a proper formatted answer with FULL context
     let fallbackAnswer: string;
     try {
-      const synthesisPrompt = `You were working on a task but ran out of iterations. Based on the information gathered, provide a complete and well-formatted response.
+      const synthesisPrompt = `You are a patient recovery coach. You were helping a patient but reached the iteration limit before completing your response.
 
-Original task context:
-${systemPrompt.slice(0, 1000)}
+PATIENT'S ORIGINAL QUESTION:
+${userMessage}
 
-Information gathered:
-${synthesisObservations.map((o, i) => `${i + 1}. ${o}`).join("\n")}
+YOUR COMPLETE SYSTEM CONTEXT:
+${systemPrompt}
 
-Your previous thoughts:
-${steps.slice(-3).map((s) => s.thought).join("\n")}
+ALL INFORMATION YOU GATHERED (${steps.length} steps):
+${synthesisObservations.map((o, i) => `\nStep ${i + 1}:\n${o}`).join("\n")}
 
-Now provide your final, complete response. Format it appropriately for the task (e.g., markdown checklist for discharge plans, clear prose for explanations). Do NOT include raw JSON in your response - format everything in a human-readable way.`;
+YOUR COMPLETE REASONING CHAIN:
+${allThoughts}
+
+Based on ALL the above information, provide a complete, well-formatted response that directly answers the patient's question. Use all the patient-specific details you gathered. Format appropriately (markdown lists for discharge plans, clear prose for explanations). Do NOT include raw JSON in your response - format everything in a human-readable way.`;
 
       const synthesisResponse = await provider.generate(synthesisPrompt, {
         spanName: "react-synthesis-fallback",
-        metadata: { reason: "max_iterations_reached", steps: steps.length },
+        metadata: { reason: "max_iterations_reached", steps: steps.length, full_context: true },
       });
 
       fallbackAnswer = synthesisResponse.content;
-      console.log(`[ReAct] Synthesis complete - generated ${fallbackAnswer.length} char response`);
+      console.log(`[ReAct] Synthesis complete - generated ${fallbackAnswer.length} char response with full context`);
     } catch (synthesisError) {
       console.error("[ReAct] Synthesis failed, using basic fallback:", synthesisError);
       fallbackAnswer = `I gathered information through ${steps.length} steps but couldn't complete the task within the iteration limit. Please try again or simplify your request.`;
@@ -781,7 +809,18 @@ Now provide your next step as JSON:`;
 
           try {
             const result = await tool.execute(action.args);
-            step.observation = JSON.stringify(result, null, 2);
+
+            // Sanitize tool observation to prevent PII leakage in subsequent iterations
+            const rawObservation = JSON.stringify(result, null, 2);
+            const sanitizedObservation = applyOutputGuardrails(rawObservation, {
+              sanitizePII: true,
+              usePlaceholders: true,
+              logToOpik: false, // Don't spam Opik with observation logs
+              traceName: "guardrail-tool-observation",
+            });
+
+            // Keep observations as clean JSON - let the agent synthesize naturally
+            step.observation = sanitizedObservation.output;
             toolsUsed.push(action.tool);
 
             toolSpan?.update({
@@ -823,49 +862,65 @@ Now provide your next step as JSON:`;
     // If we hit max iterations without a final answer, make a synthesis LLM call
     console.log(`[ReAct Streaming] Max iterations reached - synthesizing final answer from ${steps.length} steps`);
 
-    // Collect the observations for synthesis - summarize rather than dump raw JSON
+    // Collect ALL observations (tool results) for synthesis with better structured data preservation
     const synthesisObservations = steps
       .filter((s) => s.observation)
-      .map((s) => {
+      .map((s, idx) => {
         try {
           const parsed = JSON.parse(s.observation!);
           if (typeof parsed === "object" && parsed !== null) {
-            if (parsed.plan) return `Plan: ${String(parsed.plan).slice(0, 500)}`;
-            if (parsed.content) return String(parsed.content).slice(0, 500);
-            if (parsed.summary) return String(parsed.summary).slice(0, 500);
-            if (parsed.answer) return String(parsed.answer).slice(0, 500);
-            if (Array.isArray(parsed)) return `[${parsed.length} items retrieved]`;
+            // Preserve structured data more intelligently - prioritize patient-facing content
+            if (parsed.response) return `Response:\n${String(parsed.response)}`; // Dietary/activity guidance
+            if (parsed.plan) return `Plan:\n${String(parsed.plan)}`;
+            if (parsed.content) return `Content:\n${String(parsed.content)}`;
+            if (parsed.summary) return `Summary:\n${String(parsed.summary)}`;
+            if (parsed.answer) return `Answer:\n${String(parsed.answer)}`;
+            if (parsed.recommendation) return `Recommendation:\n${String(parsed.recommendation)}`; // Medical guidance
+            if (parsed.purpose) return `Purpose:\n${String(parsed.purpose)}`; // Medication info
+            if (Array.isArray(parsed)) {
+              // For arrays, show first few items with details
+              return `Data (${parsed.length} items):\n${JSON.stringify(parsed.slice(0, 3), null, 2)}${parsed.length > 3 ? "\n..." : ""}`;
+            }
+            // For other objects, show full JSON (truncated if very large)
+            const jsonStr = JSON.stringify(parsed, null, 2);
+            return jsonStr.length > 3000 ? jsonStr.slice(0, 3000) + "\n..." : jsonStr;
           }
-          return s.observation!.slice(0, 300);
+          return s.observation!;
         } catch {
-          return s.observation!.slice(0, 300);
+          // Not JSON - return raw observation
+          return s.observation!;
         }
-      })
-      .slice(-5);
+      });
 
-    // Make a final synthesis call to produce a proper formatted answer
+    // Include ALL thoughts to preserve reasoning chain
+    const allThoughts = steps.map((s, i) => `${i + 1}. ${s.thought}`).join("\n");
+
+    // Make a final synthesis call to produce a proper formatted answer with FULL context
     let fallbackAnswer: string;
     try {
-      const synthesisPrompt = `You were working on a task but ran out of iterations. Based on the information gathered, provide a complete and well-formatted response.
+      const synthesisPrompt = `You are a patient recovery coach. You were helping a patient but reached the iteration limit before completing your response.
 
-Original task context:
-${systemPrompt.slice(0, 1000)}
+PATIENT'S ORIGINAL QUESTION:
+${userMessage}
 
-Information gathered:
-${synthesisObservations.map((o, i) => `${i + 1}. ${o}`).join("\n")}
+YOUR COMPLETE SYSTEM CONTEXT:
+${systemPrompt}
 
-Your previous thoughts:
-${steps.slice(-3).map((s) => s.thought).join("\n")}
+ALL INFORMATION YOU GATHERED (${steps.length} steps):
+${synthesisObservations.map((o, i) => `\nStep ${i + 1}:\n${o}`).join("\n")}
 
-Now provide your final, complete response. Format it appropriately for the task (e.g., markdown checklist for discharge plans, clear prose for explanations). Do NOT include raw JSON in your response - format everything in a human-readable way.`;
+YOUR COMPLETE REASONING CHAIN:
+${allThoughts}
+
+Based on ALL the above information, provide a complete, well-formatted response that directly answers the patient's question. Use all the patient-specific details you gathered. Format appropriately (markdown lists for discharge plans, clear prose for explanations). Do NOT include raw JSON in your response - format everything in a human-readable way.`;
 
       const synthesisResponse = await provider.generate(synthesisPrompt, {
         spanName: "react-synthesis-fallback-streaming",
-        metadata: { reason: "max_iterations_reached", steps: steps.length },
+        metadata: { reason: "max_iterations_reached", steps: steps.length, full_context: true },
       });
 
       fallbackAnswer = synthesisResponse.content;
-      console.log(`[ReAct Streaming] Synthesis complete - generated ${fallbackAnswer.length} char response`);
+      console.log(`[ReAct Streaming] Synthesis complete - generated ${fallbackAnswer.length} char response with full context`);
     } catch (synthesisError) {
       console.error("[ReAct Streaming] Synthesis failed, using basic fallback:", synthesisError);
       fallbackAnswer = `I gathered information through ${steps.length} steps but couldn't complete the task within the iteration limit. Please try again or simplify your request.`;

@@ -16,6 +16,7 @@ import { getOpikClient, traceError, flushTraces } from "@/lib/integrations/opik"
 const MAX_TEXT_LENGTH = 4096; // OpenAI TTS max is 4096 chars
 const TTS_MODEL = "tts-1";
 const TTS_VOICE = "nova";
+const TTS_FORMAT = "mp3"; // MP3 has more reliable playback start across browsers
 // OpenAI tts-1 pricing: $15 per 1M characters
 const COST_PER_CHAR = 15 / 1_000_000;
 
@@ -81,7 +82,7 @@ export async function POST(request: NextRequest) {
       metadata: {
         voice: TTS_VOICE,
         char_count: charCount,
-        response_format: "mp3",
+        response_format: TTS_FORMAT,
       },
     });
 
@@ -97,7 +98,7 @@ export async function POST(request: NextRequest) {
         model: TTS_MODEL,
         input: truncated,
         voice: TTS_VOICE,
-        response_format: "mp3",
+        response_format: TTS_FORMAT,
       }),
     });
 
@@ -130,7 +131,7 @@ export async function POST(request: NextRequest) {
 
     // Stream the audio directly to the client — don't buffer the whole file
     const responseHeaders: Record<string, string> = {
-      "Content-Type": "audio/mpeg",
+      "Content-Type": TTS_FORMAT === "opus" ? "audio/opus" : "audio/mpeg",
       "Cache-Control": "private, max-age=300",
     };
     // Forward Content-Length if OpenAI provides it (helps browser buffer estimation)

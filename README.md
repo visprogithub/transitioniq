@@ -72,7 +72,7 @@ For a production clinical deployment, these free APIs would be replaced with val
 |----------------------|----------------------|-----|
 | **OpenFDA drug interactions** | DrugBank, FDB, or Lexicomp | FDA data is raw adverse events, not curated clinical decision support. Commercial databases provide severity ratings, clinical recommendations, and evidence grading. |
 | **Rule-based guidelines** | UpToDate, DynaMed, or AHRQ | Hand-coded guideline rules may become outdated. Subscription services provide continuously updated, peer-reviewed recommendations. |
-| **TF-IDF knowledge base** | Clinical NLP with embeddings | Zero-dependency vector search works for demos but lacks semantic understanding. Production would use medical-trained embeddings (PubMedBERT, ClinicalBERT) with vector databases. |
+| **Keyword-based knowledge base** | Pinecone/Weaviate + medical embeddings | Current TF-IDF/keyword search works for exact matches but misses semantic similarity. Production would use medical-trained embeddings (BioGPT-Large, MedCPT, or Gemini embedding-001) with vector databases for semantic search. Modern serverless options: Pinecone (free tier 1M vectors), Weaviate Cloud (14-day free), Voyage AI medical embeddings. |
 | **CMS static tier lookup** | Real-time pharmacy benefit check | Static pricing estimates miss actual insurance coverage. Production would integrate with PBMs via Surescripts or NCPDP for real-time copay information. |
 | **In-memory food-drug database** | FDB or Lexicomp food interactions | Our ~50 food-drug pairs cover common cases but commercial databases have thousands of validated interactions with clinical significance ratings. |
 | **Local symptom triage KB** | ApiMedic, Infermedica, or Isabel | Our Schmitt-Thompson style triage covers ~10 critical symptoms. Commercial symptom checkers provide AI-powered differential diagnosis, structured intake, and evidence-based triage across thousands of conditions. Free tiers: ApiMedic (100 tx/mo), EndlessMedical (developer access). |
@@ -209,7 +209,7 @@ TransitionIQ implements a **TRUE ReAct (Reasoning and Acting)** agent architectu
 | `get_comprehensive_drug_safety` | Combined FAERS/warnings/recalls | FDA APIs (cached) | No |
 | `evaluate_care_gaps` | Check guideline compliance | Rule-based (ACC/AHA, ADA, GOLD) | No |
 | `estimate_costs` | Medication pricing | CMS data | No |
-| `retrieve_knowledge` | Clinical guidance search | TF-IDF knowledge base | No |
+| `retrieve_knowledge` | Clinical guidance search | Keyword-based knowledge base | No |
 | `check_preventive_care_gaps` | USPSTF preventive care gaps | MyHealthfinder API (cached 24h) | No |
 | `analyze_readiness` | Final synthesis | LLM | Yes |
 | `generate_plan` | Discharge plan creation | LLM | Yes |
