@@ -32,9 +32,12 @@ For this hackathon submission, all three views (Clinical, Patient, Evaluation) e
 
 - **Frontend**: Next.js 16 with App Router, TypeScript, Tailwind CSS, Framer Motion
 - **LLM**: Multi-provider support (OpenAI, HuggingFace, Gemini, Anthropic) via abstracted LLM provider
-- **Agent Framework**: TypeScript ReAct-style orchestrator with tool chaining
+- **Agent Framework**: TRUE ReAct (Reasoning and Acting) loop - LLM dynamically decides tool calls, no hardcoded pipelines
+- **Streaming**: SSE (Server-Sent Events) for real-time reasoning trace visualization
 - **Observability**: Opik (Comet) for tracing, prompt versioning, evaluation, error tracking, and cost tracking
+- **Grounding**: Pattern-based and LLM-based verification to catch hallucinated facts
 - **Knowledge Base**: Zero-dependency TF-IDF vector search with medical NLP (synonym expansion, stemming)
+- **External APIs**: FDA RxNorm, OpenFDA (FAERS, Labels, Enforcement), CMS, DailyMed, MedlinePlus - with caching
 - **Memory**: In-memory session management with conversation history compaction
 - **Hosting**: Vercel
 
@@ -42,6 +45,8 @@ For this hackathon submission, all three views (Clinical, Patient, Evaluation) e
 
 ### Clinical View
 - **Multi-Model Support** - Switch between OpenAI GPT-4o Mini, HuggingFace (Qwen, Llama), Gemini, and Anthropic Claude
+- **TRUE ReAct Agent** - LLM dynamically decides which tools to call and in what order (not a hardcoded pipeline)
+- **Real FDA Data** - Drug interactions from RxNorm, boxed warnings from OpenFDA labels, FAERS adverse event counts, recall data
 - **Animated Discharge Score** - Visual gauge (0-100) with status indicators and collapsible methodology explanation
 - **Risk Factor Cards** - Expandable cards with severity levels (high/moderate/low) and data source attribution (FDA, CMS, Guidelines, FHIR, RAG)
 - **AI-Generated Discharge Plans** - Comprehensive checklists tailored to patient risk factors
@@ -49,42 +54,88 @@ For this hackathon submission, all three views (Clinical, Patient, Evaluation) e
 
 ### Patient View
 - **Preparation Tracker** - Patient-friendly framing focused on going-home preparation (not readiness judgment)
-- **Recovery Coach** - Multi-turn conversational AI with tool use (medication lookup, symptom checking, term explanation, dietary/activity guidance)
+- **Recovery Coach** - Multi-turn ReAct conversational AI with tool use (medication lookup, symptom checking, term explanation, dietary/activity guidance)
+- **SSE Streaming** - Real-time reasoning trace showing Thought→Action→Observation as it happens
+- **Grounding Verification** - Quick pattern-based checks to catch hallucinated dosages, times, and percentages
 - **Prioritized Checklist** - Separated into "Must Do Before Leaving" and "Helpful For Your Recovery" sections
 - **Suggested Questions** - Pre-built question cards for common patient concerns
+- **Data Source Fallbacks** - Local KB → External API → LLM fallback chain for reliability
 
 ### Observability & Evaluation
-- **Real-time Opik Tracing** - Token usage, cost estimates, and latency tracking for all LLM calls
+- **Real-time Opik Tracing** - Token usage aggregation, cost estimates, and latency tracking across all ReAct iterations
+- **LLM-as-Judge** - Agentic judge that uses FDA APIs to verify assessment accuracy (Safety, Accuracy, Actionability, Completeness)
 - **Error Tracing** - All API route errors logged to Opik with source identification and stack traces
 - **Thread Grouping** - Multi-turn conversations grouped by threadId for debugging
 - **Prompt Library** - 8 prompts versioned and managed via Opik Prompt Library with local fallbacks
 - **Model Comparison** - A/B testing and evaluation dashboard for comparing model outputs
-- **Agent Trajectory Logging** - Step-by-step decision tracking for the agent orchestrator
+- **ReAct Trace Logging** - Full Thought→Action→Observation trace captured for every agent run
 
 ## Agent Architecture
 
-The agent orchestrator runs a 7-step ReAct-style pipeline. Each step uses deterministic data clients for grounding, then sends the data to the LLM via Opik-versioned prompts for reasoning:
+TransitionIQ implements a **TRUE ReAct (Reasoning and Acting)** agent architecture where the LLM dynamically decides which tools to call, in what order, and when to stop—no hardcoded pipelines.
+
+### ReAct Loop (Thought → Action → Observation)
 
 ```
-User Request -> API Route -> Agent Orchestrator
-                                    |
-    Step 1: fetch_patient           (FHIR patient data)
-    Step 2: check_drug_interactions (FDA/RxNorm + LLM reasoning)
-    Step 3: evaluate_care_gaps      (Clinical guidelines + LLM reasoning)
-    Step 4: estimate_costs          (CMS Part D pricing + LLM reasoning)
-    Step 5: retrieve_knowledge      (TF-IDF RAG search + LLM synthesis)
-    Step 6: analyze_readiness       (All context -> LLM discharge assessment)
-    Step 7: generate_plan           (Risk factors -> LLM discharge checklist)
-                                    |
-                            Opik Tracing (every step)
-                                    |
-                        Dashboard Visualization
+┌─────────────────────────────────────────────────────────────┐
+│                    ReAct Loop (max 10 iterations)          │
+│                                                             │
+│   ┌──────────┐    ┌──────────┐    ┌─────────────┐          │
+│   │ THOUGHT  │ → │  ACTION  │ → │ OBSERVATION │ ──┐       │
+│   │ (LLM)    │    │ (Tool)   │    │ (Result)    │   │       │
+│   └──────────┘    └──────────┘    └─────────────┘   │       │
+│        ↑                                            │       │
+│        └────────────────────────────────────────────┘       │
+│                         ↓                                   │
+│                  ┌─────────────┐                            │
+│                  │FINAL_ANSWER │ (when LLM decides done)    │
+│                  └─────────────┘                            │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+### LLM Response Format
+
+```json
+// For tool calls:
+{"thought": "I need patient data first", "action": {"tool": "fetch_patient", "args": {"patientId": "P001"}}}
+
+// For final answer:
+{"thought": "I have all the info needed", "final_answer": "The patient's readiness score is 75..."}
+```
+
+### Clinical Assessment Tools
+
+| Tool | Purpose | Data Source | LLM Call? |
+|------|---------|-------------|-----------|
+| `fetch_patient` | Get patient demographics, meds, conditions | Demo FHIR data | No |
+| `check_drug_interactions` | Find drug-drug interactions | FDA RxNorm API (cached 24h) | No |
+| `check_boxed_warnings` | Get FDA Black Box Warnings | FDA OpenFDA Label API (cached 24h) | No |
+| `check_drug_recalls` | Get recall info | FDA Enforcement API (cached 12h) | No |
+| `get_comprehensive_drug_safety` | Combined FAERS/warnings/recalls | FDA APIs (cached) | No |
+| `evaluate_care_gaps` | Check guideline compliance | Rule-based (ACC/AHA, ADA, GOLD) | No |
+| `estimate_costs` | Medication pricing | CMS data | No |
+| `retrieve_knowledge` | Clinical guidance search | TF-IDF knowledge base | No |
+| `analyze_readiness` | Final synthesis | LLM | Yes |
+| `generate_plan` | Discharge plan creation | LLM | Yes |
+
+### Patient Coach Tools
+
+| Tool | Purpose | Data Sources (fallback order) |
+|------|---------|-------------------------------|
+| `lookupMedication` | Drug info in patient-friendly language | 1. Local KB → 2. FDA DailyMed API → 3. LLM |
+| `checkSymptom` | Symptom triage and urgency | 1. Local KB → 2. MedlinePlus API → 3. LLM |
+| `explainMedicalTerm` | Simple explanations of jargon | 1. Local KB → 2. LLM |
+| `getFollowUpGuidance` | Appointment scheduling guidance | Rule-based with patient context |
+| `getDietaryGuidance` | Diet recommendations | Rule-based with condition/medication awareness |
+| `getActivityGuidance` | Activity restrictions | Rule-based with risk awareness |
 
 ### Design Philosophy
 
-- **Data -> LLM Reasoning**: Deterministic clients provide grounding data. LLMs reason over the data. Fallback to raw data if LLM fails.
-- **No Hardcoded Outputs**: All analysis, scoring, and recommendations are AI-generated (except demo patient data).
+- **Tools Return DATA Only**: Data tools (FDA, CMS, guidelines, RAG) return raw structured data. The ReAct agent does ALL reasoning and synthesis.
+- **LLM Decides Tool Order**: No hardcoded pipelines. The LLM reasons about what information it needs and calls tools dynamically.
+- **Grounding Verification**: Optional verification that final answers are supported by tool observations (quick pattern-based or full LLM-based).
+- **LLM-Based Retry**: If JSON parsing fails, the agent asks the LLM to fix the format (no regex fallbacks).
+- **FDA Caching**: API results cached (RxCUI: 7d, interactions: 24h, labels: 24h, recalls: 12h) to reduce latency and API calls.
 - **Prompt Versioning**: All prompts stored in Opik Prompt Library with local fallbacks for offline/testing.
 - **Error Resilience**: Agent failures trigger fallback to direct LLM. All errors traced to Opik.
 
@@ -211,8 +262,8 @@ npm run lint         # ESLint check
 |                       Next.js Frontend                          |
 |  +-------------+  +--------------+  +------------------------+ |
 |  | Clinical    |  | Patient View |  |  Evaluation Dashboard  | |
-|  | Dashboard   |  | + Recovery   |  |  (Model Comparison)    | |
-|  | + Score     |  |   Coach Chat |  |                        | |
+|  | Dashboard   |  | + Recovery   |  |  (Model Comparison +   | |
+|  | + Score     |  |   Coach Chat |  |   LLM Judge)           | |
 |  +-------------+  +--------------+  +------------------------+ |
 +-----------------------------------------------------------------+
                               |
@@ -220,53 +271,127 @@ npm run lint         # ESLint check
 +-----------------------------------------------------------------+
 |                    API Routes (Next.js)                          |
 |  /api/analyze | /api/patient-chat | /api/generate-plan          |
-|  /api/agent   | /api/experiments  | /api/model/switch            |
+|  /api/agent   | /api/evaluate/judge | /api/model/switch         |
 +-----------------------------------------------------------------+
                               |
                +--------------+--------------+
                v              v              v
-+---------------+    +---------------+    +---------------+
-|  Agent        |    |  Data Sources |    |     Opik      |
-|  Orchestrator |    |               |    |  Observability|
-|               |    |  * FDA/RxNorm |    |               |
-|  7-step ReAct |    |  * Guidelines |    |  * Traces     |
-|  pipeline     |    |  * CMS Costs  |    |  * Prompts    |
-|  + memory     |    |  * FHIR Data  |    |  * Token/Cost |
-|  + tools      |    |  * RAG Search |    |  * Errors     |
-+---------------+    +---------------+    +---------------+
++------------------+   +---------------+   +---------------+
+|  ReAct Agent     |   |  Data Sources |   |     Opik      |
+|  Loop            |   |   (Cached)    |   |  Observability|
+|                  |   |               |   |               |
+|  Thought→Action  |   | * FDA/RxNorm  |   | * Traces      |
+|  →Observation    |   | * FDA Labels  |   | * Prompts     |
+|  →Final Answer   |   | * FDA FAERS   |   | * Token/Cost  |
+|                  |   | * CMS Costs   |   | * Errors      |
+|  + Memory        |   | * Guidelines  |   | * Grounding   |
+|  + Grounding     |   | * TF-IDF RAG  |   |               |
++------------------+   +---------------+   +---------------+
         |
         v
-+---------------+
-| LLM Provider  |
-|  Abstraction  |
-|               |
-|  * OpenAI     |
-|  * HuggingFace|
-|  * Gemini     |
-|  * Anthropic  |
-+---------------+
++------------------+
+|  LLM Provider    |
+|  Abstraction     |
+|                  |
+|  * OpenAI        |
+|  * HuggingFace   |
+|  * Gemini        |
+|  * Anthropic     |
+|                  |
+|  + Token Agg.    |
+|  + Cost Tracking |
++------------------+
+```
+
+### Clinical View Flow
+
+```
+POST /api/analyze { patientId }
+         ↓
+  orchestrator.runAgent()
+         ↓
+  ReAct Loop (LLM decides tool order dynamically):
+    Iteration 1: fetch_patient → patient demographics
+    Iteration 2: check_drug_interactions → FDA RxNorm (cached)
+    Iteration 3: check_boxed_warnings → FDA Labels (cached)
+    Iteration 4: evaluate_care_gaps → rule-based guidelines
+    Iteration 5: estimate_costs → CMS data
+    Iteration 6: analyze_readiness → LLM synthesis
+    Iteration 7: final_answer → complete assessment
+         ↓
+  Response: { score, status, riskFactors, agentGraph, reactTrace }
+```
+
+### Patient Chat Flow
+
+```
+POST /api/patient-chat { patientId, message }
+         ↓
+  Memory session retrieved/created
+         ↓
+  ReAct Loop (max 6 iterations):
+    Thought: "Patient asking about Lisinopril"
+    Action: lookupMedication("Lisinopril")
+    Observation: { purpose, sideEffects, warnings }
+    final_answer: "Lisinopril helps control your blood pressure..."
+         ↓
+  Quick grounding check (pattern-based)
+         ↓
+  Response with patient-friendly language
 ```
 
 ## Key Files
 
+### Agent Core
+
 | File | Purpose |
 |------|---------|
-| `src/lib/agents/orchestrator.ts` | ReAct-style agent orchestrator with 7-step pipeline |
-| `src/lib/agents/tools.ts` | Tool implementations (drug interactions, care gaps, costs, RAG, analysis) |
-| `src/lib/agents/tracing.ts` | Agent-level Opik tracing with thread grouping |
+| `src/lib/agents/react-loop.ts` | TRUE ReAct loop engine (Thought→Action→Observation), streaming support, grounding verification |
+| `src/lib/agents/orchestrator.ts` | Session management, agent entry point, tool registry integration |
+| `src/lib/agents/tools.ts` | Clinical tool implementations (FDA, CMS, guidelines, RAG) - return DATA only |
+| `src/lib/agents/patient-coach-tools.ts` | Patient-facing tools (medication lookup, symptom triage, term explanation) |
 | `src/lib/agents/memory.ts` | Session memory management for multi-turn conversations |
-| `src/lib/integrations/llm-provider.ts` | Multi-provider LLM abstraction with Opik tracing |
+| `src/lib/agents/types.ts` | Type definitions for tools, contexts, and agent state |
+| `src/lib/verification/grounding.ts` | Grounding verification (quick pattern-based + full LLM-based) |
+| `src/lib/utils/llm-json.ts` | LLM JSON parsing utilities (handles thinking tokens, truncation, trailing commas) |
+
+### External Data Sources
+
+| File | Purpose |
+|------|---------|
+| `src/lib/integrations/fda-client.ts` | FDA/RxNorm APIs with caching (interactions, boxed warnings, FAERS, recalls) |
+| `src/lib/integrations/cms-client.ts` | CMS Medicare Part D cost estimation |
+| `src/lib/integrations/guidelines-client.ts` | Rule-based clinical guideline compliance checks |
+| `src/lib/integrations/dailymed-client.ts` | FDA DailyMed drug label API |
+| `src/lib/integrations/medlineplus-client.ts` | MedlinePlus health topic API |
+
+### LLM & Observability
+
+| File | Purpose |
+|------|---------|
+| `src/lib/integrations/llm-provider.ts` | Multi-provider LLM abstraction with Opik tracing and token aggregation |
 | `src/lib/integrations/opik.ts` | Core Opik client, trace/span management, error tracing |
 | `src/lib/integrations/opik-prompts.ts` | Prompt Library (8 prompts versioned in Opik) |
 | `src/lib/integrations/analysis.ts` | Discharge analysis using LLM provider |
-| `src/lib/integrations/fda-client.ts` | FDA/RxNorm drug interaction client |
-| `src/lib/integrations/cms-client.ts` | CMS Medicare Part D cost estimation |
-| `src/lib/integrations/guidelines-client.ts` | Clinical guideline compliance checks |
+| `src/lib/evaluation/llm-judge.ts` | LLM-as-Judge quality evaluation with FDA verification tools |
+
+### Knowledge Base
+
+| File | Purpose |
+|------|---------|
 | `src/lib/knowledge-base/vector-search.ts` | Zero-dependency TF-IDF search engine with medical NLP |
 | `src/lib/knowledge-base/knowledge-index.ts` | Knowledge base indexer (~400 clinical documents) |
+| `src/lib/knowledge-base/drug-monographs.ts` | FDB-style drug monograph data |
+| `src/lib/knowledge-base/symptom-triage.ts` | Schmitt-Thompson style symptom triage protocols |
+| `src/lib/knowledge-base/medical-terminology.ts` | MeSH-style medical term definitions |
+
+### UI Components
+
+| File | Purpose |
+|------|---------|
 | `src/components/DischargeScore.tsx` | Animated circular score gauge with methodology explanation |
 | `src/components/PatientRecoveryCoach.tsx` | Patient-facing preparation guide and checklist |
-| `src/components/PatientChat.tsx` | Multi-turn recovery coach chat with tool use |
+| `src/components/PatientChat.tsx` | Multi-turn recovery coach chat with streaming SSE support |
 | `src/components/ModelSelector.tsx` | UI for switching between LLM models |
 | `src/components/RiskFactorCard.tsx` | Expandable risk factor cards with data source badges |
 
