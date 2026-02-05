@@ -2,7 +2,20 @@
  * Agent Types for TransitionIQ Discharge Readiness Assessment
  */
 
-export type ToolName = "fetch_patient" | "check_drug_interactions" | "evaluate_care_gaps" | "estimate_costs" | "retrieve_knowledge" | "analyze_readiness" | "generate_plan";
+export type ToolName =
+  | "fetch_patient"
+  | "check_drug_interactions"
+  | "evaluate_care_gaps"
+  | "estimate_costs"
+  | "retrieve_knowledge"
+  | "analyze_readiness"
+  | "generate_plan"
+  // ReAct follow-up tools
+  | "generate_discharge_plan"
+  | "explain_risk_factor"
+  | "get_assessment_summary"
+  // Allow dynamic tool names from ReAct agents
+  | string;
 
 export interface ToolCall {
   id: string;
@@ -121,6 +134,17 @@ export interface AgentResponse {
   toolsUsed: ToolCall[];
   requiresInput: boolean;
   suggestedActions?: string[];
+  /** ReAct agent trace - shows the Thought→Action→Observation reasoning loop */
+  reactTrace?: {
+    iterations: number;
+    reasoningTrace: string;
+    metadata: {
+      model: string;
+      startTime: string;
+      endTime: string;
+      totalLatencyMs: number;
+    };
+  };
 }
 
 export interface AgentGraph {

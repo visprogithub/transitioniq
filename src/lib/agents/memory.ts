@@ -35,6 +35,7 @@ export interface ConversationTurn {
     analysisScore?: number;
     promptCommit?: string;
     model?: string;
+    reactIterations?: number;
   };
 }
 
