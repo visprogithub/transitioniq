@@ -13,9 +13,11 @@ TransitionIQ is an AI-powered discharge readiness assessment tool that helps hea
 ### Data Sources
 
 - **FHIR Patient Data** - Medications, conditions, allergies, and lab results
-- **FDA Safety Signals** - Drug interaction checks via RxNorm/openFDA
+- **FDA Safety Signals** - Drug interaction checks via RxNorm/openFDA, boxed warnings, FAERS adverse events
 - **Clinical Guidelines** - ACC/AHA, ADA, GOLD guideline compliance evaluation
 - **CMS Cost Estimates** - Medicare Part D out-of-pocket cost barriers
+- **MyHealthfinder (ODPHP)** - USPSTF-based preventive care recommendations and care gap identification
+- **Food-Drug Interactions** - Comprehensive database of dietary interactions (grapefruit, leafy greens, tyramine, calcium, etc.)
 - **Clinical Knowledge Base** - RAG-powered search across drug monographs, interactions, symptom triage protocols, and medical terminology
 
 ### Demo vs. Production
@@ -36,12 +38,55 @@ This is a hackathon prototype built under time, cost, and infrastructure constra
 - **Patient data** — Hardcoded demo patients with synthetic FHIR-like records. Production would integrate with real FHIR servers (Epic, Cerner). The FDA and CMS data source clients make real API calls (openFDA, RxNorm, data.cms.gov), but CMS uses a static tier lookup for common drugs before hitting the API. Clinical guidelines are coded implementations of real published standards (ACC/AHA, ADA, GOLD, USPSTF) — accurate rules, but not fetched from a live guideline API.
 - **Authentication** — There is none. No login, no RBAC, no HIPAA-compliant access controls. The cookie-based session is purely for rate limit tracking.
 - **Model selection** — Constrained to models available on free or cheap tiers (GPT-4o Mini, HuggingFace Qwen3, Gemini Flash). Model routing is manual (user picks from a dropdown). Production would likely use a single validated model with proper eval benchmarks, or an intelligent router.
-- **Agent architecture** — Uses a custom prompt-chaining ReAct implementation where the LLM outputs JSON with `thought`, `action`, and `final_answer` fields. This works well with older or cheaper models that lack native tool-calling capabilities, but it's inherently brittle — the LLM can produce malformed JSON, hallucinate tool names, or get stuck in loops. A production system would use a proper agent framework (LangGraph, AutoGen, CrewAI) with models specifically optimized for agentic tool calling (GPT-5.2, Claude Opus 4.5, Gemini 3 Pro). These provide structured tool schemas, automatic retries, state machines for conversation flow, and better observability. The current implementation is a good proof-of-concept but would need significant hardening for clinical reliability.
+- **Agent architecture** — Uses a custom prompt-chaining ReAct implementation where the LLM outputs JSON with `thought`, `action`, and `final_answer` fields. This **explicit reasoning trace is intentional for observability** — seeing the agent's thought process is valuable for clinical audit trails. However, the JSON-based tool calling is a workaround for older/cheaper models that lack native tool-calling. **Newer reasoning models** (o3, Claude with extended thinking, Gemini with native reasoning) have built-in chain-of-thought that could replace or augment this pattern. A production system could:
+  - Use native tool schemas from models like GPT-5.2 or Claude Opus 4.5 for more reliable tool calling
+  - Leverage built-in reasoning tokens while still capturing the trace for observability
+  - Adopt a proper agent framework (LangGraph, AutoGen, CrewAI) with state machines and automatic retries
+  The current implementation is a good proof-of-concept that prioritizes transparency, but would need hardening for clinical reliability.
 - **Voice** — STT uses the browser's built-in Web Speech API (free, no server cost, but inconsistent across browsers). TTS uses OpenAI `tts-1` which is cheap but adds latency. A production mobile app would likely use a dedicated speech pipeline (Whisper for STT, streaming TTS) with proper audio handling.
 - **Hosting** — Vercel free tier has a 60-second function timeout, 100K monthly invocations, and no persistent storage. The multi-model evaluation endpoint (`/api/evaluate/models`) can push against that timeout when testing many models. Production would need proper infrastructure sizing.
-- **Opik flush strategy** — Traces are flushed once per request at the route level. If the serverless function is killed mid-request (timeout, crash), in-flight traces may be lost. Acceptable for a demo; production would use async trace shipping or a collector sidecar.
+- **Opik flush strategy** — Traces are flushed asynchronously with a 5-second timeout and auto-disable after 3 consecutive failures. This ensures the app never crashes due to Opik service outages — tracing is "execute first, trace later" (the critical LLM/tool call runs before any Opik operations). Production would use async trace shipping or a collector sidecar with proper retry queues.
 
 None of this diminishes what the prototype demonstrates — the clinical reasoning pipeline, multi-agent orchestration, observability integration, and evaluation framework are all real. The shortcuts above are just the plumbing that would get specced out properly with time and budget.
+
+### External API Rate Limits
+
+The following external APIs are used with their respective rate limits:
+
+| API | Rate Limit (No Key) | Rate Limit (Free Key) | Caching | Production Alternative |
+|-----|---------------------|----------------------|---------|----------------------|
+| **OpenFDA** (drug interactions, FAERS, labels, recalls) | 240 req/min, 1,000/day | 240 req/min, 120,000/day | 12-24h | DrugBank API, FDB (First Databank), Lexicomp |
+| **RxNorm** (drug normalization, NDC mapping) | No key required | N/A | 7 days | NLM UMLS subscription, commercial drug databases |
+| **MyHealthfinder** (preventive care recommendations) | No key required | N/A | 24h | Custom USPSTF implementation, Epic/Cerner care gaps |
+| **DailyMed** (drug labels, package inserts) | No key required | N/A | 24h | FDB, Lexicomp, Micromedex |
+| **MedlinePlus** (health topics, patient education) | No key required | N/A | Session | Licensed patient education content (Healthwise, Krames) |
+| **CMS** (Medicare Part D pricing) | No key required | N/A | Static tier lookup | GoodRx API, Surescripts, real-time pharmacy benefit check |
+
+> **Note**: OpenFDA keys are free to obtain at [open.fda.gov/apis/authentication](https://open.fda.gov/apis/authentication). Without a key, you're limited to 1,000 requests/day which is sufficient for development and demos. For production, a free key increases this to 120,000 requests/day.
+
+### Production Data Source Alternatives
+
+For a production clinical deployment, these free APIs would be replaced with validated commercial data sources:
+
+| Current Implementation | Production Alternative | Why |
+|----------------------|----------------------|-----|
+| **OpenFDA drug interactions** | DrugBank, FDB, or Lexicomp | FDA data is raw adverse events, not curated clinical decision support. Commercial databases provide severity ratings, clinical recommendations, and evidence grading. |
+| **Rule-based guidelines** | UpToDate, DynaMed, or AHRQ | Hand-coded guideline rules may become outdated. Subscription services provide continuously updated, peer-reviewed recommendations. |
+| **TF-IDF knowledge base** | Clinical NLP with embeddings | Zero-dependency vector search works for demos but lacks semantic understanding. Production would use medical-trained embeddings (PubMedBERT, ClinicalBERT) with vector databases. |
+| **CMS static tier lookup** | Real-time pharmacy benefit check | Static pricing estimates miss actual insurance coverage. Production would integrate with PBMs via Surescripts or NCPDP for real-time copay information. |
+| **In-memory food-drug database** | FDB or Lexicomp food interactions | Our ~50 food-drug pairs cover common cases but commercial databases have thousands of validated interactions with clinical significance ratings. |
+| **Demo patient data** | FHIR R4 from Epic/Cerner | Synthetic patients for demos; production would use SMART on FHIR with real EHR integration. |
+
+### Observability Resilience
+
+Opik integration is designed to **never crash the application**, even if the Opik service is unavailable:
+
+- **Execute First, Trace Later**: All LLM calls and tool executions complete before any Opik tracing operations
+- **Non-Blocking Flush**: Trace data is flushed asynchronously with a 5-second timeout
+- **Auto-Disable**: After 3 consecutive flush failures, Opik tracing is automatically disabled for the session to prevent log spam
+- **Graceful Degradation**: If `OPIK_API_KEY` is not set or Opik is unreachable, the app functions normally without observability
+
+This ensures production reliability — tracing is valuable but never critical path.
 
 ## Tech Stack
 
@@ -164,6 +209,7 @@ TransitionIQ implements a **TRUE ReAct (Reasoning and Acting)** agent architectu
 | `evaluate_care_gaps` | Check guideline compliance | Rule-based (ACC/AHA, ADA, GOLD) | No |
 | `estimate_costs` | Medication pricing | CMS data | No |
 | `retrieve_knowledge` | Clinical guidance search | TF-IDF knowledge base | No |
+| `check_preventive_care_gaps` | USPSTF preventive care gaps | MyHealthfinder API (cached 24h) | No |
 | `analyze_readiness` | Final synthesis | LLM | Yes |
 | `generate_plan` | Discharge plan creation | LLM | Yes |
 
@@ -177,6 +223,7 @@ TransitionIQ implements a **TRUE ReAct (Reasoning and Acting)** agent architectu
 | `getFollowUpGuidance` | Appointment scheduling guidance | Rule-based with patient context |
 | `getDietaryGuidance` | Diet recommendations | Rule-based with condition/medication awareness |
 | `getActivityGuidance` | Activity restrictions | Rule-based with risk awareness |
+| `getPreventiveCare` | USPSTF preventive care recommendations | 1. MyHealthfinder API → 2. Default USPSTF recommendations |
 
 ### Design Philosophy
 
@@ -447,6 +494,8 @@ POST /api/patient-chat { patientId, message }
 | `src/lib/integrations/guidelines-client.ts` | Rule-based clinical guideline compliance checks |
 | `src/lib/integrations/dailymed-client.ts` | FDA DailyMed drug label API |
 | `src/lib/integrations/medlineplus-client.ts` | MedlinePlus health topic API |
+| `src/lib/integrations/myhealthfinder-client.ts` | ODPHP MyHealthfinder API for USPSTF preventive care |
+| `src/lib/integrations/food-drug-interactions.ts` | Food-drug interaction database (grapefruit, tyramine, etc.) |
 
 ### LLM & Observability
 

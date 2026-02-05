@@ -219,14 +219,10 @@ export async function POST(request: NextRequest) {
     console.log("[Analyze] Using direct LLM (single-turn)");
 
     // Run data gathering in parallel with Opik tracing
+    // Note: checkDrugInteractions already has built-in fallback to known interactions
     const [drugInteractionsResult, careGapsResult] = await Promise.all([
       traceDataSourceCall("FDA", patientId, async () => {
-        try {
-          return await checkDrugInteractions(patient.medications);
-        } catch (error) {
-          console.error("FDA check failed:", error);
-          return getKnownInteractionsForPatient(patient);
-        }
+        return await checkDrugInteractions(patient.medications);
       }),
       traceDataSourceCall("Guidelines", patientId, async () => {
         return evaluateCareGaps(patient);
@@ -344,63 +340,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/**
- * Fallback function to get known drug interactions when FDA API fails
- */
-function getKnownInteractionsForPatient(patient: Patient): DrugInteraction[] {
-  const interactions: DrugInteraction[] = [];
-  const medNames = patient.medications.map((m) => m.name.toLowerCase());
-
-  // Check for warfarin + aspirin
-  if (medNames.some((m) => m.includes("warfarin")) && medNames.some((m) => m.includes("aspirin"))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Aspirin",
-      severity: "major",
-      description: "Concurrent use increases bleeding risk significantly. Monitor INR closely and watch for signs of bleeding.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Check for warfarin + eliquis (dual anticoagulation)
-  if (medNames.some((m) => m.includes("warfarin")) && medNames.some((m) => m.includes("eliquis"))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Eliquis (Apixaban)",
-      severity: "major",
-      description: "Dual anticoagulation therapy significantly increases bleeding risk. Generally contraindicated unless specific clinical indication.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Check for ACE inhibitor + potassium
-  if ((medNames.some((m) => m.includes("lisinopril")) || medNames.some((m) => m.includes("enalapril"))) &&
-      medNames.some((m) => m.includes("potassium"))) {
-    interactions.push({
-      drug1: "ACE Inhibitor",
-      drug2: "Potassium Chloride",
-      severity: "moderate",
-      description: "ACE inhibitors can increase potassium levels. Combined with potassium supplements, risk of hyperkalemia increases.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Check for digoxin presence (common interaction concerns)
-  if (medNames.some((m) => m.includes("digoxin"))) {
-    if (medNames.some((m) => m.includes("furosemide"))) {
-      interactions.push({
-        drug1: "Digoxin",
-        drug2: "Furosemide",
-        severity: "moderate",
-        description: "Loop diuretics can cause hypokalemia, increasing digoxin toxicity risk. Monitor potassium levels.",
-        source: "Clinical Guidelines",
-      });
-    }
-  }
-
-  return interactions;
-}
-
-// Note: Medication cost estimation now uses the CMS client (cms-client.ts)
-// which provides real Medicare Part D pricing data via CMS Open Data APIs
+// Note: Drug interaction fallback logic is built into checkDrugInteractions() in fda-client.ts
+// Note: Medication cost estimation uses the CMS client (cms-client.ts) for Medicare Part D pricing
 

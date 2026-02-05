@@ -19,6 +19,7 @@ import {
   checkDrugInteractions,
   checkBoxedWarnings,
 } from "@/lib/integrations/fda-client";
+import { identifyPreventiveCareGaps } from "@/lib/integrations/myhealthfinder-client";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import { extractJsonObject } from "@/lib/utils/llm-json";
@@ -66,7 +67,7 @@ export interface JudgeEvaluation {
 }
 
 /**
- * Verification data gathered from FDA APIs before LLM evaluation
+ * Verification data gathered from FDA APIs and MyHealthfinder before LLM evaluation
  */
 interface VerificationData {
   drugInteractions: {
@@ -96,6 +97,16 @@ interface VerificationData {
     missedHighRisk: string[];
     coveragePercent: number;
   };
+  preventiveCare: {
+    gapsIdentified: number;
+    gapsAddressedInAssessment: number;
+    missedGaps: string[];
+    gaps: Array<{
+      recommendation: string;
+      status: string;
+      reason: string;
+    }>;
+  };
 }
 
 /**
@@ -107,12 +118,13 @@ async function gatherVerificationData(
 ): Promise<VerificationData> {
   const meds = patient.medications.map((m) => ({ name: m.name }));
 
-  console.log(`[LLM Judge] Gathering FDA verification data for ${meds.length} medications...`);
+  console.log(`[LLM Judge] Gathering FDA and preventive care verification data for ${meds.length} medications...`);
 
   // Gather data in parallel
-  const [fdaInteractions, boxedWarnings] = await Promise.all([
+  const [fdaInteractions, boxedWarnings, preventiveCareGaps] = await Promise.all([
     checkDrugInteractions(meds),
     checkBoxedWarnings(meds),
+    identifyPreventiveCareGaps(patient),
   ]);
 
   // Analyze drug interactions
@@ -169,6 +181,17 @@ async function gatherVerificationData(
     highRiskMeds.some((hr) => m.includes(hr))
   );
 
+  // Analyze preventive care gaps (reuse assessmentText from medication coverage check above)
+  const missedPreventiveGaps: string[] = [];
+  const gapsAddressedCount = preventiveCareGaps.filter((g) => {
+    const keywords = g.recommendation.title.toLowerCase().split(" ");
+    const addressed = keywords.some((kw) => kw.length > 4 && assessmentText.includes(kw));
+    if (!addressed) {
+      missedPreventiveGaps.push(g.recommendation.title);
+    }
+    return addressed;
+  }).length;
+
   return {
     drugInteractions: {
       fdaInteractionsFound: fdaInteractions.length,
@@ -196,6 +219,16 @@ async function gatherVerificationData(
       notMentioned,
       missedHighRisk,
       coveragePercent: Math.round((mentioned.length / patientMeds.length) * 100),
+    },
+    preventiveCare: {
+      gapsIdentified: preventiveCareGaps.length,
+      gapsAddressedInAssessment: gapsAddressedCount,
+      missedGaps: missedPreventiveGaps,
+      gaps: preventiveCareGaps.map((g) => ({
+        recommendation: g.recommendation.title,
+        status: g.status,
+        reason: g.reason,
+      })),
     },
   };
 }
@@ -245,7 +278,7 @@ ${analysis.recommendations.map((r, i) => `  ${i + 1}. ${r}`).join("\n") || "None
 
 ## FDA VERIFICATION DATA (Ground Truth)
 
-### Drug Interactions (from FDA RxNorm API)
+### Drug Interactions (from FDA Drug Label API)
 - FDA found ${verification.drugInteractions.fdaInteractionsFound} interactions
 - Assessment flagged ${verification.drugInteractions.assessmentInteractionsFlagged} interactions
 - Missed interactions: ${verification.drugInteractions.missedInteractions.length > 0 ? verification.drugInteractions.missedInteractions.join(", ") : "None - all caught"}
@@ -261,6 +294,12 @@ ${verification.boxedWarnings.warnings.length > 0 ? `- Warnings:\n${verification.
 - Not mentioned: ${verification.medicationCoverage.notMentioned.length > 0 ? verification.medicationCoverage.notMentioned.join(", ") : "All mentioned"}
 - Missed high-risk medications: ${verification.medicationCoverage.missedHighRisk.length > 0 ? verification.medicationCoverage.missedHighRisk.join(", ") : "None"}
 
+### Preventive Care Gaps (from MyHealthfinder/USPSTF)
+- ${verification.preventiveCare.gapsIdentified} preventive care gaps identified for this patient's age/gender
+- ${verification.preventiveCare.gapsAddressedInAssessment} addressed in the assessment
+- Missed gaps: ${verification.preventiveCare.missedGaps.length > 0 ? verification.preventiveCare.missedGaps.join(", ") : "None - all addressed"}
+${verification.preventiveCare.gaps.length > 0 ? `- Details:\n${verification.preventiveCare.gaps.map((g) => `    * ${g.recommendation} (${g.status}): ${g.reason}`).join("\n")}` : ""}
+
 ## YOUR TASK
 
 Evaluate the assessment on these dimensions:
@@ -271,7 +310,7 @@ Evaluate the assessment on these dimensions:
 
 3. **ACTIONABILITY (20% weight)** - Are recommendations specific and implementable? Are next steps clear?
 
-4. **COMPLETENESS (15% weight)** - Were all medications considered? Any obvious gaps?
+4. **COMPLETENESS (15% weight)** - Were all medications considered? Were preventive care gaps identified? Any obvious gaps?
 
 ## RESPONSE FORMAT
 
@@ -301,6 +340,7 @@ Be CRITICAL. Deduct points for:
 - Missed drug interactions (major safety issue)
 - Missed boxed warnings (major safety issue)
 - Low medication coverage
+- Missed preventive care gaps (completeness issue)
 - Vague or non-actionable recommendations`;
 }
 
@@ -332,7 +372,7 @@ export async function evaluateWithLLMJudge(
     // Step 1: Gather all FDA verification data upfront
     const verification = await gatherVerificationData(patient, analysis);
 
-    console.log(`[LLM Judge] FDA data gathered - ${verification.drugInteractions.fdaInteractionsFound} interactions, ${verification.boxedWarnings.medicationsWithWarnings} boxed warnings`);
+    console.log(`[LLM Judge] Verification data gathered - ${verification.drugInteractions.fdaInteractionsFound} interactions, ${verification.boxedWarnings.medicationsWithWarnings} boxed warnings, ${verification.preventiveCare.gapsIdentified} preventive care gaps`);
 
     // Step 2: Build comprehensive prompt
     const prompt = buildEvaluationPrompt(patient, analysis, verification);
@@ -412,6 +452,8 @@ export async function evaluateWithLLMJudge(
         missed_interactions: verification.drugInteractions.missedInteractions.length,
         missed_boxed_warnings: verification.boxedWarnings.missedInAssessment.length,
         medication_coverage: verification.medicationCoverage.coveragePercent,
+        preventive_care_gaps: verification.preventiveCare.gapsIdentified,
+        preventive_care_missed: verification.preventiveCare.missedGaps.length,
       },
     });
     trace?.end();
@@ -421,9 +463,16 @@ export async function evaluateWithLLMJudge(
     return evaluation;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
     console.error(`[LLM Judge] Evaluation failed for patient ${patient.id}: ${errorMessage}`, error);
 
-    trace?.update({ metadata: { error: errorMessage } });
+    // Set errorInfo so Opik dashboard counts this as an error trace
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: errorStack ?? errorMessage,
+    };
+    trace?.update({ errorInfo, metadata: { error: errorMessage } });
     trace?.end();
 
     return {

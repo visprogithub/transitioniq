@@ -176,7 +176,10 @@ export function ThinkingSteps({
 /**
  * Truncate long content for display, keeping it readable
  */
-function truncateContent(content: string, maxLength = 300): string {
+function truncateContent(content: string | undefined | null, maxLength = 300): string {
+  if (!content) {
+    return "";
+  }
   if (content.length <= maxLength) {
     return content;
   }

@@ -2,21 +2,51 @@ import { Opik, Trace, Span } from "opik";
 import type { DischargeAnalysis } from "../types/analysis";
 
 let opikClient: Opik | null = null;
+let opikDisabled = false; // Flag to disable Opik if it keeps failing
 
 export function getOpikClient(): Opik | null {
+  // If Opik has been disabled due to repeated failures, return null
+  if (opikDisabled) {
+    return null;
+  }
+
   if (!process.env.OPIK_API_KEY) {
     console.warn("OPIK_API_KEY not set - tracing disabled");
     return null;
   }
 
   if (!opikClient) {
-    opikClient = new Opik({
-      apiKey: process.env.OPIK_API_KEY,
-      projectName: process.env.OPIK_PROJECT_NAME || "transitioniq",
-    });
+    try {
+      opikClient = new Opik({
+        apiKey: process.env.OPIK_API_KEY,
+        projectName: process.env.OPIK_PROJECT_NAME || "transitioniq",
+      });
+    } catch (e) {
+      console.error("[Opik] Failed to initialize client:", e);
+      opikDisabled = true;
+      return null;
+    }
   }
 
   return opikClient;
+}
+
+/**
+ * Temporarily disable Opik (e.g., if service is down)
+ * The app will continue without tracing
+ */
+export function disableOpik(): void {
+  console.warn("[Opik] Tracing disabled - app will continue without observability");
+  opikDisabled = true;
+  opikClient = null;
+}
+
+/**
+ * Re-enable Opik (e.g., after service recovers)
+ */
+export function enableOpik(): void {
+  console.log("[Opik] Tracing re-enabled");
+  opikDisabled = false;
 }
 
 export interface TraceMetadata {
@@ -51,6 +81,9 @@ export interface SpanResult<T> {
 
 /**
  * Core tracing function with enhanced metadata for Opik observability
+ *
+ * IMPORTANT: This function is designed to NEVER crash the app even if Opik is down.
+ * All Opik operations are wrapped in try-catch blocks.
  */
 export async function traceAnalysis<T>(
   name: string,
@@ -58,36 +91,34 @@ export async function traceAnalysis<T>(
   fn: () => Promise<T>,
   options?: { threadId?: string }
 ): Promise<SpanResult<T>> {
-  const opik = getOpikClient();
   const startTime = Date.now();
 
+  // Run the actual function FIRST - this is the critical path
+  // Opik tracing is secondary and should never block the main operation
+  const result = await fn();
+  const duration = Date.now() - startTime;
+
+  // Now try to trace to Opik (best effort, never throws)
+  const opik = getOpikClient();
   if (!opik) {
-    const result = await fn();
-    return {
-      result,
-      duration: Date.now() - startTime,
-    };
+    return { result, duration };
   }
 
-  let trace: Trace | null = null;
-  let span: Span | null = null;
+  let traceId: string | undefined;
 
   try {
-    trace = opik.trace({
+    const trace = opik.trace({
       name,
       threadId: options?.threadId,
       metadata,
     });
 
-    span = trace.span({
+    const span = trace.span({
       name: `${name}-execution`,
       metadata,
     });
 
-    const result = await fn();
-    const duration = Date.now() - startTime;
-
-    // Update span metadata before ending (API changed - end takes no args)
+    // Update span metadata before ending
     span.update({
       metadata: {
         duration_ms: duration,
@@ -98,41 +129,18 @@ export async function traceAnalysis<T>(
     span.end();
     trace.end();
 
-    // Flush to ensure trace is sent
-    await flushTraces();
+    traceId = trace.data.id;
 
-    return {
-      result,
-      duration,
-      traceId: trace.data.id,
-    };
-  } catch (error) {
-    const duration = Date.now() - startTime;
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-
-    const errorInfo = {
-      exceptionType: error instanceof Error ? error.name : "Error",
-      message: errorMessage,
-      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
-    };
-
-    if (span) {
-      span.update({
-        metadata: { duration_ms: duration, success: false, error: errorMessage },
-        errorInfo,
-      });
-      span.end();
-    }
-    if (trace) {
-      trace.update({ errorInfo });
-      trace.end();
-    }
-
-    // Flush even on error
-    await flushTraces();
-
-    throw error;
+    // Flush asynchronously - don't wait for it
+    flushTraces().catch((e) => {
+      console.warn("[Opik] Flush failed:", e);
+    });
+  } catch (opikError) {
+    // Opik failed but we already have the result - just log and continue
+    console.warn("[Opik] Tracing failed (non-fatal):", opikError);
   }
+
+  return { result, duration, traceId };
 }
 
 /**
@@ -204,6 +212,9 @@ export async function traceGeminiCall<T>(
 /**
  * Trace LLM calls with proper token usage and cost tracking for Opik
  * This creates an "llm" type span which enables Opik's token/cost dashboards
+ *
+ * IMPORTANT: This function is designed to NEVER crash the app even if Opik is down.
+ * The LLM call runs first, then tracing happens in a best-effort manner.
  */
 export async function traceLLMCall<T>(
   operation: string,
@@ -212,15 +223,16 @@ export async function traceLLMCall<T>(
   fn: () => Promise<T & { tokenUsage?: TokenUsage }>,
   options?: { threadId?: string }
 ): Promise<SpanResult<T>> {
-  const opik = getOpikClient();
   const startTime = Date.now();
 
+  // Run the LLM call FIRST - this is the critical path
+  const result = await fn();
+  const duration = Date.now() - startTime;
+
+  // Now try to trace to Opik (best effort, never throws)
+  const opik = getOpikClient();
   if (!opik) {
-    const result = await fn();
-    return {
-      result,
-      duration: Date.now() - startTime,
-    };
+    return { result, duration };
   }
 
   // Map provider names to Opik's expected format
@@ -232,11 +244,10 @@ export async function traceLLMCall<T>(
     anthropic: "anthropic",
   };
 
-  let trace: Trace | null = null;
-  let span: Span | null = null;
+  let traceId: string | undefined;
 
   try {
-    trace = opik.trace({
+    const trace = opik.trace({
       name: `llm-${operation}`,
       threadId: options?.threadId,
       metadata: {
@@ -249,7 +260,7 @@ export async function traceLLMCall<T>(
     });
 
     // Create LLM-type span for proper token tracking
-    span = trace.span({
+    const span = trace.span({
       name: `${llmOptions.provider}-${llmOptions.model}`,
       type: "llm",
       model: llmOptions.model,
@@ -260,15 +271,10 @@ export async function traceLLMCall<T>(
       },
     });
 
-    const result = await fn();
-    const duration = Date.now() - startTime;
-
     // Extract token usage from result if available
     const tokenUsage = (result as { tokenUsage?: TokenUsage }).tokenUsage || llmOptions.usage;
 
     // Update span with token usage — clean camelCase only (TypeScript SDK format)
-    // Mixing snake_case + camelCase caused schema validation issues in Opik dashboard
-    console.log(`[Opik] traceLLMCall tokenUsage:`, JSON.stringify(tokenUsage));
     span.update({
       usage: tokenUsage ? {
         promptTokens: tokenUsage.promptTokens,
@@ -287,44 +293,25 @@ export async function traceLLMCall<T>(
     span.end();
     trace.end();
 
-    await flushTraces();
+    traceId = trace.data.id;
 
-    return {
-      result,
-      duration,
-      traceId: trace.data.id,
-    };
-  } catch (error) {
-    const duration = Date.now() - startTime;
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-
-    const errorInfo = {
-      exceptionType: error instanceof Error ? error.name : "Error",
-      message: errorMessage,
-      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
-    };
-
-    if (span) {
-      span.update({
-        metadata: { duration_ms: duration, success: false, error: errorMessage },
-        errorInfo,
-      });
-      span.end();
-    }
-    if (trace) {
-      trace.update({ errorInfo });
-      trace.end();
-    }
-
-    await flushTraces();
-
-    throw error;
+    // Flush asynchronously - don't wait for it
+    flushTraces().catch((e) => {
+      console.warn("[Opik] Flush failed:", e);
+    });
+  } catch (opikError) {
+    // Opik failed but we already have the result - just log and continue
+    console.warn("[Opik] LLM tracing failed (non-fatal):", opikError);
   }
+
+  return { result, duration, traceId };
 }
 
 /**
  * Log a custom evaluation score to Opik
  * Use this for tracking specific metrics like score consistency
+ *
+ * IMPORTANT: This function never throws - Opik errors are logged and swallowed.
  */
 export async function logEvaluationScore(
   name: string,
@@ -334,41 +321,47 @@ export async function logEvaluationScore(
   metadata?: Record<string, string | number | boolean>,
   options?: { threadId?: string }
 ): Promise<void> {
+  console.log(`[Evaluation] ${name}: score=${score}, expected=${expectedScore}`);
+
   const opik = getOpikClient();
-  if (!opik) {
-    console.log(`[Evaluation] ${name}: score=${score}, expected=${expectedScore}`);
-    return;
+  if (!opik) return;
+
+  try {
+    const trace = opik.trace({
+      name: `evaluation-${name}`,
+      threadId: options?.threadId,
+      metadata: {
+        patientId,
+        category: "evaluation",
+        ...metadata,
+      },
+    });
+
+    const span = trace.span({
+      name: `${name}-score`,
+      metadata: {
+        actual_score: score,
+        expected_score: expectedScore,
+        score_difference: expectedScore !== undefined ? Math.abs(score - expectedScore) : undefined,
+        within_tolerance: expectedScore !== undefined ? Math.abs(score - expectedScore) <= 5 : undefined,
+      },
+    });
+
+    span.update({
+      metadata: {
+        evaluation_type: name,
+        success: true,
+        passed: expectedScore !== undefined ? Math.abs(score - expectedScore) <= 5 : true,
+      },
+    });
+    span.end();
+    trace.end();
+
+    // Don't await flush - let it happen in background
+    flushTraces().catch(() => {});
+  } catch (e) {
+    console.warn("[Opik] Evaluation logging failed (non-fatal):", e);
   }
-
-  const trace = opik.trace({
-    name: `evaluation-${name}`,
-    threadId: options?.threadId,
-    metadata: {
-      patientId,
-      category: "evaluation",
-      ...metadata,
-    },
-  });
-
-  const span = trace.span({
-    name: `${name}-score`,
-    metadata: {
-      actual_score: score,
-      expected_score: expectedScore,
-      score_difference: expectedScore !== undefined ? Math.abs(score - expectedScore) : undefined,
-      within_tolerance: expectedScore !== undefined ? Math.abs(score - expectedScore) <= 5 : undefined,
-    },
-  });
-
-  span.update({
-    metadata: {
-      evaluation_type: name,
-      success: true,
-      passed: expectedScore !== undefined ? Math.abs(score - expectedScore) <= 5 : true,
-    },
-  });
-  span.end();
-  trace.end();
 }
 
 /**
@@ -495,17 +488,39 @@ export async function traceError(
   }
 }
 
+// Track consecutive flush failures
+let flushFailureCount = 0;
+const MAX_FLUSH_FAILURES = 3;
+
 /**
  * Flush all pending traces to Opik
  * Call this before shutdown to ensure all data is sent
+ *
+ * IMPORTANT: This function never throws and includes a timeout to prevent hanging.
+ * If Opik service is down, it will disable tracing after repeated failures.
  */
 export async function flushTraces(): Promise<void> {
   const opik = getOpikClient();
   if (!opik) return;
 
   try {
-    await opik.flush();
+    // Add timeout to prevent hanging if Opik is unresponsive
+    const timeoutPromise = new Promise<void>((_, reject) =>
+      setTimeout(() => reject(new Error("Opik flush timeout")), 5000)
+    );
+
+    await Promise.race([opik.flush(), timeoutPromise]);
+
+    // Reset failure count on success
+    flushFailureCount = 0;
   } catch (e) {
-    console.error("Failed to flush Opik traces:", e);
+    flushFailureCount++;
+    console.warn(`[Opik] Flush failed (attempt ${flushFailureCount}/${MAX_FLUSH_FAILURES}):`, e);
+
+    // Disable Opik after repeated failures to prevent log spam
+    if (flushFailureCount >= MAX_FLUSH_FAILURES) {
+      console.warn("[Opik] Too many flush failures - disabling tracing for this session");
+      disableOpik();
+    }
   }
 }

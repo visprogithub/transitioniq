@@ -571,13 +571,23 @@ Now provide your final, complete response. Format it appropriately for the task 
   } catch (error) {
     const endTime = Date.now();
     const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
 
     console.error(`[ReAct] Error - Total tokens before failure: ${totalTokens}, Est. cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
 
+    // Set errorInfo so Opik dashboard counts this as an error trace
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: errorStack ?? errorMessage,
+    };
+
     trace?.update({
+      errorInfo,
       metadata: {
-        error: error instanceof Error ? error.message : String(error),
-        error_stack: error instanceof Error ? error.stack : undefined,
+        error: errorMessage,
+        error_stack: errorStack,
         total_tokens: totalTokens,
         prompt_tokens: totalPromptTokens,
         completion_tokens: totalCompletionTokens,
@@ -903,13 +913,23 @@ Now provide your final, complete response. Format it appropriately for the task 
   } catch (error) {
     const endTime = Date.now();
     const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
 
     console.error(`[ReAct Streaming] Error - Total tokens before failure: ${totalTokens}`);
 
+    // Set errorInfo so Opik dashboard counts this as an error trace
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: errorStack ?? errorMessage,
+    };
+
     trace?.update({
+      errorInfo,
       metadata: {
-        error: error instanceof Error ? error.message : String(error),
-        error_stack: error instanceof Error ? error.stack : undefined,
+        error: errorMessage,
+        error_stack: errorStack,
         total_tokens: totalTokens,
         prompt_tokens: totalPromptTokens,
         completion_tokens: totalCompletionTokens,
@@ -921,7 +941,7 @@ Now provide your final, complete response. Format it appropriately for the task 
 
     yield {
       type: "error",
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage,
       partialResult: {
         steps,
         toolsUsed: [...new Set(toolsUsed)],

@@ -46,7 +46,7 @@ export const TOOLS: Record<ToolName, ToolDefinition> = {
   },
   check_drug_interactions: {
     name: "check_drug_interactions",
-    description: "Check for drug-drug interactions using FDA RxNorm database",
+    description: "Check for drug-drug interactions using FDA Drug Label database (official prescribing information)",
     parameters: ["medications"],
     execute: checkDrugInteractionsTool,
   },

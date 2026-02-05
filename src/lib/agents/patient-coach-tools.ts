@@ -30,6 +30,18 @@ import {
 import { getPatientFriendlyDrugInfo as getDailyMedDrugInfo } from "@/lib/integrations/dailymed-client";
 import { getPatientSymptomAssessment } from "@/lib/integrations/medlineplus-client";
 import { extractJsonObject } from "@/lib/utils/llm-json";
+import {
+  evaluateFoodChoice,
+  getConditionBasedFoodSuggestions,
+} from "@/lib/integrations/usda-nutrition-client";
+import {
+  checkFoodDrugInteractions,
+  getFoodGuidanceForPatient,
+} from "@/lib/integrations/food-drug-interactions";
+import {
+  getPreventiveRecommendations,
+  identifyPreventiveCareGaps,
+} from "@/lib/integrations/myhealthfinder-client";
 
 export interface PatientCoachToolDefinition {
   name: string;
@@ -150,6 +162,22 @@ export const PATIENT_COACH_TOOLS: PatientCoachToolDefinition[] = [
       required: ["activity"],
     },
   },
+  {
+    name: "getPreventiveCare",
+    description:
+      "Get personalized preventive care recommendations based on age and gender. Use this when patients ask about screenings, vaccines, checkups, or preventive health. Also identifies potential care gaps.",
+    parameters: {
+      type: "object",
+      properties: {
+        topic: {
+          type: "string",
+          description:
+            "Optional specific topic (e.g., 'cancer screening', 'vaccines', 'heart health'). If not provided, returns all recommendations.",
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 // Note: Medication knowledge is now in @/lib/knowledge-base/drug-monographs.ts
@@ -207,6 +235,12 @@ export async function executePatientCoachTool(
           parameters.activity as string,
           patient,
           analysis
+        );
+
+      case "getPreventiveCare":
+        return await executeGetPreventiveCare(
+          parameters.topic as string | undefined,
+          patient
         );
 
       default:
@@ -688,7 +722,7 @@ Respond with ONLY the explanation, no other text.`;
 }
 
 /**
- * Get follow-up appointment guidance
+ * Get follow-up appointment guidance - Uses LLM for personalized advice
  */
 async function executeGetFollowUpGuidance(
   appointmentType: string,
@@ -696,67 +730,74 @@ async function executeGetFollowUpGuidance(
   analysis: DischargeAnalysis | null
 ): Promise<ToolCallResult> {
   const hasHighRisks = (analysis?.riskFactors.filter((rf) => rf.severity === "high").length || 0) > 0;
+  const diagnosisList = patient.diagnoses.map((d) => d.display).join(", ");
+  const medicationList = patient.medications.map((m) => m.name).join(", ");
+  const riskFactors = analysis?.riskFactors.map((rf) => `${rf.severity}: ${rf.title}`).join("; ") || "None identified";
 
-  const guidance: Record<string, { timeframe: string; importance: string; tips: string[] }> = {
-    primary_care: {
-      timeframe: hasHighRisks ? "within 3-5 days" : "within 7-14 days",
-      importance:
-        "Your primary care doctor needs to check on your recovery and review your medications.",
-      tips: [
-        "Bring all your discharge papers",
-        "Bring a list of all your medications",
-        "Write down any questions you have before your visit",
-      ],
-    },
-    specialist: {
-      timeframe: "as directed in your discharge papers",
-      importance:
-        "Your specialist doctor manages specific aspects of your health condition.",
-      tips: [
-        "Call their office to schedule if not already done",
-        "Ask about any tests you need before the appointment",
-        "Bring records from your hospital stay",
-      ],
-    },
-    lab_work: {
-      timeframe:
-        patient.medications.some((m) => m.name.toLowerCase().includes("warfarin"))
-          ? "within 2-3 days for INR check"
-          : "as directed in your discharge papers",
-      importance: "Lab tests help your doctors monitor your recovery and medication effects.",
-      tips: [
-        "Some tests require fasting - ask when you schedule",
-        "Bring your lab orders or know what tests are ordered",
-        "Results are usually sent to your doctor who ordered them",
-      ],
-    },
-    imaging: {
-      timeframe: "as directed in your discharge papers",
-      importance: "Imaging tests help doctors see how you're healing inside.",
-      tips: [
-        "You may need to schedule in advance",
-        "Ask about any preparation needed",
-        "Bring your ID and insurance card",
-      ],
-    },
-    general: {
-      timeframe: hasHighRisks ? "within 1 week" : "within 2 weeks",
-      importance: "Follow-up care is essential for a safe recovery.",
-      tips: [
-        "Don't delay scheduling your appointments",
-        "If you can't get an appointment soon enough, call and explain you just left the hospital",
-        "Keep all your appointments even if you feel better",
-      ],
-    },
-  };
+  try {
+    const provider = createLLMProvider();
 
-  const info = guidance[appointmentType] || guidance.general;
+    const prompt = `You are a discharge coordinator helping a patient understand their follow-up care.
+
+PATIENT INFO:
+- Name: ${patient.name}, Age: ${patient.age}
+- Diagnoses: ${diagnosisList || "None documented"}
+- Medications: ${medicationList || "None documented"}
+- Risk factors from assessment: ${riskFactors}
+- High risk patient: ${hasHighRisks ? "Yes" : "No"}
+
+QUESTION: Patient is asking about "${appointmentType}" follow-up appointments.
+
+Provide personalized guidance. Consider:
+1. Their specific conditions and which specialists they might need
+2. Urgency based on their risk factors
+3. What they should bring and prepare
+4. Any condition-specific follow-up needs (e.g., INR monitoring for warfarin)
+
+Respond in JSON:
+{
+  "timeframe": "When they should schedule (be specific to their conditions)",
+  "importance": "Why this follow-up matters for THEIR specific situation",
+  "tips": ["3-4 personalized, actionable tips"],
+  "specialistsToSee": ["List specific types of doctors they should see based on their conditions"],
+  "questionsToAsk": ["2-3 questions they should ask at their appointment"]
+}`;
+
+    const response = await provider.generate(prompt, {
+      spanName: "followup-guidance-llm",
+      metadata: { appointmentType, patientId: patient.id },
+    });
+
+    const parsed = extractJsonObject(response.content);
+    if (parsed && parsed.timeframe) {
+      return {
+        toolName: "getFollowUpGuidance",
+        result: {
+          appointmentType,
+          ...parsed,
+          patientConditions: patient.diagnoses.map((d) => d.display),
+        },
+        success: true,
+      };
+    }
+  } catch (error) {
+    console.error("[getFollowUpGuidance] LLM call failed:", error);
+  }
+
+  // Fallback with basic personalization
+  const hasWarfarin = patient.medications.some((m) => m.name.toLowerCase().includes("warfarin"));
 
   return {
     toolName: "getFollowUpGuidance",
     result: {
       appointmentType,
-      ...info,
+      timeframe: hasHighRisks ? "within 3-5 days" : "within 7-14 days",
+      importance: `Follow-up care is essential for monitoring your ${diagnosisList || "recovery"}.`,
+      tips: [
+        "Bring all your discharge papers and medication list",
+        "Write down any symptoms or concerns you've noticed",
+        hasWarfarin ? "Schedule INR check within 2-3 days" : "Schedule with your primary care doctor first",
+      ],
       patientConditions: patient.diagnoses.map((d) => d.display),
     },
     success: true,
@@ -764,176 +805,348 @@ async function executeGetFollowUpGuidance(
 }
 
 /**
- * Get dietary guidance
+ * Get dietary guidance - Uses USDA API for food lookups and condition-based recommendations
+ * No LLM fallback - uses USDA data and clinical guidelines only
  */
 async function executeGetDietaryGuidance(
   topic: string,
   patient: Patient
 ): Promise<ToolCallResult> {
-  const normalizedTopic = topic.toLowerCase().trim();
-
-  // Check patient's conditions and medications for relevant dietary info
-  const hasWarfarin = patient.medications.some(
-    (m) => m.name.toLowerCase().includes("warfarin")
-  );
-  const hasHeartFailure = patient.diagnoses.some(
-    (d) => d.display.toLowerCase().includes("heart failure")
-  );
+  // Check for specific conditions that affect diet
+  const hasWarfarin = patient.medications.some((m) => m.name.toLowerCase().includes("warfarin"));
+  const hasHeartFailure = patient.diagnoses.some((d) => d.display.toLowerCase().includes("heart failure"));
   const hasDiabetes = patient.diagnoses.some(
-    (d) =>
-      d.display.toLowerCase().includes("diabetes") ||
-      patient.medications.some((m) => m.name.toLowerCase().includes("metformin") || m.name.toLowerCase().includes("insulin"))
+    (d) => d.display.toLowerCase().includes("diabetes") ||
+    patient.medications.some((m) => m.name.toLowerCase().includes("metformin") || m.name.toLowerCase().includes("insulin"))
   );
+  const hasKidneyDisease = patient.diagnoses.some((d) =>
+    d.display.toLowerCase().includes("kidney") || d.display.toLowerCase().includes("renal")
+  );
+  const hasCOPD = patient.diagnoses.some((d) => d.display.toLowerCase().includes("copd"));
 
-  const dietaryInfo: Record<string, { recommendation: string; tips: string[]; cautions: string[] }> = {
-    sodium: {
-      recommendation: hasHeartFailure
-        ? "You should limit sodium to less than 2,000mg per day because of your heart condition."
-        : "A low-sodium diet is good for your heart and blood pressure.",
-      tips: [
-        "Read food labels - sodium is listed in milligrams (mg)",
-        "Fresh foods usually have less sodium than canned or processed",
-        "Use herbs and spices instead of salt for flavor",
-        "Rinse canned vegetables to remove some sodium",
-      ],
-      cautions: [
-        "Watch out for hidden sodium in bread, condiments, and restaurant food",
-        "Frozen dinners are often very high in sodium",
-      ],
-    },
-    warfarin: {
-      recommendation:
-        "If you take Warfarin (blood thinner), keep your vitamin K intake consistent.",
-      tips: [
-        "You don't need to avoid vitamin K foods, just eat about the same amount each week",
-        "High vitamin K foods include leafy greens like spinach, kale, and broccoli",
-        "Sudden big changes in these foods can affect how your blood thinner works",
-      ],
-      cautions: [
-        "⚠️ Don't start any new supplements without asking your doctor",
-        "⚠️ Avoid cranberry juice in large amounts",
-      ],
-    },
-    sugar: {
-      recommendation: hasDiabetes
-        ? "Managing your blood sugar through diet is very important for your diabetes."
-        : "Limiting added sugars is good for overall health.",
-      tips: [
-        "Choose whole grains over refined grains",
-        "Eat fruits instead of drinking fruit juice",
-        "Check labels for added sugars",
-        "Spread carbohydrates throughout the day rather than eating a lot at once",
-      ],
-      cautions: hasDiabetes
-        ? ["Keep a consistent eating schedule", "Don't skip meals if you take diabetes medication"]
-        : [],
-    },
-    fluids: {
-      recommendation: hasHeartFailure
-        ? "You may need to limit fluids to prevent swelling. Ask your doctor for your specific limit."
-        : "Staying well hydrated is important for recovery.",
-      tips: hasHeartFailure
-        ? [
-            "Keep track of all liquids you drink",
-            "Remember that soup, ice cream, and jello count as fluids",
-            "Sucking on ice chips can help with thirst without adding much fluid",
-          ]
-        : [
-            "Drink water throughout the day",
-            "Light-colored urine usually means you're well hydrated",
-            "Drink more if you're sweating or have a fever",
-          ],
-      cautions: hasHeartFailure ? ["Weigh yourself daily - call your doctor if you gain more than 2-3 lbs overnight"] : [],
-    },
-    protein: {
-      recommendation: "Protein helps your body heal after illness or surgery.",
-      tips: [
-        "Good protein sources include lean meats, fish, eggs, beans, and dairy",
-        "Try to have some protein at each meal",
-        "Greek yogurt and cottage cheese are easy high-protein options",
-      ],
-      cautions: [],
-    },
-    general: {
-      recommendation: "Eating well helps your body heal and recover. Here are general guidelines for a healthy recovery diet.",
-      tips: [
-        "Eat a balanced diet with fruits, vegetables, whole grains, and lean protein",
-        "Stay hydrated — drink water throughout the day",
-        "Eat smaller, more frequent meals if large meals are hard to manage",
-        "Choose soft, easy-to-digest foods if you have nausea or a poor appetite",
-        "Ask your care team about any specific dietary restrictions for your condition",
-      ],
-      cautions: hasWarfarin
-        ? ["Keep vitamin K intake consistent while on Warfarin — don't suddenly increase or decrease leafy greens"]
-        : hasHeartFailure
-          ? ["Limit sodium to less than 2,000mg per day", "You may need to limit fluids — ask your doctor"]
-          : hasDiabetes
-            ? ["Watch your carbohydrate and sugar intake", "Don't skip meals if you take diabetes medication"]
-            : [],
-    },
-  };
+  const patientConditions = { hasHeartFailure, hasDiabetes, hasKidneyDisease, takesWarfarin: hasWarfarin, hasCOPD };
+  const topicLower = topic.toLowerCase();
 
-  // Find matching dietary info
-  let info = dietaryInfo[normalizedTopic];
+  // STEP 1: Check if asking about a specific food - use USDA API
+  const specificFoodPatterns = [
+    /can i (eat|have) (.+)/i,
+    /is (.+) (ok|okay|good|safe|bad)/i,
+    /what about (.+)/i,
+    /(.+) good for me/i,
+  ];
 
-  if (!info) {
-    for (const [key, value] of Object.entries(dietaryInfo)) {
-      if (normalizedTopic.includes(key) || key.includes(normalizedTopic)) {
-        info = value;
-        break;
-      }
+  let specificFood: string | null = null;
+  for (const pattern of specificFoodPatterns) {
+    const match = topic.match(pattern);
+    if (match) {
+      specificFood = match[1] || match[2];
+      break;
     }
   }
 
-  // Add warfarin-specific info if patient is on warfarin and asking about greens/vegetables
-  if (
-    hasWarfarin &&
-    (normalizedTopic.includes("green") ||
-      normalizedTopic.includes("vegetable") ||
-      normalizedTopic.includes("salad"))
-  ) {
-    info = dietaryInfo.warfarin;
+  // If asking about specific food, look it up in USDA AND check for food-drug interactions
+  if (specificFood) {
+    try {
+      console.log(`[getDietaryGuidance] Looking up specific food: ${specificFood}`);
+
+      // Check for food-drug interactions with patient's medications
+      const foodDrugInteractions = checkFoodDrugInteractions(patient.medications, specificFood);
+      const majorInteractions = foodDrugInteractions.filter((i) => i.severity === "major");
+
+      // Get USDA nutrition evaluation
+      const evaluation = await evaluateFoodChoice(specificFood, patientConditions);
+
+      // If there are major food-drug interactions, flag as not a good choice
+      let isGoodChoice = evaluation?.isGoodChoice ?? true;
+      const concerns: string[] = evaluation?.nutrientConcerns || [];
+      const reasons: string[] = evaluation?.reasons || [];
+
+      // Add food-drug interaction warnings
+      if (majorInteractions.length > 0) {
+        isGoodChoice = false;
+        for (const interaction of majorInteractions) {
+          concerns.push(`⚠️ MEDICATION INTERACTION with ${interaction.drug}: ${interaction.recommendation}`);
+        }
+      } else if (foodDrugInteractions.length > 0) {
+        // Moderate/minor interactions - add as concerns but may still be OK
+        for (const interaction of foodDrugInteractions) {
+          concerns.push(`Note (${interaction.drug}): ${interaction.recommendation}`);
+        }
+      }
+
+      const foodName = evaluation?.food || specificFood;
+
+      return {
+        toolName: "getDietaryGuidance",
+        result: {
+          topic,
+          specificFood: foodName,
+          isGoodChoice,
+          recommendation: !isGoodChoice
+            ? majorInteractions.length > 0
+              ? `⚠️ Caution with ${foodName} - it may interact with your medications.`
+              : `You may want to limit ${foodName} or choose alternatives.`
+            : `${foodName} can be a good choice for you.`,
+          reasons,
+          concerns,
+          foodDrugInteractions: foodDrugInteractions.length > 0
+            ? foodDrugInteractions.map((i) => ({
+                drug: i.drug,
+                severity: i.severity,
+                mechanism: i.mechanism,
+                recommendation: i.recommendation,
+                timing: i.timing,
+              }))
+            : undefined,
+          source: "USDA FoodData Central + Clinical Food-Drug Interaction Database",
+        },
+        success: true,
+      };
+    } catch (error) {
+      console.error("[getDietaryGuidance] Food lookup failed:", error);
+    }
   }
 
-  if (info) {
+  // STEP 2: Map topic to condition-based guidance using USDA client
+  // This uses evidence-based clinical guidelines, not LLM
+  const conditionKeywords: Record<string, "heart_failure" | "diabetes" | "kidney_disease" | "warfarin"> = {
+    "heart": "heart_failure",
+    "sodium": "heart_failure",
+    "salt": "heart_failure",
+    "fluid": "heart_failure",
+    "swelling": "heart_failure",
+    "sugar": "diabetes",
+    "diabetes": "diabetes",
+    "blood sugar": "diabetes",
+    "carb": "diabetes",
+    "glucose": "diabetes",
+    "kidney": "kidney_disease",
+    "potassium": "kidney_disease",
+    "phosphorus": "kidney_disease",
+    "renal": "kidney_disease",
+    "warfarin": "warfarin",
+    "blood thinner": "warfarin",
+    "vitamin k": "warfarin",
+    "coumadin": "warfarin",
+    "inr": "warfarin",
+    "greens": "warfarin",
+    "leafy": "warfarin",
+  };
+
+  // Check if topic matches any condition keywords
+  for (const [keyword, condition] of Object.entries(conditionKeywords)) {
+    if (topicLower.includes(keyword)) {
+      console.log(`[getDietaryGuidance] Matched condition keyword: ${keyword} -> ${condition}`);
+      const suggestions = await getConditionBasedFoodSuggestions(condition);
+      return {
+        toolName: "getDietaryGuidance",
+        result: {
+          topic,
+          condition,
+          ...suggestions,
+          source: "USDA/Clinical guidelines",
+        },
+        success: true,
+      };
+    }
+  }
+
+  // STEP 3: For general diet questions, provide guidance based on patient's actual conditions
+  // Gather all relevant condition-based suggestions
+  const allSuggestions: {
+    goodChoices: string[];
+    avoid: string[];
+    tips: string[];
+    conditions: string[];
+  } = {
+    goodChoices: [],
+    avoid: [],
+    tips: [],
+    conditions: [],
+  };
+
+  // Get suggestions for each condition the patient actually has
+  if (hasHeartFailure) {
+    const hfSuggestions = await getConditionBasedFoodSuggestions("heart_failure");
+    allSuggestions.goodChoices.push(...hfSuggestions.goodChoices.slice(0, 3));
+    allSuggestions.avoid.push(...hfSuggestions.avoid.slice(0, 3));
+    allSuggestions.tips.push(...hfSuggestions.tips.slice(0, 2));
+    allSuggestions.conditions.push("Heart Failure");
+  }
+
+  if (hasDiabetes) {
+    const diabetesSuggestions = await getConditionBasedFoodSuggestions("diabetes");
+    allSuggestions.goodChoices.push(...diabetesSuggestions.goodChoices.slice(0, 3));
+    allSuggestions.avoid.push(...diabetesSuggestions.avoid.slice(0, 3));
+    allSuggestions.tips.push(...diabetesSuggestions.tips.slice(0, 2));
+    allSuggestions.conditions.push("Diabetes");
+  }
+
+  if (hasKidneyDisease) {
+    const kidneySuggestions = await getConditionBasedFoodSuggestions("kidney_disease");
+    allSuggestions.goodChoices.push(...kidneySuggestions.goodChoices.slice(0, 3));
+    allSuggestions.avoid.push(...kidneySuggestions.avoid.slice(0, 3));
+    allSuggestions.tips.push(...kidneySuggestions.tips.slice(0, 2));
+    allSuggestions.conditions.push("Kidney Disease");
+  }
+
+  if (hasWarfarin) {
+    const warfarinSuggestions = await getConditionBasedFoodSuggestions("warfarin");
+    allSuggestions.goodChoices.push(...warfarinSuggestions.goodChoices.slice(0, 2));
+    allSuggestions.avoid.push(...warfarinSuggestions.avoid.slice(0, 2));
+    allSuggestions.tips.push(...warfarinSuggestions.tips.slice(0, 2));
+    allSuggestions.conditions.push("Warfarin therapy");
+  }
+
+  // If patient has conditions, return combined guidance with food-drug interaction warnings
+  if (allSuggestions.conditions.length > 0) {
+    console.log(`[getDietaryGuidance] Returning combined guidance for conditions: ${allSuggestions.conditions.join(", ")}`);
+
+    // Get food-drug interaction warnings for patient's medications
+    const foodGuidance = getFoodGuidanceForPatient(patient.medications);
+    const medicationFoodWarnings: string[] = [];
+
+    if (foodGuidance.mustAvoid.length > 0) {
+      medicationFoodWarnings.push("⚠️ FOODS TO AVOID due to your medications:");
+      for (const interaction of foodGuidance.mustAvoid.slice(0, 5)) {
+        medicationFoodWarnings.push(`  • ${interaction.food} (${interaction.drug}): ${interaction.recommendation}`);
+      }
+    }
+
+    if (foodGuidance.needsTiming.length > 0) {
+      const timingItems = foodGuidance.needsTiming.filter((t) => !foodGuidance.mustAvoid.includes(t)).slice(0, 3);
+      if (timingItems.length > 0) {
+        medicationFoodWarnings.push("⏰ TIMING MATTERS:");
+        for (const interaction of timingItems) {
+          medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.timing || interaction.recommendation}`);
+        }
+      }
+    }
+
     return {
       toolName: "getDietaryGuidance",
       result: {
         topic,
-        ...info,
-        relevantConditions: patient.diagnoses
-          .filter(
-            (d) =>
-              d.display.toLowerCase().includes("heart") ||
-              d.display.toLowerCase().includes("diabetes") ||
-              d.display.toLowerCase().includes("kidney")
-          )
-          .map((d) => d.display),
-        relevantMedications: hasWarfarin ? ["Warfarin"] : [],
+        recommendation: `Based on your conditions (${allSuggestions.conditions.join(", ")}), here are dietary recommendations from clinical guidelines.`,
+        goodChoices: [...new Set(allSuggestions.goodChoices)], // Remove duplicates
+        avoid: [...new Set(allSuggestions.avoid)],
+        tips: [...new Set(allSuggestions.tips)],
+        forConditions: allSuggestions.conditions,
+        medicationFoodWarnings: medicationFoodWarnings.length > 0 ? medicationFoodWarnings : undefined,
+        source: "USDA/Clinical guidelines + Food-Drug Interaction Database",
       },
       success: true,
     };
   }
 
-  // Generic response
+  // STEP 4: Try to extract any food words from the topic and look them up
+  // Common foods that might be mentioned
+  const commonFoods = [
+    "chicken", "fish", "beef", "pork", "turkey", "salmon", "tuna",
+    "rice", "bread", "pasta", "potato", "oatmeal", "cereal",
+    "apple", "banana", "orange", "berries", "grapes", "watermelon",
+    "broccoli", "spinach", "carrots", "tomato", "lettuce", "kale",
+    "milk", "cheese", "yogurt", "eggs", "butter",
+    "beans", "lentils", "nuts", "almonds", "peanuts",
+    "coffee", "tea", "juice", "soda", "alcohol", "wine", "beer",
+  ];
+
+  for (const food of commonFoods) {
+    if (topicLower.includes(food)) {
+      try {
+        console.log(`[getDietaryGuidance] Found food word in topic: ${food}`);
+
+        // Check food-drug interactions
+        const foodDrugInteractions = checkFoodDrugInteractions(patient.medications, food);
+        const majorInteractions = foodDrugInteractions.filter((i) => i.severity === "major");
+
+        const evaluation = await evaluateFoodChoice(food, patientConditions);
+
+        let isGoodChoice = evaluation?.isGoodChoice ?? true;
+        const concerns: string[] = evaluation?.nutrientConcerns || [];
+        const reasons: string[] = evaluation?.reasons || [];
+
+        // Add food-drug interaction warnings
+        if (majorInteractions.length > 0) {
+          isGoodChoice = false;
+          for (const interaction of majorInteractions) {
+            concerns.push(`⚠️ MEDICATION INTERACTION with ${interaction.drug}: ${interaction.recommendation}`);
+          }
+        } else if (foodDrugInteractions.length > 0) {
+          for (const interaction of foodDrugInteractions) {
+            concerns.push(`Note (${interaction.drug}): ${interaction.recommendation}`);
+          }
+        }
+
+        const foodName = evaluation?.food || food;
+
+        return {
+          toolName: "getDietaryGuidance",
+          result: {
+            topic,
+            specificFood: foodName,
+            isGoodChoice,
+            recommendation: !isGoodChoice
+              ? majorInteractions.length > 0
+                ? `⚠️ Caution with ${foodName} - it may interact with your medications.`
+                : `You may want to limit ${foodName} or choose alternatives.`
+              : `${foodName} can be a good choice for you.`,
+            reasons,
+            concerns,
+            foodDrugInteractions: foodDrugInteractions.length > 0
+              ? foodDrugInteractions.map((i) => ({
+                  drug: i.drug,
+                  severity: i.severity,
+                  mechanism: i.mechanism,
+                  recommendation: i.recommendation,
+                  timing: i.timing,
+                }))
+              : undefined,
+            source: "USDA FoodData Central + Clinical Food-Drug Interaction Database",
+          },
+          success: true,
+        };
+      } catch (error) {
+        console.error(`[getDietaryGuidance] USDA lookup for ${food} failed:`, error);
+      }
+    }
+  }
+
+  // STEP 5: Default general healthy eating guidance (no LLM, just evidence-based basics)
+  console.log("[getDietaryGuidance] Returning general healthy eating guidance");
   return {
     toolName: "getDietaryGuidance",
     result: {
       topic,
-      recommendation:
-        "For specific dietary questions, please ask your doctor or a dietitian who can give you personalized advice.",
-      tips: [
-        "A balanced diet with fruits, vegetables, whole grains, and lean protein supports recovery",
-        "Ask your doctor if you have any dietary restrictions based on your conditions",
+      recommendation: "Here are general healthy eating guidelines. Ask about specific foods or conditions for more personalized advice.",
+      goodChoices: [
+        "Fresh fruits and vegetables",
+        "Lean proteins (chicken, fish, beans)",
+        "Whole grains (brown rice, whole wheat bread, oatmeal)",
+        "Low-fat dairy or dairy alternatives",
+        "Nuts and seeds in moderation",
       ],
-      cautions: [],
+      avoid: [
+        "Highly processed foods",
+        "Foods high in added sugars",
+        "Excessive sodium (check labels)",
+        "Trans fats and excessive saturated fats",
+      ],
+      tips: [
+        "Read nutrition labels to understand what you're eating",
+        "Drink plenty of water throughout the day",
+        "Eat regular meals - don't skip meals if on medications",
+        "Ask your doctor or a dietitian for personalized advice",
+      ],
+      source: "General nutrition guidelines",
     },
     success: true,
   };
 }
 
 /**
- * Get activity and restrictions guidance
+ * Get activity and restrictions guidance - Uses LLM for personalized advice
+ * based on patient's conditions, medications, and risk factors
  */
 async function executeGetActivityGuidance(
   activity: string,
@@ -943,173 +1156,305 @@ async function executeGetActivityGuidance(
   const normalizedActivity = activity.toLowerCase().trim();
   const hasHighRisks = (analysis?.riskFactors.filter((rf) => rf.severity === "high").length || 0) > 0;
 
-  const activityInfo: Record<
-    string,
-    {
-      recommendation: string;
-      timeframe: string;
-      safetyTips: string[];
-      warningToStop: string[];
-    }
-  > = {
-    driving: {
-      recommendation:
-        "Most people can resume driving 24-48 hours after leaving the hospital, but it depends on your condition and medications.",
-      timeframe: hasHighRisks
-        ? "Ask your doctor before driving"
-        : "Usually OK after 24-48 hours if feeling well",
-      safetyTips: [
-        "Don't drive if you feel dizzy, drowsy, or have taken sedating medications",
-        "Start with short trips close to home",
-        "Have someone with you for your first drive",
-      ],
-      warningToStop: [
-        "Feeling dizzy or lightheaded",
-        "Blurry vision",
-        "Drowsiness from medications",
-        "Pain that distracts you",
-      ],
-    },
-    lifting: {
-      recommendation:
-        "Avoid heavy lifting initially to let your body recover.",
-      timeframe: "Typically avoid lifting more than 10 lbs for 2-4 weeks, but follow your doctor's specific instructions",
-      safetyTips: [
-        "Ask for help with heavy grocery bags or laundry",
-        "Use a cart or wagon for heavy items",
-        "Bend your knees, not your back, when picking things up",
-      ],
-      warningToStop: [
-        "Pain or discomfort",
-        "Feeling winded",
-        "Dizziness",
-      ],
-    },
-    exercise: {
-      recommendation:
-        "Light activity like walking is usually encouraged. Check with your doctor about more vigorous exercise.",
-      timeframe: "Start slowly and gradually increase as you feel stronger",
-      safetyTips: [
-        "Walking is often the best exercise to start with",
-        "Listen to your body and rest when tired",
-        "Stay hydrated during activity",
-        "Avoid exercise in extreme heat or cold",
-      ],
-      warningToStop: [
-        "Chest pain or pressure",
-        "Severe shortness of breath",
-        "Dizziness or lightheadedness",
-        "Unusual fatigue",
-      ],
-    },
-    stairs: {
-      recommendation: "Most people can use stairs, but take it slowly at first.",
-      timeframe: "Usually OK right away, but go slowly",
-      safetyTips: [
-        "Use the handrail",
-        "Take one step at a time",
-        "Rest if you feel winded",
-        "Consider sleeping on the main floor initially if stairs are difficult",
-      ],
-      warningToStop: [
-        "Significant shortness of breath",
-        "Chest pain",
-        "Feeling faint",
-      ],
-    },
-    showering: {
-      recommendation:
-        "Showering is usually fine, but be careful about slipping and don't take very hot or long showers at first.",
-      timeframe: "Usually OK right away with precautions",
-      safetyTips: [
-        "Use a shower chair if you feel unsteady",
-        "Install grab bars if you don't have them",
-        "Use non-slip mats",
-        "Don't lock the bathroom door in case you need help",
-        "Keep showers shorter and not too hot to prevent dizziness",
-      ],
-      warningToStop: ["Feeling dizzy or faint", "Feeling weak"],
-    },
-    work: {
-      recommendation:
-        "When you can return to work depends on your job and your recovery. Discuss with your doctor.",
-      timeframe: hasHighRisks
-        ? "Discuss with your doctor before returning"
-        : "Varies - desk jobs may be sooner than physical jobs",
-      safetyTips: [
-        "Ask your doctor for a note with any restrictions",
-        "Consider starting part-time if possible",
-        "Take breaks and don't overdo it",
-        "Know your job's requirements and discuss with your doctor",
-      ],
-      warningToStop: [
-        "Symptoms returning or worsening",
-        "Unable to concentrate due to fatigue",
-        "Pain that interferes with work",
-      ],
-    },
-    sex: {
-      recommendation:
-        "Sexual activity can usually be resumed when you feel ready and comfortable, typically 2-4 weeks after hospitalization.",
-      timeframe: "When you feel well enough - usually similar to climbing stairs",
-      safetyTips: [
-        "If you can climb 2 flights of stairs without symptoms, you're likely OK",
-        "Choose positions that are comfortable and less strenuous",
-        "It's normal to feel anxious - take it slowly",
-        "Talk to your doctor if you have concerns or heart conditions",
-      ],
-      warningToStop: [
-        "Chest pain or pressure",
-        "Severe shortness of breath",
-        "Irregular heartbeat",
-      ],
-    },
-  };
+  // Build patient context for personalized advice
+  const diagnosisList = patient.diagnoses.map((d) => d.display).join(", ");
+  const medicationList = patient.medications.map((m) => `${m.name} ${m.dose}`).join(", ");
+  const riskFactors = analysis?.riskFactors.map((rf) => `${rf.severity}: ${rf.title}`).join("; ") || "None identified";
 
-  let info = activityInfo[normalizedActivity];
+  // Identify condition-specific considerations
+  const hasHeartCondition = patient.diagnoses.some((d) =>
+    d.display.toLowerCase().includes("heart") ||
+    d.display.toLowerCase().includes("cardiac") ||
+    d.display.toLowerCase().includes("arrhythmia") ||
+    d.display.toLowerCase().includes("angina")
+  );
+  const hasBreathingIssue = patient.diagnoses.some((d) =>
+    d.display.toLowerCase().includes("copd") ||
+    d.display.toLowerCase().includes("asthma") ||
+    d.display.toLowerCase().includes("pneumonia") ||
+    d.display.toLowerCase().includes("pulmonary")
+  );
+  const hasMobilityIssue = patient.diagnoses.some((d) =>
+    d.display.toLowerCase().includes("fracture") ||
+    d.display.toLowerCase().includes("surgery") ||
+    d.display.toLowerCase().includes("joint") ||
+    d.display.toLowerCase().includes("hip") ||
+    d.display.toLowerCase().includes("knee")
+  );
+  const hasBleedingRisk = patient.medications.some((m) =>
+    m.name.toLowerCase().includes("warfarin") ||
+    m.name.toLowerCase().includes("eliquis") ||
+    m.name.toLowerCase().includes("xarelto") ||
+    m.name.toLowerCase().includes("aspirin") ||
+    m.name.toLowerCase().includes("plavix")
+  );
+  const hasSedatingMeds = patient.medications.some((m) =>
+    m.name.toLowerCase().includes("oxycodone") ||
+    m.name.toLowerCase().includes("hydrocodone") ||
+    m.name.toLowerCase().includes("tramadol") ||
+    m.name.toLowerCase().includes("ambien") ||
+    m.name.toLowerCase().includes("ativan") ||
+    m.name.toLowerCase().includes("valium")
+  );
 
-  if (!info) {
-    for (const [key, value] of Object.entries(activityInfo)) {
-      if (normalizedActivity.includes(key) || key.includes(normalizedActivity)) {
-        info = value;
-        break;
-      }
+  // Build condition context
+  const conditionContext: string[] = [];
+  if (hasHeartCondition) conditionContext.push("Heart condition present - monitor for chest pain, shortness of breath during activity");
+  if (hasBreathingIssue) conditionContext.push("Breathing/lung condition - may need to pace activities, watch for respiratory symptoms");
+  if (hasMobilityIssue) conditionContext.push("Mobility/orthopedic consideration - follow weight-bearing restrictions if any");
+  if (hasBleedingRisk) conditionContext.push("On blood thinners - extra caution with fall risk activities, contact sports, sharp objects");
+  if (hasSedatingMeds) conditionContext.push("Taking medications that may cause drowsiness - affects driving, operating machinery");
+
+  try {
+    const provider = createLLMProvider();
+
+    const prompt = `You are a patient recovery coach providing personalized activity guidance after hospital discharge.
+
+PATIENT INFO:
+- Name: ${patient.name}, Age: ${patient.age}
+- Diagnoses: ${diagnosisList || "None documented"}
+- Medications: ${medicationList || "None documented"}
+- Risk factors from assessment: ${riskFactors}
+- High risk patient: ${hasHighRisks ? "Yes" : "No"}
+
+RELEVANT SAFETY CONSIDERATIONS:
+${conditionContext.length > 0 ? conditionContext.map(c => `- ${c}`).join("\n") : "- No specific activity restrictions identified from conditions"}
+
+QUESTION: Patient is asking about "${activity}" after discharge.
+
+Provide PERSONALIZED guidance considering:
+1. Their specific conditions and how they affect this activity
+2. Medications that might impact safety (especially drowsiness, bleeding risk)
+3. Their age and overall health status
+4. Realistic timeframes based on their situation
+5. Specific warning signs relevant to THEIR conditions
+
+Respond in JSON:
+{
+  "recommendation": "Personalized recommendation specific to this patient's situation",
+  "timeframe": "When they can likely resume this activity based on their conditions",
+  "safetyTips": ["3-5 specific tips personalized to their situation - mention their medications/conditions where relevant"],
+  "warningToStop": ["3-4 warning signs to watch for - personalized to their conditions"],
+  "medicationConsiderations": "Any medication-related advice for this activity (or null if not relevant)",
+  "doctorDiscussion": "What they should specifically discuss with their doctor about this activity"
+}`;
+
+    const response = await provider.generate(prompt, {
+      spanName: "activity-guidance-llm",
+      metadata: { activity, patientId: patient.id },
+    });
+
+    const parsed = extractJsonObject(response.content);
+    if (parsed && parsed.recommendation) {
+      return {
+        toolName: "getActivityGuidance",
+        result: {
+          activity,
+          ...parsed,
+          patientSpecificNote: hasHighRisks
+            ? "⚠️ Because of your specific health situation, please check with your doctor before resuming this activity."
+            : null,
+          relevantConditions: patient.diagnoses.map((d) => d.display),
+          relevantMedications: patient.medications.map((m) => m.name),
+        },
+        success: true,
+      };
     }
+  } catch (error) {
+    console.error("[getActivityGuidance] LLM call failed:", error);
   }
 
-  if (info) {
-    return {
-      toolName: "getActivityGuidance",
-      result: {
-        activity,
-        ...info,
-        patientSpecificNote: hasHighRisks
-          ? "⚠️ Because of your specific health situation, please check with your doctor before resuming this activity."
-          : null,
-      },
-      success: true,
-    };
+  // Fallback with basic personalization if LLM fails
+  const fallbackSafetyTips: string[] = [
+    "Start slowly and increase activity gradually",
+    "Listen to your body and rest when tired",
+  ];
+  const fallbackWarnings: string[] = [
+    "Any unusual symptoms",
+    "Pain that doesn't improve with rest",
+  ];
+
+  if (hasHeartCondition) {
+    fallbackSafetyTips.push("Monitor for chest pain or shortness of breath during activity");
+    fallbackWarnings.push("Chest pain, pressure, or tightness");
+  }
+  if (hasBreathingIssue) {
+    fallbackSafetyTips.push("Take breaks to catch your breath");
+    fallbackWarnings.push("Severe shortness of breath");
+  }
+  if (hasSedatingMeds) {
+    fallbackSafetyTips.push("Avoid driving or operating machinery if your medications make you drowsy");
+    fallbackWarnings.push("Excessive drowsiness or dizziness");
+  }
+  if (hasBleedingRisk) {
+    fallbackSafetyTips.push("Be extra careful with activities that risk falls or cuts while on blood thinners");
+    fallbackWarnings.push("Unusual bleeding or bruising");
   }
 
-  // Generic response
   return {
     toolName: "getActivityGuidance",
     result: {
       activity,
-      recommendation:
-        "For specific activity questions, please ask your doctor who can give you personalized guidance based on your condition.",
-      timeframe: "Ask your doctor",
-      safetyTips: [
-        "Start slowly and increase gradually",
-        "Listen to your body",
-        "Rest when you feel tired",
-      ],
-      warningToStop: [
-        "Any unusual symptoms",
-        "Pain",
-        "Feeling unwell",
-      ],
+      recommendation: `For "${activity}", here's guidance based on your conditions (${diagnosisList || "general recovery"}).`,
+      timeframe: hasHighRisks
+        ? "Check with your doctor before resuming this activity"
+        : "Start slowly as you feel ready, usually within a few days to weeks",
+      safetyTips: fallbackSafetyTips,
+      warningToStop: fallbackWarnings,
+      patientSpecificNote: hasHighRisks
+        ? "⚠️ Because of your specific health situation, please check with your doctor before resuming this activity."
+        : null,
+      relevantConditions: patient.diagnoses.map((d) => d.display),
+      relevantMedications: patient.medications.map((m) => m.name),
     },
     success: true,
   };
+}
+
+/**
+ * Get preventive care recommendations - Uses MyHealthfinder API (ODPHP)
+ * Based on USPSTF guidelines for age and gender-appropriate screenings
+ */
+async function executeGetPreventiveCare(
+  topic: string | undefined,
+  patient: Patient
+): Promise<ToolCallResult> {
+  try {
+    console.log(`[getPreventiveCare] Fetching recommendations for patient ${patient.id}, age ${patient.age}`);
+
+    // Get all recommendations from MyHealthfinder API
+    const allRecommendations = await getPreventiveRecommendations(patient);
+
+    // Identify potential care gaps
+    const careGaps = await identifyPreventiveCareGaps(patient);
+
+    // If a specific topic was requested, filter the recommendations
+    let filteredRecommendations = allRecommendations;
+    if (topic) {
+      const topicLower = topic.toLowerCase();
+      filteredRecommendations = allRecommendations.filter(
+        (rec) =>
+          rec.title.toLowerCase().includes(topicLower) ||
+          rec.category.toLowerCase().includes(topicLower) ||
+          rec.description.toLowerCase().includes(topicLower)
+      );
+
+      // If no matches found for specific topic, return all with a note
+      if (filteredRecommendations.length === 0) {
+        console.log(`[getPreventiveCare] No specific matches for "${topic}", returning all recommendations`);
+        filteredRecommendations = allRecommendations;
+      }
+    }
+
+    // Organize recommendations by category
+    const byCategory: Record<string, typeof allRecommendations> = {};
+    for (const rec of filteredRecommendations) {
+      const cat = rec.category || "General";
+      if (!byCategory[cat]) byCategory[cat] = [];
+      byCategory[cat].push(rec);
+    }
+
+    // Build patient-friendly response
+    const screeningsDue: string[] = [];
+    const vaccinesDue: string[] = [];
+    const generalHealth: string[] = [];
+
+    for (const rec of filteredRecommendations) {
+      const title = rec.title;
+      const catLower = (rec.category || "").toLowerCase();
+
+      if (catLower.includes("screen") || catLower.includes("cancer") || title.toLowerCase().includes("screen")) {
+        screeningsDue.push(title);
+      } else if (catLower.includes("immun") || catLower.includes("vaccin") || title.toLowerCase().includes("vaccin")) {
+        vaccinesDue.push(title);
+      } else {
+        generalHealth.push(title);
+      }
+    }
+
+    // Build care gap summary
+    const gapSummary = careGaps.length > 0
+      ? careGaps.map((g) => ({
+          recommendation: g.recommendation.title,
+          status: g.status,
+          reason: g.reason,
+        }))
+      : [];
+
+    return {
+      toolName: "getPreventiveCare",
+      result: {
+        topic: topic || "all preventive care",
+        patientAge: patient.age,
+        patientGender: patient.gender === "M" ? "Male" : patient.gender === "F" ? "Female" : "Other",
+        totalRecommendations: filteredRecommendations.length,
+        recommendations: {
+          screenings: screeningsDue.length > 0 ? screeningsDue : ["None specific to your age/gender"],
+          vaccinations: vaccinesDue.length > 0 ? vaccinesDue : ["Check with your doctor about routine vaccines"],
+          generalHealth: generalHealth.length > 0 ? generalHealth : [],
+        },
+        careGaps: gapSummary.length > 0
+          ? {
+              count: gapSummary.length,
+              items: gapSummary.slice(0, 5), // Limit to top 5
+              note: "These are screenings that may be due based on your age and record. Please discuss with your doctor.",
+            }
+          : {
+              count: 0,
+              note: "No obvious care gaps identified. Continue with regular checkups.",
+            },
+        details: filteredRecommendations.slice(0, 10).map((rec) => ({
+          title: rec.title,
+          category: rec.category,
+          description: rec.description,
+          frequency: rec.frequency,
+          grade: rec.uspstfGrade,
+          learnMore: rec.actionUrl,
+        })),
+        importantNote:
+          "These are general recommendations based on national guidelines. Your individual needs may vary. Always discuss preventive care with your healthcare provider.",
+        source: "MyHealthfinder (ODPHP) - USPSTF Guidelines",
+      },
+      success: true,
+    };
+  } catch (error) {
+    console.error("[getPreventiveCare] Error fetching recommendations:", error);
+
+    // Return basic age-based recommendations as fallback
+    const fallbackRecommendations: string[] = [];
+
+    if (patient.age >= 50) {
+      fallbackRecommendations.push("Colorectal cancer screening (age 45-75)");
+      fallbackRecommendations.push("Shingles vaccine (age 50+)");
+    }
+    if (patient.gender === "F" && patient.age >= 40) {
+      fallbackRecommendations.push("Mammogram for breast cancer screening");
+    }
+    if (patient.gender === "F" && patient.age >= 21 && patient.age <= 65) {
+      fallbackRecommendations.push("Cervical cancer screening (Pap smear)");
+    }
+    if (patient.age >= 65) {
+      fallbackRecommendations.push("Pneumonia vaccine");
+    }
+    fallbackRecommendations.push("Annual flu vaccine");
+    fallbackRecommendations.push("Blood pressure check at regular visits");
+
+    return {
+      toolName: "getPreventiveCare",
+      result: {
+        topic: topic || "all preventive care",
+        patientAge: patient.age,
+        patientGender: patient.gender === "M" ? "Male" : patient.gender === "F" ? "Female" : "Other",
+        recommendations: {
+          screenings: fallbackRecommendations.filter((r) => r.includes("screening") || r.includes("Pap") || r.includes("Mammogram")),
+          vaccinations: fallbackRecommendations.filter((r) => r.includes("vaccine")),
+          generalHealth: fallbackRecommendations.filter((r) => r.includes("check") || r.includes("Blood pressure")),
+        },
+        importantNote:
+          "These are general recommendations. Please discuss your specific preventive care needs with your healthcare provider.",
+        source: "USPSTF Guidelines (fallback)",
+      },
+      success: true,
+    };
+  }
 }

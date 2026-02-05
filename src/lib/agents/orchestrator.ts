@@ -43,6 +43,10 @@ import type {
 } from "./types";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
+import {
+  identifyPreventiveCareGaps,
+  type PreventiveRecommendation,
+} from "@/lib/integrations/myhealthfinder-client";
 
 /**
  * In-memory session store (would be Redis/DB in production)
@@ -89,6 +93,7 @@ interface ExecutionContext {
   patient?: Patient;
   drugInteractions?: unknown[];
   careGaps?: unknown[];
+  preventiveCareGaps?: unknown[];
   costs?: unknown[];
   knowledgeContext?: unknown;
   analysis?: DischargeAnalysis;
@@ -143,9 +148,10 @@ You should reason about what information you need and gather it step by step:
 1. **Start by fetching the patient data** - You need to know who the patient is, their conditions, and medications
 2. **Check for drug interactions** - Look for dangerous medication combinations
 3. **Evaluate care gaps** - Check if clinical guidelines are being followed
-4. **Estimate medication costs** - Identify potential financial barriers
-5. **Retrieve clinical knowledge** - Get relevant clinical context for the patient's conditions
-6. **Analyze readiness** - Once you have all the data, compute the final assessment
+4. **Check preventive care gaps** - Identify missing screenings and vaccinations based on age/gender (USPSTF guidelines)
+5. **Estimate medication costs** - Identify potential financial barriers
+6. **Retrieve clinical knowledge** - Get relevant clinical context for the patient's conditions
+7. **Analyze readiness** - Once you have all the data, compute the final assessment
 
 ## Important
 - Be thorough - a missed risk factor could harm the patient
@@ -305,6 +311,41 @@ function createAssessmentTools(
     ),
 
     createReActTool(
+      "check_preventive_care_gaps",
+      "Check for preventive care gaps based on age, gender, and documented conditions. Uses MyHealthfinder API (ODPHP) to identify missing screenings and vaccinations based on USPSTF guidelines.",
+      {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+      async () => {
+        const patient = executionContext.patient;
+        if (!patient) {
+          return { error: "No patient data available. Call fetch_patient first." };
+        }
+        try {
+          const gaps = await identifyPreventiveCareGaps(patient);
+          executionContext.preventiveCareGaps = gaps;
+          storeToolResult(sessionId, "check_preventive_care_gaps", gaps);
+          addReasoningStep(sessionId, `Identified ${gaps.length} preventive care gaps (colonoscopy, mammogram, vaccines, etc.)`);
+          return {
+            gapsIdentified: gaps.length,
+            gaps: gaps.map((g) => ({
+              recommendation: g.recommendation.title,
+              status: g.status,
+              reason: g.reason,
+              category: g.recommendation.category,
+            })),
+            source: "MyHealthfinder (ODPHP) - USPSTF Guidelines",
+          };
+        } catch (error) {
+          console.error("[check_preventive_care_gaps] Error:", error);
+          return { error: "Failed to check preventive care gaps", details: String(error) };
+        }
+      }
+    ),
+
+    createReActTool(
       "analyze_readiness",
       "Compute the final discharge readiness assessment. Call this ONLY after gathering patient data, drug interactions, care gaps, and costs. This tool uses an LLM to analyze all the data and produce a score.",
       {
@@ -332,6 +373,7 @@ function createAssessmentTools(
           patient: executionContext.patient,
           drugInteractions: executionContext.drugInteractions,
           careGaps: executionContext.careGaps,
+          preventiveCareGaps: executionContext.preventiveCareGaps || [],
           costs: executionContext.costs || [],
           knowledgeContext: executionContext.knowledgeContext,
         });
