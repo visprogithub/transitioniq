@@ -131,7 +131,7 @@ export async function POST(request: NextRequest) {
 
     // Stream the audio directly to the client — don't buffer the whole file
     const responseHeaders: Record<string, string> = {
-      "Content-Type": TTS_FORMAT === "opus" ? "audio/opus" : "audio/mpeg",
+      "Content-Type": "audio/mpeg", // MP3 format (TTS_FORMAT = "mp3")
       "Cache-Control": "private, max-age=300",
     };
     // Forward Content-Length if OpenAI provides it (helps browser buffer estimation)
