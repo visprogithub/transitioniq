@@ -5,6 +5,9 @@
 export type ToolName =
   | "fetch_patient"
   | "check_drug_interactions"
+  | "check_boxed_warnings"
+  | "check_drug_recalls"
+  | "get_comprehensive_drug_safety"
   | "evaluate_care_gaps"
   | "estimate_costs"
   | "retrieve_knowledge"
@@ -70,6 +73,30 @@ export interface DrugInteractionContext {
   drug2: string;
   severity: "major" | "moderate" | "minor";
   description: string;
+}
+
+export interface BoxedWarningContext {
+  drug: string;
+  warning: string;
+}
+
+export interface DrugRecallContext {
+  drugName: string;
+  recallNumber: string;
+  reason: string;
+  classification: string; // Class I, II, or III
+  status: string;
+  recallDate: string;
+}
+
+export interface ComprehensiveDrugSafetyContext {
+  drugName: string;
+  faersReportCount: number;
+  hasBoxedWarning: boolean;
+  boxedWarningSummary?: string;
+  recentRecalls: DrugRecallContext[];
+  topAdverseReactions: string[];
+  riskLevel: "high" | "moderate" | "low";
 }
 
 export interface CareGapContext {

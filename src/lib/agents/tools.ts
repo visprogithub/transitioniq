@@ -6,7 +6,12 @@
  */
 
 import { getPatient } from "@/lib/data/demo-patients";
-import { checkDrugInteractions } from "@/lib/integrations/fda-client";
+import {
+  checkDrugInteractions,
+  checkBoxedWarnings,
+  checkDrugRecalls,
+  getComprehensiveDrugSafety,
+} from "@/lib/integrations/fda-client";
 import {
   analyzeDischargeReadiness as llmAnalyzeReadiness,
   generateDischargePlan as llmGeneratePlan,
@@ -25,7 +30,17 @@ import {
 import { retrieveKnowledge, getIndexStats } from "@/lib/knowledge-base/knowledge-index";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
-import type { ToolResult, ToolName, PatientContext, DrugInteractionContext, CareGapContext, CostContext } from "./types";
+import type {
+  ToolResult,
+  ToolName,
+  PatientContext,
+  DrugInteractionContext,
+  BoxedWarningContext,
+  DrugRecallContext,
+  ComprehensiveDrugSafetyContext,
+  CareGapContext,
+  CostContext,
+} from "./types";
 import { extractJsonArray } from "@/lib/utils/llm-json";
 
 /**
@@ -43,6 +58,24 @@ export const TOOLS: Record<ToolName, ToolDefinition> = {
     description: "Check for drug-drug interactions using FDA RxNorm database",
     parameters: ["medications"],
     execute: checkDrugInteractionsTool,
+  },
+  check_boxed_warnings: {
+    name: "check_boxed_warnings",
+    description: "Check for FDA Black Box Warnings on medications - the most serious safety warnings",
+    parameters: ["medications"],
+    execute: checkBoxedWarningsTool,
+  },
+  check_drug_recalls: {
+    name: "check_drug_recalls",
+    description: "Check for recent FDA drug recalls and enforcement actions",
+    parameters: ["drugName"],
+    execute: checkDrugRecallsTool,
+  },
+  get_comprehensive_drug_safety: {
+    name: "get_comprehensive_drug_safety",
+    description: "Get comprehensive FDA safety profile including FAERS adverse event counts, boxed warnings, recalls, and risk level",
+    parameters: ["drugName"],
+    execute: getComprehensiveDrugSafetyTool,
   },
   evaluate_care_gaps: {
     name: "evaluate_care_gaps",
@@ -147,6 +180,117 @@ async function checkDrugInteractionsTool(input: Record<string, unknown>): Promis
     return {
       success: false,
       error: error instanceof Error ? error.message : "FDA drug interaction check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Check for FDA Black Box Warnings on medications
+ * Uses real FDA label data via OpenFDA API
+ */
+async function checkBoxedWarningsTool(input: Record<string, unknown>): Promise<ToolResult<BoxedWarningContext[]>> {
+  const startTime = Date.now();
+  const medications = input.medications as Patient["medications"];
+
+  try {
+    const warnings = await checkBoxedWarnings(
+      medications.map((m) => ({ name: m.name }))
+    );
+
+    console.log(`[Agent Tool] FDA boxed warnings: found ${warnings.length} for ${medications.length} medications`);
+
+    return {
+      success: true,
+      data: warnings.map((w) => ({
+        drug: w.drug,
+        warning: w.warning,
+      })),
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    console.error("[Agent Tool] FDA boxed warning check failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "FDA boxed warning check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Check for recent FDA drug recalls
+ * Uses OpenFDA enforcement API
+ */
+async function checkDrugRecallsTool(input: Record<string, unknown>): Promise<ToolResult<DrugRecallContext[]>> {
+  const startTime = Date.now();
+  const drugName = input.drugName as string;
+
+  try {
+    const recalls = await checkDrugRecalls(drugName);
+
+    console.log(`[Agent Tool] FDA recalls: found ${recalls.length} for ${drugName}`);
+
+    return {
+      success: true,
+      data: recalls.map((r) => ({
+        drugName: r.drugName,
+        recallNumber: r.recallNumber,
+        reason: r.reason,
+        classification: r.classification,
+        status: r.status,
+        recallDate: r.recallDate,
+      })),
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    console.error("[Agent Tool] FDA recall check failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "FDA recall check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Get comprehensive FDA safety profile for a drug
+ * Combines FAERS adverse event counts, boxed warnings, recalls, and risk level
+ */
+async function getComprehensiveDrugSafetyTool(input: Record<string, unknown>): Promise<ToolResult<ComprehensiveDrugSafetyContext>> {
+  const startTime = Date.now();
+  const drugName = input.drugName as string;
+
+  try {
+    const safety = await getComprehensiveDrugSafety(drugName);
+
+    console.log(`[Agent Tool] Comprehensive safety for ${drugName}: FAERS=${safety.faersReportCount}, boxedWarning=${safety.hasBoxedWarning}, recalls=${safety.recentRecalls.length}, risk=${safety.riskLevel}`);
+
+    return {
+      success: true,
+      data: {
+        drugName: safety.drugName,
+        faersReportCount: safety.faersReportCount,
+        hasBoxedWarning: safety.hasBoxedWarning,
+        boxedWarningSummary: safety.boxedWarningSummary,
+        recentRecalls: safety.recentRecalls.map((r) => ({
+          drugName: r.drugName,
+          recallNumber: r.recallNumber,
+          reason: r.reason,
+          classification: r.classification,
+          status: r.status,
+          recallDate: r.recallDate,
+        })),
+        topAdverseReactions: safety.topAdverseReactions,
+        riskLevel: safety.riskLevel,
+      },
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    console.error("[Agent Tool] Comprehensive safety check failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Comprehensive safety check failed",
       duration: Date.now() - startTime,
     };
   }
