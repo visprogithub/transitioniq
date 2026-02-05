@@ -427,6 +427,20 @@ Generate the final plan as a clear, formatted checklist that clinical staff and 
     });
   } catch (error) {
     console.error("Plan generation error:", error);
+
+    // Set errorInfo on the route-level trace so Opik dashboard counts this error
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
+    };
+    trace?.update({
+      errorInfo,
+      output: { error: errorMessage },
+    });
+    trace?.end();
+
     await traceError("api-generate-plan", error);
     trace?.end();
 

@@ -14,7 +14,7 @@ import { DischargePlan } from "@/components/DischargePlan";
 import { Tooltip } from "@/components/Tooltip";
 import { JudgeScoreBadge, type JudgeEvaluation } from "@/components/JudgeScoreBadge";
 import type { Patient } from "@/lib/types/patient";
-import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
+import type { DischargeAnalysis, RiskFactor, ClinicianEdits } from "@/lib/types/analysis";
 
 // Extended analysis type with model and agent info
 interface AnalysisWithModel extends DischargeAnalysis {
@@ -44,6 +44,9 @@ interface AnalysisWithModel extends DischargeAnalysis {
 }
 
 type TabType = "dashboard" | "patient" | "evaluation";
+
+// Kill-switch: set NEXT_PUBLIC_DISABLE_EVALUATION=true to hide the evaluation tab
+const evaluationEnabled = process.env.NEXT_PUBLIC_DISABLE_EVALUATION !== "true";
 
 // ---------------------------------------------------------------------------
 // sessionStorage analysis cache — auto-clears on tab close; 10-min TTL
@@ -151,6 +154,11 @@ export default function DashboardPage() {
   // Rate limit state for discharge plan generation
   const [planRateLimitReset, setPlanRateLimitReset] = useState<number | null>(null);
   const [planRateLimitCountdown, setPlanRateLimitCountdown] = useState("");
+  // Clinician edits overlay on AI-generated discharge plan
+  const [clinicianEdits, setClinicianEdits] = useState<ClinicianEdits>({
+    customItems: [],
+    dismissedItemKeys: [],
+  });
 
   // Initialize session cookie on first visit (for server-side rate limiting)
   useEffect(() => {
@@ -193,6 +201,7 @@ export default function DashboardPage() {
       setError(null);
       setAnalysis(null);
       setDischargePlan(null);
+      setClinicianEdits({ customItems: [], dismissedItemKeys: [] });
       setJudgeEvaluation(null);
       setJudgeError(null);
       setPatientSummary(null); // Clear cached summary when patient changes
@@ -221,6 +230,7 @@ export default function DashboardPage() {
     setError(null);
     setModelLimitError(null);
     setDischargePlan(null);
+    setClinicianEdits({ customItems: [], dismissedItemKeys: [] });
     setPlanRateLimitReset(null);
     setJudgeEvaluation(null);
     setJudgeError(null);
@@ -359,6 +369,38 @@ export default function DashboardPage() {
     }
   }
 
+  // Clinician edit handlers
+  function addCustomItem(text: string, priority: "high" | "moderate" | "standard") {
+    setClinicianEdits((prev) => ({
+      ...prev,
+      customItems: [
+        ...prev.customItems,
+        { id: crypto.randomUUID(), text, priority, addedAt: new Date().toISOString() },
+      ],
+    }));
+  }
+
+  function dismissItem(key: string) {
+    setClinicianEdits((prev) => ({
+      ...prev,
+      dismissedItemKeys: [...prev.dismissedItemKeys, key],
+    }));
+  }
+
+  function restoreItem(key: string) {
+    setClinicianEdits((prev) => ({
+      ...prev,
+      dismissedItemKeys: prev.dismissedItemKeys.filter((k) => k !== key),
+    }));
+  }
+
+  function removeCustomItem(id: string) {
+    setClinicianEdits((prev) => ({
+      ...prev,
+      customItems: prev.customItems.filter((i) => i.id !== id),
+    }));
+  }
+
   const toggleRiskFactor = (id: string) => {
     setExpandedRiskFactors((prev) => {
       const next = new Set(prev);
@@ -423,6 +465,7 @@ export default function DashboardPage() {
                   <span className="text-xs sm:text-sm">Patient View</span>
                 </button>
               </Tooltip>
+              {evaluationEnabled && (
               <Tooltip content="Test and compare AI models" position="bottom">
                 <button
                   onClick={() => setActiveTab("evaluation")}
@@ -436,6 +479,7 @@ export default function DashboardPage() {
                   <span className="text-xs sm:text-sm">Evaluation</span>
                 </button>
               </Tooltip>
+              )}
             </nav>
 
             {/* Model Selector and Patient Selector - Row on mobile */}
@@ -453,6 +497,7 @@ export default function DashboardPage() {
                   if (analysis) {
                     setAnalysis(null);
                     setDischargePlan(null);
+                    setClinicianEdits({ customItems: [], dismissedItemKeys: [] });
                     setPlanRateLimitReset(null);
                     setJudgeEvaluation(null);
                     setJudgeError(null);
@@ -557,7 +602,7 @@ export default function DashboardPage() {
         </AnimatePresence>
 
         {/* Evaluation Tab */}
-        {activeTab === "evaluation" && <EvaluationDashboard />}
+        {evaluationEnabled && activeTab === "evaluation" && <EvaluationDashboard />}
 
         {/* Patient View Tab */}
         {activeTab === "patient" && (
@@ -567,6 +612,7 @@ export default function DashboardPage() {
             isLoading={isLoadingPatient}
             cachedSummary={patientSummary}
             onSummaryGenerated={setPatientSummary}
+            clinicianEdits={clinicianEdits}
           />
         )}
 
@@ -682,7 +728,7 @@ export default function DashboardPage() {
                 {/* Left Column - Score */}
                 <div className="bg-white rounded-xl shadow-sm p-6">
                   <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-semibold text-gray-900">Discharge Readiness Score</h3>
+                    <h3 className="text-lg font-semibold text-gray-900">Transition Readiness Score</h3>
                     {!isAnalyzing && (
                       <Tooltip content={analysis ? "Run analysis again with current model" : "Assess discharge readiness using AI"} position="bottom">
                         <button
@@ -832,7 +878,7 @@ export default function DashboardPage() {
                             className="flex items-center gap-2 mx-auto px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-lg font-medium hover:from-emerald-600 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg"
                           >
                             <FileText className="w-5 h-5" />
-                            Generate Discharge Plan
+                            Generate Transition Plan
                           </button>
                         </Tooltip>
                       )}
@@ -846,7 +892,7 @@ export default function DashboardPage() {
                       className="mt-6 text-center"
                     >
                       <RefreshCw className="w-6 h-6 text-emerald-500 animate-spin mx-auto mb-2" />
-                      <p className="text-sm text-gray-500">Generating discharge plan...</p>
+                      <p className="text-sm text-gray-500">Generating transition plan...</p>
                     </motion.div>
                   )}
                 </div>
@@ -904,6 +950,11 @@ export default function DashboardPage() {
                   <DischargePlan
                     plan={dischargePlan}
                     patientName={patient?.name}
+                    clinicianEdits={clinicianEdits}
+                    onAddCustomItem={addCustomItem}
+                    onDismissItem={dismissItem}
+                    onRestoreItem={restoreItem}
+                    onRemoveCustomItem={removeCustomItem}
                   />
                 </motion.div>
               )}

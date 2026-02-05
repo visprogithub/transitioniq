@@ -4,7 +4,7 @@ import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
-import { traceDataSourceCall, traceError } from "@/lib/integrations/opik";
+import { getOpikClient, traceDataSourceCall, traceError, flushTraces } from "@/lib/integrations/opik";
 import { getActiveModelId, setActiveModel, resetLLMProvider, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
 import { runAgent, getSession } from "@/lib/agents/orchestrator";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
@@ -14,6 +14,15 @@ export async function POST(request: NextRequest) {
   // Rate limit: agent pipeline (1-7 LLM calls)
   const blocked = applyRateLimit(request, "analyze");
   if (blocked) return blocked;
+
+  const opik = getOpikClient();
+  const trace = opik?.trace({
+    name: "discharge-analysis",
+    metadata: {
+      model: getActiveModelId(),
+      category: "analysis",
+    },
+  });
 
   try {
     const body = await request.json();
@@ -84,6 +93,17 @@ export async function POST(request: NextRequest) {
             { status: 502 }
           );
         }
+
+        // End route-level trace on success
+        trace?.update({
+          output: {
+            success: true,
+            score: agentResponse.analysis.score,
+            status: agentResponse.analysis.status,
+            agent: true,
+          },
+        });
+        trace?.end();
 
         // Return agent response with full context
         return NextResponse.json({
@@ -179,6 +199,21 @@ export async function POST(request: NextRequest) {
       costEstimates
     );
 
+    // End route-level trace on success (direct LLM path)
+    trace?.update({
+      output: {
+        success: true,
+        score: analysis.score,
+        status: analysis.status,
+        agent: false,
+        agentFallback: agentFallbackOccurred,
+      },
+    });
+    trace?.end();
+
+    // Flush all Opik traces before returning (single flush covers all LLM spans)
+    await flushTraces();
+
     // Include model info in response with fallback transparency
     return NextResponse.json({
       ...analysis,
@@ -190,6 +225,20 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Analysis error:", error);
+
+    // Set errorInfo on the route-level trace so Opik dashboard counts this error
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
+    };
+    trace?.update({
+      errorInfo,
+      output: { error: errorMessage },
+    });
+    trace?.end();
+
     await traceError("api-analyze", error);
 
     // Check if this is a rate limit or usage limit error

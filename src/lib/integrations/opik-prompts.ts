@@ -387,7 +387,7 @@ Respond with ONLY valid JSON in this exact format:
 const DISCHARGE_PLAN_PROMPT = `You are generating a discharge checklist for a care team. Generate ONLY actionable task items based on the patient's specific risk factors. Tailor patient education tasks to the patient's age and likely comprehension level.
 
 Patient: {{patient_name}}, {{patient_age}}yo {{patient_gender}}
-Discharge Readiness Score: {{score}}/100 ({{status}})
+Transition Readiness Score: {{score}}/100
 
 HIGH-SEVERITY RISKS:
 {{high_risks}}
@@ -404,7 +404,7 @@ Consider the patient's age when generating tasks:
 
 IMPORTANT FORMATTING RULES:
 1. Use ONLY these 5 section headers with ** markers:
-   **HIGH PRIORITY - Must Complete Before Discharge**
+   **HIGH PRIORITY - Must Complete Before Transition**
    **MODERATE PRIORITY - Should Complete**
    **STANDARD TASKS**
    **FOLLOW-UP APPOINTMENTS**
@@ -422,9 +422,9 @@ IMPORTANT FORMATTING RULES:
 4. Each task must be a SPECIFIC ACTION based on the patient's actual risk factors
 
 Example format:
-**HIGH PRIORITY - Must Complete Before Discharge**
+**HIGH PRIORITY - Must Complete Before Transition**
 - [ ] Review warfarin + aspirin interaction with clinical pharmacist
-- [ ] Verify INR is within therapeutic range (2.0-3.0) before discharge
+- [ ] Verify INR is within therapeutic range (2.0-3.0) before transition
 
 **FOLLOW-UP APPOINTMENTS**
 - [ ] Schedule cardiology follow-up within 7 days
@@ -459,12 +459,20 @@ const DISCHARGE_ANALYSIS_PROMPT = `You are a clinical decision support system an
 {{lab_results}}
 
 ## Task
-Analyze this patient's discharge readiness and provide:
+Analyze this patient's transition readiness and provide:
 
-1. An overall readiness score from 0-100 (higher = more ready)
-   - 70-100: Ready for discharge
-   - 40-69: Caution - address issues before discharge
-   - 0-39: Not ready - significant concerns
+1. An overall readiness score from 0-100 (higher = more ready for transition)
+   - 80-100: Low complexity — routine transition, few or no active concerns
+   - 65-79: Moderate complexity — minor issues to address but generally on track
+   - 45-64: Notable concerns — several issues warrant clinical review before transition
+   - 25-44: Significant concerns — multiple serious issues requiring attention
+   - 0-24: Critical — immediate safety risks (active bleeding, critical lab values, unstable vitals)
+
+   Calibration guidance:
+   - A typical post-surgical patient recovering well with stable vitals should score 75-90.
+   - A complex medical patient with multiple chronic conditions but no acute dangers should score 45-65.
+   - Patients with active safety concerns (e.g. supratherapeutic INR, duplicate anticoagulants, toxic drug levels, severe neutropenia, dangerous Beers Criteria violations in elderly, dialysis-dependent with hyperkalemia) should score 15-35.
+   - Only the most extreme cases (multiple simultaneous acute crises, hemodynamic instability) should score below 15.
 
 2. A list of risk factors categorized by severity (high/moderate/low)
 
@@ -496,7 +504,7 @@ IMPORTANT SOURCE LABELING RULES:
 - Care gaps from clinical guidelines → "Guidelines"
 - Cost/affordability barriers → "CMS"
 
-Be conservative - if there are major drug interactions or unmet Grade A guidelines, the score should reflect significant risk.`;
+If there are major drug interactions or unmet Grade A guidelines, the score should reflect significant risk.`;
 
 /**
  * Initialize prompts in Opik Prompt Library
@@ -1235,55 +1243,3 @@ export async function logPromptUsage(
   }
 }
 
-/**
- * Create a chat prompt for multi-turn conversations
- */
-export async function createConversationPrompt(): Promise<{
-  promptName: string;
-  commit: string;
-} | null> {
-  const opik = getOpikClient();
-  if (!opik) return null;
-
-  try {
-    const messages = [
-      {
-        role: "system",
-        content: `You are a clinical decision support assistant helping healthcare providers assess discharge readiness.
-
-You have access to the following patient data:
-- Demographics and admission information
-- Current medications and allergies
-- Drug interaction analysis from FDA
-- Care gap analysis from clinical guidelines
-- Cost estimates from CMS
-
-Be helpful, accurate, and always prioritize patient safety.`,
-      },
-      {
-        role: "user",
-        content: "{{user_message}}",
-      },
-    ];
-
-    const chatPrompt = await opik.createChatPrompt({
-      name: "discharge-assistant",
-      messages,
-      metadata: {
-        version: "1.0",
-        author: "transitioniq",
-        description: "Multi-turn conversation prompt for discharge assistance",
-      },
-    });
-
-    console.log(`[Opik] Chat prompt registered: discharge-assistant (commit: ${chatPrompt.commit || "unknown"})`);
-
-    return {
-      promptName: "discharge-assistant",
-      commit: chatPrompt.commit || "unknown",
-    };
-  } catch (error) {
-    console.error("[Opik] Failed to create chat prompt:", error);
-    return null;
-  }
-}

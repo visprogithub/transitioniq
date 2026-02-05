@@ -42,6 +42,39 @@ import type { DischargeAnalysis } from "@/lib/types/analysis";
  */
 const sessions = new Map<string, AgentState>();
 
+const AGENT_SESSION_LIMITS = {
+  MAX_SESSIONS: 30,
+  SESSION_TTL_MS: 30 * 60 * 1000, // 30 minutes
+  CLEANUP_INTERVAL_MS: 5 * 60 * 1000,
+};
+let lastAgentCleanup = Date.now();
+
+/** Evict stale / excess agent sessions */
+function cleanupAgentSessions(): void {
+  const now = Date.now();
+  if (now - lastAgentCleanup < AGENT_SESSION_LIMITS.CLEANUP_INTERVAL_MS) return;
+  lastAgentCleanup = now;
+
+  // Evict sessions older than TTL
+  for (const [id, state] of sessions.entries()) {
+    const updated = new Date(state.updatedAt).getTime();
+    if (now - updated > AGENT_SESSION_LIMITS.SESSION_TTL_MS) {
+      sessions.delete(id);
+    }
+  }
+
+  // If still over limit, drop oldest
+  if (sessions.size > AGENT_SESSION_LIMITS.MAX_SESSIONS) {
+    const sorted = [...sessions.entries()].sort(
+      (a, b) => new Date(a[1].updatedAt).getTime() - new Date(b[1].updatedAt).getTime()
+    );
+    const toRemove = sorted.slice(0, sessions.size - AGENT_SESSION_LIMITS.MAX_SESSIONS);
+    for (const [id] of toRemove) {
+      sessions.delete(id);
+    }
+  }
+}
+
 /**
  * Accumulated context during agent execution
  */
@@ -58,6 +91,8 @@ interface ExecutionContext {
  * Create a new agent session
  */
 export function createSession(goal: string): AgentState {
+  cleanupAgentSessions();
+
   const sessionId = uuidv4();
   const state: AgentState = {
     sessionId,
@@ -82,6 +117,7 @@ export function createSession(goal: string): AgentState {
  * Get an existing session
  */
 export function getSession(sessionId: string): AgentState | undefined {
+  cleanupAgentSessions();
   return sessions.get(sessionId);
 }
 

@@ -285,10 +285,42 @@ function parseAnalysisResponse(patientId: string, responseText: string): Dischar
     }
   );
 
+  // Post-LLM score calibration: enforce ceilings based on risk factor severity.
+  // LLMs tend to under-penalize even when they correctly identify high-severity risks.
+  // This ensures the score aligns with the risk factors the LLM itself generated.
+  let calibratedScore = Math.max(0, Math.min(100, parsed.score));
+  const highCount = riskFactors.filter((rf) => rf.severity === "high").length;
+  const moderateCount = riskFactors.filter((rf) => rf.severity === "moderate").length;
+
+  if (highCount >= 2) {
+    // 2+ high-severity risks = must be in red zone (Needs Further Review)
+    calibratedScore = Math.min(calibratedScore, 35);
+  } else if (highCount === 1 && moderateCount >= 2) {
+    // 1 high + 2+ moderate = cap at low yellow
+    calibratedScore = Math.min(calibratedScore, 45);
+  } else if (highCount === 1) {
+    // 1 high-severity risk = cap at mid yellow
+    calibratedScore = Math.min(calibratedScore, 55);
+  }
+
+  // Derive status from calibrated score (LLM status may not match its own score)
+  let calibratedStatus: DischargeAnalysis["status"];
+  if (calibratedScore >= 70) {
+    calibratedStatus = "ready";
+  } else if (calibratedScore >= 40) {
+    calibratedStatus = "caution";
+  } else {
+    calibratedStatus = "not_ready";
+  }
+
+  if (calibratedScore !== parsed.score) {
+    console.log(`[Analysis] Score calibrated: LLM=${parsed.score} → ${calibratedScore} (${highCount} high, ${moderateCount} moderate risk factors)`);
+  }
+
   return {
     patientId,
-    score: Math.max(0, Math.min(100, parsed.score)),
-    status: parsed.status as DischargeAnalysis["status"],
+    score: calibratedScore,
+    status: calibratedStatus,
     riskFactors,
     recommendations: (parsed.recommendations as string[]) || [],
     analyzedAt: new Date().toISOString(),

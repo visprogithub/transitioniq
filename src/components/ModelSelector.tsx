@@ -50,11 +50,13 @@ export function ModelSelector({ onModelChange, compact = false, isOpenControlled
     setIsLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/evaluate/models");
+      // Use /api/capabilities instead of /api/evaluate/models so model
+      // selection works even when NEXT_PUBLIC_DISABLE_EVALUATION=true
+      const response = await fetch("/api/capabilities");
       if (!response.ok) throw new Error("Failed to load models");
       const data = await response.json();
-      setAvailableModels(data.allModels || []);
-      setActiveModel(data.activeModel || "");
+      setAvailableModels(data.models?.allModels || []);
+      setActiveModel(data.models?.activeModel || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load models");
     } finally {
