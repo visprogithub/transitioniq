@@ -64,6 +64,10 @@ export interface ReActResult {
     startTime: string;
     endTime: string;
     totalLatencyMs: number;
+    totalTokens?: number;
+    promptTokens?: number;
+    completionTokens?: number;
+    estimatedCostUsd?: number;
   };
 }
 
@@ -193,6 +197,11 @@ export async function runReActLoop(
   const steps: ReActStep[] = [];
   const toolsUsed: string[] = [];
 
+  // Aggregate token usage across all LLM calls
+  let totalPromptTokens = 0;
+  let totalCompletionTokens = 0;
+  let totalTokens = 0;
+
   // Set up tracing
   const opik = getOpikClient();
   const trace = opik?.trace({
@@ -235,6 +244,16 @@ Now provide your next step as JSON:`;
         },
       });
 
+      // Aggregate token usage from this LLM call
+      if (response.tokenUsage) {
+        totalPromptTokens += response.tokenUsage.promptTokens;
+        totalCompletionTokens += response.tokenUsage.completionTokens;
+        totalTokens += response.tokenUsage.totalTokens;
+      }
+
+      // Log iteration token usage
+      console.log(`[ReAct] Iteration ${iteration} - Tokens: prompt=${response.tokenUsage?.promptTokens || 0}, completion=${response.tokenUsage?.completionTokens || 0}, latency=${response.latencyMs}ms`);
+
       // Parse the response
       const { thought, action, finalAnswer } = parseReActResponse(response.content);
 
@@ -259,11 +278,25 @@ Now provide your next step as JSON:`;
         iterationSpan?.end();
 
         const endTime = Date.now();
+
+        // Calculate estimated cost (approximate pricing per 1K tokens)
+        const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
+
+        // Log final aggregated token usage
+        console.log(`[ReAct] Complete - Total tokens: ${totalTokens} (prompt: ${totalPromptTokens}, completion: ${totalCompletionTokens}), Est. cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
+
         trace?.update({
           output: {
             answer: finalAnswer,
             iterations: iteration,
             tools_used: toolsUsed,
+          },
+          metadata: {
+            total_tokens: totalTokens,
+            prompt_tokens: totalPromptTokens,
+            completion_tokens: totalCompletionTokens,
+            estimated_cost_usd: estimatedCost,
+            total_latency_ms: endTime - startTime,
           },
         });
         trace?.end();
@@ -279,6 +312,10 @@ Now provide your next step as JSON:`;
             startTime: new Date(startTime).toISOString(),
             endTime: new Date(endTime).toISOString(),
             totalLatencyMs: endTime - startTime,
+            totalTokens: totalTokens || undefined,
+            promptTokens: totalPromptTokens || undefined,
+            completionTokens: totalCompletionTokens || undefined,
+            estimatedCostUsd: estimatedCost,
           },
         };
       }
@@ -344,12 +381,23 @@ Now provide your next step as JSON:`;
       .join(" ")}`;
 
     const endTime = Date.now();
+    const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
+
+    console.log(`[ReAct] Max iterations reached - Total tokens: ${totalTokens} (prompt: ${totalPromptTokens}, completion: ${totalCompletionTokens}), Est. cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
+
     trace?.update({
       output: {
         answer: fallbackAnswer,
         iterations: maxIterations,
         tools_used: toolsUsed,
         hit_max_iterations: true,
+      },
+      metadata: {
+        total_tokens: totalTokens,
+        prompt_tokens: totalPromptTokens,
+        completion_tokens: totalCompletionTokens,
+        estimated_cost_usd: estimatedCost,
+        total_latency_ms: endTime - startTime,
       },
     });
     trace?.end();
@@ -365,12 +413,27 @@ Now provide your next step as JSON:`;
         startTime: new Date(startTime).toISOString(),
         endTime: new Date(endTime).toISOString(),
         totalLatencyMs: endTime - startTime,
+        totalTokens: totalTokens || undefined,
+        promptTokens: totalPromptTokens || undefined,
+        completionTokens: totalCompletionTokens || undefined,
+        estimatedCostUsd: estimatedCost,
       },
     };
   } catch (error) {
+    const endTime = Date.now();
+    const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
+
+    console.error(`[ReAct] Error - Total tokens before failure: ${totalTokens}, Est. cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
+
     trace?.update({
       metadata: {
         error: error instanceof Error ? error.message : String(error),
+        error_stack: error instanceof Error ? error.stack : undefined,
+        total_tokens: totalTokens,
+        prompt_tokens: totalPromptTokens,
+        completion_tokens: totalCompletionTokens,
+        estimated_cost_usd: estimatedCost,
+        total_latency_ms: endTime - startTime,
       },
     });
     trace?.end();
