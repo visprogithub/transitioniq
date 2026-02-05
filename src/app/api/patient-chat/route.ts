@@ -302,6 +302,8 @@ export async function POST(request: NextRequest) {
       tools,
       maxIterations: LIMITS.MAX_REACT_ITERATIONS,
       threadId,
+      // Use quick grounding check (pattern-based, no LLM call) to catch hallucinated dosages/stats
+      verifyGrounding: "quick" as const,
       metadata: {
         patientId,
         turnNumber,

@@ -170,6 +170,7 @@ function parseReActResponse(content: string): {
   thought: string;
   action: { tool: string; args: Record<string, unknown> } | null;
   finalAnswer: string | null;
+  parseError?: string;
 } {
   // Strip any thinking tokens from models like Qwen3
   const cleanContent = content
@@ -178,17 +179,27 @@ function parseReActResponse(content: string): {
     .trim();
 
   // Try to extract JSON from the response
-  const parsed = extractJsonObject<{
-    thought?: string;
-    action?: { tool: string; args: Record<string, unknown> };
-    final_answer?: string;
-  }>(cleanContent);
+  try {
+    const parsed = extractJsonObject<{
+      thought?: string;
+      action?: { tool: string; args: Record<string, unknown> };
+      final_answer?: string;
+    }>(cleanContent);
 
-  return {
-    thought: parsed.thought || "Unable to parse thought",
-    action: parsed.action || null,
-    finalAnswer: parsed.final_answer || null,
-  };
+    return {
+      thought: parsed.thought || "Analyzing...",
+      action: parsed.action || null,
+      finalAnswer: parsed.final_answer || null,
+    };
+  } catch (error) {
+    // Return parse error so caller can retry with LLM
+    return {
+      thought: "Parse error",
+      action: null,
+      finalAnswer: null,
+      parseError: error instanceof Error ? error.message : "Failed to parse JSON",
+    };
+  }
 }
 
 /**
@@ -226,9 +237,10 @@ export async function runReActLoop(
   });
 
   try {
+    const provider = createLLMProvider();
+
     // Build the full system prompt with tool definitions
     const systemPrompt = buildReActSystemPrompt(options.systemPrompt, options.tools);
-    const provider = createLLMProvider();
 
     // Build conversation history for multi-turn reasoning
     let conversationHistory = `User: ${userMessage}\n\n`;
@@ -265,7 +277,44 @@ Now provide your next step as JSON:`;
       console.log(`[ReAct] Iteration ${iteration} - Tokens: prompt=${response.tokenUsage?.promptTokens || 0}, completion=${response.tokenUsage?.completionTokens || 0}, latency=${response.latencyMs}ms`);
 
       // Parse the response
-      const { thought, action, finalAnswer } = parseReActResponse(response.content);
+      let parsed = parseReActResponse(response.content);
+
+      // If parsing failed, ask LLM to retry with correct format (one retry only)
+      if (parsed.parseError) {
+        console.warn(`[ReAct] Parse error: ${parsed.parseError}, asking LLM to retry`);
+
+        const retryPrompt = `Your previous response could not be parsed. Please respond with ONLY valid JSON in this exact format:
+
+{"thought": "your reasoning here", "action": {"tool": "tool_name", "args": {}}}
+
+OR for a final answer:
+
+{"thought": "your reasoning here", "final_answer": "your complete answer"}
+
+Your previous response was:
+${response.content.slice(0, 500)}
+
+Please fix and respond with valid JSON only:`;
+
+        const retryResponse = await provider.generate(retryPrompt, {
+          spanName: `react-step-${iteration}-retry`,
+          systemPrompt,
+          metadata: { iteration, retry: true },
+        });
+
+        if (retryResponse.tokenUsage) {
+          totalPromptTokens += retryResponse.tokenUsage.promptTokens;
+          totalCompletionTokens += retryResponse.tokenUsage.completionTokens;
+          totalTokens += retryResponse.tokenUsage.totalTokens;
+        }
+
+        parsed = parseReActResponse(retryResponse.content);
+        if (parsed.parseError) {
+          console.error(`[ReAct] Retry also failed: ${parsed.parseError}`);
+        }
+      }
+
+      const { thought, action, finalAnswer } = parsed;
 
       // Create step record
       const step: ReActStep = {
