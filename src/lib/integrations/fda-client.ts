@@ -1,10 +1,68 @@
 /**
  * FDA Drug Interactions Client
  * Uses OpenFDA API for drug safety data and RxNorm for drug interactions
+ *
+ * Includes in-memory caching to reduce API calls - drug safety data
+ * doesn't change frequently (labels updated monthly, interactions are stable)
  */
 
 const OPENFDA_BASE = "https://api.fda.gov/drug";
 const RXNORM_BASE = "https://rxnav.nlm.nih.gov/REST";
+
+// Cache TTLs in milliseconds
+const CACHE_TTL = {
+  RXCUI: 7 * 24 * 60 * 60 * 1000, // 7 days - RxNorm codes are essentially static
+  DRUG_LABEL: 24 * 60 * 60 * 1000, // 24 hours - labels change rarely
+  INTERACTIONS: 24 * 60 * 60 * 1000, // 24 hours - interactions are stable
+  FAERS_COUNT: 24 * 60 * 60 * 1000, // 24 hours - counts grow slowly
+  RECALLS: 12 * 60 * 60 * 1000, // 12 hours - more time-sensitive
+};
+
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+
+// In-memory caches (would use Redis in production)
+const rxcuiCache = new Map<string, CacheEntry<string | null>>();
+const drugLabelCache = new Map<string, CacheEntry<DrugSafetyInfo | null>>();
+const interactionsCache = new Map<string, CacheEntry<DrugInteraction[]>>();
+const faersCache = new Map<string, CacheEntry<number>>();
+const recallsCache = new Map<string, CacheEntry<DrugRecall[]>>();
+
+function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string): T | undefined {
+  const entry = cache.get(key);
+  if (entry && Date.now() < entry.expiresAt) {
+    return entry.data;
+  }
+  if (entry) {
+    cache.delete(key); // Expired, remove it
+  }
+  return undefined;
+}
+
+function setCache<T>(cache: Map<string, CacheEntry<T>>, key: string, data: T, ttl: number): void {
+  cache.set(key, { data, expiresAt: Date.now() + ttl });
+}
+
+// Cache stats for monitoring
+export function getFDACacheStats() {
+  return {
+    rxcui: rxcuiCache.size,
+    drugLabel: drugLabelCache.size,
+    interactions: interactionsCache.size,
+    faers: faersCache.size,
+    recalls: recallsCache.size,
+  };
+}
+
+export function clearFDACache() {
+  rxcuiCache.clear();
+  drugLabelCache.clear();
+  interactionsCache.clear();
+  faersCache.clear();
+  recallsCache.clear();
+}
 
 export interface DrugInteraction {
   drug1: string;
@@ -73,11 +131,19 @@ interface RxNormInteractionResponse {
  * Get RxCUI (RxNorm Concept Unique Identifier) for a drug name
  */
 async function getRxCUI(drugName: string): Promise<string | null> {
+  const cacheKey = drugName.toLowerCase();
+  const cached = getCached(rxcuiCache, cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   try {
     const url = `${RXNORM_BASE}/rxcui.json?name=${encodeURIComponent(drugName)}&search=2`;
     const response = await fetch(url);
     const data = await response.json();
-    return data?.idGroup?.rxnormId?.[0] || null;
+    const result = data?.idGroup?.rxnormId?.[0] || null;
+    setCache(rxcuiCache, cacheKey, result, CACHE_TTL.RXCUI);
+    return result;
   } catch (error) {
     console.error(`Failed to get RxCUI for ${drugName}:`, error);
     return null;
@@ -90,6 +156,16 @@ async function getRxCUI(drugName: string): Promise<string | null> {
 export async function checkDrugInteractions(
   medications: Array<{ name: string; rxNormCode?: string }>
 ): Promise<DrugInteraction[]> {
+  // Create cache key from sorted drug names (order doesn't matter for interactions)
+  const cacheKey = medications
+    .map((m) => m.name.toLowerCase())
+    .sort()
+    .join("|");
+  const cached = getCached(interactionsCache, cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   const interactions: DrugInteraction[] = [];
 
   // Get RxCUIs for all medications
@@ -171,6 +247,7 @@ export async function checkDrugInteractions(
   // (Warfarin+Aspirin, Warfarin+Eliquis, ACE+Potassium, Digoxin+Amiodarone, Statin+Fibrate)
   // Relying on API data is more accurate, up-to-date, and evidence-based (with FAERS enrichment)
 
+  setCache(interactionsCache, cacheKey, interactions, CACHE_TTL.INTERACTIONS);
   return interactions;
 }
 
@@ -178,6 +255,12 @@ export async function checkDrugInteractions(
  * Get FDA adverse event reports (FAERS) count for a drug
  */
 export async function getFAERSCount(drugName: string): Promise<number> {
+  const cacheKey = drugName.toLowerCase();
+  const cached = getCached(faersCache, cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   try {
     const url = `${OPENFDA_BASE}/event.json?search=patient.drug.medicinalproduct:"${encodeURIComponent(drugName)}"&count=receivedate`;
     const response = await fetch(url);
@@ -187,7 +270,9 @@ export async function getFAERSCount(drugName: string): Promise<number> {
     }
 
     const data: OpenFDAResponse = await response.json();
-    return data.meta?.results?.total || 0;
+    const count = data.meta?.results?.total || 0;
+    setCache(faersCache, cacheKey, count, CACHE_TTL.FAERS_COUNT);
+    return count;
   } catch (error) {
     console.error(`FAERS lookup failed for ${drugName}:`, error);
     return 0;
@@ -198,11 +283,18 @@ export async function getFAERSCount(drugName: string): Promise<number> {
  * Get drug safety information from FDA labels
  */
 export async function getDrugSafetyInfo(drugName: string): Promise<DrugSafetyInfo | null> {
+  const cacheKey = drugName.toLowerCase();
+  const cached = getCached(drugLabelCache, cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   try {
     const url = `${OPENFDA_BASE}/label.json?search=openfda.brand_name:"${encodeURIComponent(drugName)}"+openfda.generic_name:"${encodeURIComponent(drugName)}"&limit=1`;
     const response = await fetch(url);
 
     if (!response.ok) {
+      setCache(drugLabelCache, cacheKey, null, CACHE_TTL.DRUG_LABEL);
       return null;
     }
 
@@ -221,16 +313,19 @@ export async function getDrugSafetyInfo(drugName: string): Promise<DrugSafetyInf
     const label = data.results?.[0];
 
     if (!label) {
+      setCache(drugLabelCache, cacheKey, null, CACHE_TTL.DRUG_LABEL);
       return null;
     }
 
-    return {
+    const result: DrugSafetyInfo = {
       drugName: label.openfda?.brand_name?.[0] || label.openfda?.generic_name?.[0] || drugName,
       boxedWarning: label.boxed_warning?.[0],
       warnings: label.warnings || [],
       adverseReactions: label.adverse_reactions || [],
       contraindications: label.contraindications || [],
     };
+    setCache(drugLabelCache, cacheKey, result, CACHE_TTL.DRUG_LABEL);
+    return result;
   } catch (error) {
     console.error(`FDA label lookup failed for ${drugName}:`, error);
     return null;
@@ -273,6 +368,12 @@ export interface DrugRecall {
 export async function checkDrugRecalls(
   drugName: string
 ): Promise<DrugRecall[]> {
+  const cacheKey = drugName.toLowerCase();
+  const cached = getCached(recallsCache, cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   try {
     const url = `${OPENFDA_BASE}/enforcement.json?search=openfda.brand_name:"${encodeURIComponent(
       drugName
@@ -280,6 +381,7 @@ export async function checkDrugRecalls(
     const response = await fetch(url);
 
     if (!response.ok) {
+      setCache(recallsCache, cacheKey, [], CACHE_TTL.RECALLS);
       return [];
     }
 
@@ -297,7 +399,7 @@ export async function checkDrugRecalls(
 
     const data: { results?: EnforcementResult[] } = await response.json();
 
-    return (data.results || []).map((r) => ({
+    const results = (data.results || []).map((r) => ({
       drugName: r.openfda?.brand_name?.[0] || r.openfda?.generic_name?.[0] || drugName,
       recallNumber: r.recall_number || "Unknown",
       reason: r.reason_for_recall || "Not specified",
@@ -305,6 +407,8 @@ export async function checkDrugRecalls(
       status: r.status || "Unknown",
       recallDate: r.recall_initiation_date || "Unknown",
     }));
+    setCache(recallsCache, cacheKey, results, CACHE_TTL.RECALLS);
+    return results;
   } catch (error) {
     console.error(`Drug recall check failed for ${drugName}:`, error);
     return [];
