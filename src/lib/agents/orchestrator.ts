@@ -362,17 +362,32 @@ function createAssessmentTools(
         if (!executionContext.patient) {
           return { error: "No patient data. Call fetch_patient first." };
         }
+
+        // Auto-fetch missing data if LLM skipped steps (makes agent more robust)
         if (!executionContext.drugInteractions) {
-          return { error: "No drug interaction data. Call check_drug_interactions first." };
+          console.log("[analyze_readiness] Auto-fetching missing drug interactions");
+          const drugResult = await executeTool("check_drug_interactions", {
+            medications: executionContext.patient.medications
+          });
+          if (drugResult.success) {
+            executionContext.drugInteractions = drugResult.data as unknown[];
+          }
         }
+
         if (!executionContext.careGaps) {
-          return { error: "No care gap data. Call evaluate_care_gaps first." };
+          console.log("[analyze_readiness] Auto-fetching missing care gaps");
+          const gapResult = await executeTool("evaluate_care_gaps", {
+            patient: executionContext.patient
+          });
+          if (gapResult.success) {
+            executionContext.careGaps = gapResult.data as unknown[];
+          }
         }
 
         const result = await executeTool("analyze_readiness", {
           patient: executionContext.patient,
-          drugInteractions: executionContext.drugInteractions,
-          careGaps: executionContext.careGaps,
+          drugInteractions: executionContext.drugInteractions || [],
+          careGaps: executionContext.careGaps || [],
           preventiveCareGaps: executionContext.preventiveCareGaps || [],
           costs: executionContext.costs || [],
           knowledgeContext: executionContext.knowledgeContext,

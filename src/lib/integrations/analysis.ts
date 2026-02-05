@@ -214,7 +214,8 @@ export async function analyzeDischargeReadiness(
   const latencyMs = llmResponse.latencyMs;
 
   // Parse response - strict parsing, no fallback
-  const analysis = parseAnalysisResponse(patient.id, responseText);
+  // Pass cost estimates for post-processing to ensure cost barriers are included
+  const analysis = parseAnalysisResponse(patient.id, responseText, costEstimates);
 
   // Log to Opik with prompt commit tracking, model info, AND token usage
   const modelId = getActiveModelId();
@@ -249,8 +250,13 @@ export async function analyzeDischargeReadiness(
 
 /**
  * Parse LLM response - strict parsing, throws on failure
+ * Also injects any missing cost barriers that the LLM failed to include
  */
-function parseAnalysisResponse(patientId: string, responseText: string): DischargeAnalysis {
+function parseAnalysisResponse(
+  patientId: string,
+  responseText: string,
+  costEstimates?: CostEstimate[]
+): DischargeAnalysis {
   // Extract JSON from response (handles Qwen3 thinking tokens, trailing commas, etc.)
   const parsed = extractJsonObject<Record<string, unknown>>(responseText);
 
@@ -284,6 +290,39 @@ function parseAnalysisResponse(patientId: string, responseText: string): Dischar
       };
     }
   );
+
+  // Post-LLM: Inject missing cost barriers
+  // LLMs often omit cost barriers when focused on safety-critical issues
+  if (costEstimates && costEstimates.length > 0) {
+    const highCostMeds = costEstimates.filter((c) => c.monthlyOOP >= 100);
+    for (const costMed of highCostMeds) {
+      const medNameLower = costMed.medication.toLowerCase();
+      // Check if LLM already created a cost barrier for this medication
+      // Check both title AND description to avoid duplicates
+      const alreadyCovered = riskFactors.some(
+        (rf) =>
+          rf.category === "cost_barrier" &&
+          (rf.title.toLowerCase().includes(medNameLower) ||
+           rf.description.toLowerCase().includes(medNameLower))
+      );
+      if (!alreadyCovered) {
+        const severity = costMed.monthlyOOP >= 400 ? "high" : "moderate";
+        riskFactors.push({
+          id: `rf-cost-${riskFactors.length}`,
+          severity,
+          category: "cost_barrier",
+          title: `High medication cost: ${costMed.medication}`,
+          description: `${costMed.medication} costs approximately $${costMed.monthlyOOP}/month out-of-pocket.${!costMed.covered ? " NOT covered by insurance." : ""} This may affect medication adherence.`,
+          source: "CMS",
+          actionable: true,
+          resolution: costMed.monthlyOOP >= 400
+            ? "Check for manufacturer patient assistance programs or copay cards. Consider pharmacy financial counselor referral."
+            : "Discuss generic alternatives or patient assistance programs with pharmacy.",
+        });
+        console.log(`[Analysis] Injected missing cost barrier risk factor for ${costMed.medication} ($${costMed.monthlyOOP}/month)`);
+      }
+    }
+  }
 
   // Post-LLM score calibration: enforce ceilings based on risk factor severity.
   // LLMs tend to under-penalize even when they correctly identify high-severity risks.

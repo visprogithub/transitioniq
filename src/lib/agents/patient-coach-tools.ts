@@ -28,7 +28,7 @@ import {
 
 // Import external API clients
 import { getPatientFriendlyDrugInfo as getDailyMedDrugInfo } from "@/lib/integrations/dailymed-client";
-import { getPatientSymptomAssessment } from "@/lib/integrations/medlineplus-client";
+import { getPatientSymptomAssessment, searchHealthTopics } from "@/lib/integrations/medlineplus-client";
 import { extractJsonObject } from "@/lib/utils/llm-json";
 import {
   evaluateFoodChoice,
@@ -36,12 +36,145 @@ import {
 } from "@/lib/integrations/usda-nutrition-client";
 import {
   checkFoodDrugInteractions,
+  getAllFoodInteractionsForMedications,
   getFoodGuidanceForPatient,
 } from "@/lib/integrations/food-drug-interactions";
 import {
   getPreventiveRecommendations,
   identifyPreventiveCareGaps,
 } from "@/lib/integrations/myhealthfinder-client";
+
+/**
+ * LLM filter to make external API content patient-friendly and contextual
+ * This ensures all medical information is:
+ * 1. Written in plain language (6th grade reading level)
+ * 2. Contextualized to the patient's specific situation
+ * 3. Concise and actionable
+ * 4. Safe (with appropriate disclaimers)
+ */
+async function makePatientFriendly(
+  content: string,
+  context: {
+    contentType: "medication" | "symptom" | "dietary" | "preventive_care" | "medical_term";
+    patientContext?: {
+      age?: number;
+      conditions?: string[];
+      medications?: string[];
+      recentSurgery?: string;
+    };
+    originalQuery?: string;
+  }
+): Promise<string> {
+  if (!content || content.trim().length === 0) {
+    return content;
+  }
+
+  const llm = createLLMProvider();
+  const patientInfo = context.patientContext
+    ? `Patient: ${context.patientContext.age ? `${context.patientContext.age} years old` : "adult"}${
+        context.patientContext.conditions?.length
+          ? `, conditions: ${context.patientContext.conditions.join(", ")}`
+          : ""
+      }${
+        context.patientContext.medications?.length
+          ? `, taking: ${context.patientContext.medications.join(", ")}`
+          : ""
+      }${context.patientContext.recentSurgery ? `, recent surgery: ${context.patientContext.recentSurgery}` : ""}`
+    : "";
+
+  const contentTypeInstructions: Record<string, string> = {
+    medication: "Focus on what the medication does, key side effects to watch for, and any important warnings. Keep it reassuring but informative.",
+    symptom: "Explain what might cause this, when to be concerned, and what actions to take. Be clear about when to seek emergency care vs. when to call the doctor vs. when to monitor at home.",
+    dietary: "Give practical, specific food recommendations. Focus on what TO eat (not just restrictions). Make it easy to follow with everyday foods.",
+    preventive_care: "Explain why this screening/vaccine matters and what to expect. Make it feel manageable, not scary.",
+    medical_term: "Define this in simple terms anyone can understand. Use an analogy if helpful.",
+  };
+
+  const prompt = `You are a patient health educator. Rewrite this medical information to be patient-friendly.
+
+RULES:
+- Use simple, everyday language (6th grade reading level)
+- Keep it concise (max 3-4 short paragraphs)
+- Be warm and reassuring, not clinical
+- ${contentTypeInstructions[context.contentType] || "Make it easy to understand and actionable."}
+- If the original mentions specific foods, activities, or medications, keep those specifics
+- DO NOT add medical disclaimers or "consult your doctor" unless safety-critical
+- DO NOT use bullet points or markdown formatting - write in natural sentences
+${patientInfo ? `- Personalize for this patient: ${patientInfo}` : ""}
+${context.originalQuery ? `- The patient asked about: "${context.originalQuery}"` : ""}
+
+ORIGINAL CONTENT:
+${content.slice(0, 2000)}
+
+REWRITTEN (patient-friendly):`;
+
+  try {
+    const response = await llm.generate(prompt);
+    const text = response.content?.trim();
+    if (text && text.length > 20) {
+      return text;
+    }
+  } catch (error) {
+    console.error("[makePatientFriendly] LLM filtering failed:", error);
+  }
+
+  // Fallback: return truncated original if LLM fails
+  return content.length > 500 ? content.slice(0, 497) + "..." : content;
+}
+
+/**
+ * Filter a list of items through LLM to make them patient-friendly
+ */
+async function makeListPatientFriendly(
+  items: string[],
+  context: {
+    listType: "foods_to_eat" | "foods_to_avoid" | "tips" | "warnings" | "recommendations";
+    patientContext?: {
+      age?: number;
+      conditions?: string[];
+      recentSurgery?: string;
+    };
+  }
+): Promise<string[]> {
+  if (!items || items.length === 0) return items;
+
+  const llm = createLLMProvider();
+  const listTypeInstructions: Record<string, string> = {
+    foods_to_eat: "Make these sound appealing and doable. Add brief reasons why each is good.",
+    foods_to_avoid: "Explain briefly why to avoid each. Don't be scary, be practical.",
+    tips: "Make these actionable and specific. Start each with a verb.",
+    warnings: "Be clear but not alarmist. Focus on what to DO, not just what's bad.",
+    recommendations: "Prioritize by importance. Make each one feel achievable.",
+  };
+
+  const prompt = `Rewrite these medical recommendations to be patient-friendly and personalized.
+
+RULES:
+- Simple, everyday language
+- Keep each item to 1 sentence (max 15 words)
+- ${listTypeInstructions[context.listType] || "Make practical and easy to follow."}
+- Return ONLY a JSON array of strings, nothing else
+${context.patientContext?.recentSurgery ? `- Patient recently had: ${context.patientContext.recentSurgery}` : ""}
+${context.patientContext?.age ? `- Patient age: ${context.patientContext.age}` : ""}
+
+ORIGINAL LIST:
+${JSON.stringify(items.slice(0, 10))}
+
+REWRITTEN (JSON array only):`;
+
+  try {
+    const response = await llm.generate(prompt);
+    const text = response.content?.trim();
+    const parsed = extractJsonObject(text || "");
+    if (Array.isArray(parsed)) {
+      return parsed.map(String);
+    }
+  } catch (error) {
+    console.error("[makeListPatientFriendly] LLM filtering failed:", error);
+  }
+
+  return items; // Fallback to original
+}
 
 export interface PatientCoachToolDefinition {
   name: string;
@@ -322,6 +455,29 @@ async function executeLookupMedication(
     console.log(`[Patient Coach] Trying FDA DailyMed for ${medicationName}`);
     const fdaInfo = await getDailyMedDrugInfo(medicationName);
     if (fdaInfo) {
+      // Filter through LLM for patient-friendly language
+      const patientContext = {
+        age: patient.age,
+        conditions: patient.diagnoses.map((d) => d.display),
+        medications: patient.medications.map((m) => m.name),
+      };
+
+      const [friendlyPurpose, friendlySideEffects, friendlyWarnings] = await Promise.all([
+        makePatientFriendly(fdaInfo.purpose, {
+          contentType: "medication",
+          patientContext,
+          originalQuery: medicationName,
+        }),
+        makeListPatientFriendly(fdaInfo.sideEffects.slice(0, 5), {
+          listType: "warnings",
+          patientContext,
+        }),
+        makeListPatientFriendly(fdaInfo.warnings.slice(0, 3), {
+          listType: "warnings",
+          patientContext,
+        }),
+      ]);
+
       return {
         toolName: "lookupMedication",
         result: {
@@ -329,9 +485,9 @@ async function executeLookupMedication(
           isPatientMedication: !!patientMed,
           patientDose: patientMed?.dose,
           patientFrequency: patientMed?.frequency,
-          purpose: fdaInfo.purpose,
-          sideEffects: fdaInfo.sideEffects.slice(0, 5), // Limit to top 5
-          warnings: fdaInfo.warnings.slice(0, 3).map((w) => `⚠️ ${w}`),
+          purpose: friendlyPurpose,
+          sideEffects: friendlySideEffects,
+          warnings: friendlyWarnings.map((w) => `⚠️ ${w}`),
           patientTips: fdaInfo.patientTips,
           source: "FDA_DAILYMED",
         },
@@ -534,15 +690,33 @@ async function executeCheckSymptom(
     console.log(`[Patient Coach] Trying MedlinePlus for ${symptom}`);
     const medlinePlusInfo = await getPatientSymptomAssessment(symptom, severity as "mild" | "moderate" | "severe");
     if (medlinePlusInfo) {
+      // Filter through LLM for patient-friendly, contextual response
+      const patientContext = {
+        age: patient.age,
+        conditions: patient.diagnoses.map((d) => d.display),
+        medications: patient.medications.map((m) => m.name),
+      };
+
+      const [friendlyMessage, friendlyActions] = await Promise.all([
+        makePatientFriendly(medlinePlusInfo.message + (medlinePlusInfo.medicalInfo ? ` ${medlinePlusInfo.medicalInfo}` : ""), {
+          contentType: "symptom",
+          patientContext,
+          originalQuery: symptom,
+        }),
+        makeListPatientFriendly(medlinePlusInfo.actions, {
+          listType: "recommendations",
+          patientContext,
+        }),
+      ]);
+
       return {
         toolName: "checkSymptom",
         result: {
           symptom,
           severity,
           urgencyLevel: medlinePlusInfo.urgencyLevel,
-          message: medlinePlusInfo.message,
-          actions: medlinePlusInfo.actions,
-          medicalInfo: medlinePlusInfo.medicalInfo,
+          message: friendlyMessage,
+          actions: friendlyActions,
           possibleMedicationRelated: possibleMedicationCause?.name || null,
           relatedRiskFactors:
             analysis?.riskFactors
@@ -805,8 +979,163 @@ Respond in JSON:
 }
 
 /**
+ * Get search terms for surgery-specific dietary guidance from MedlinePlus
+ */
+function getSurgeryDietSearchTerms(surgeryType: string): string[] {
+  const searchTermMap: Record<string, string[]> = {
+    tonsillectomy: ["tonsillectomy diet", "soft foods after throat surgery", "tonsil removal recovery"],
+    "throat surgery": ["throat surgery diet", "soft diet after surgery", "swallowing difficulty foods"],
+    "abdominal surgery": ["diet after abdominal surgery", "post surgery diet", "soft diet after surgery"],
+    "dental surgery": ["diet after tooth extraction", "soft foods after dental surgery", "wisdom teeth recovery diet"],
+  };
+  return searchTermMap[surgeryType] || ["soft diet after surgery", "post operative diet"];
+}
+
+/**
+ * Fallback dietary guidance for post-surgical patients when API is unavailable
+ * Based on clinical best practices and evidence-based guidelines
+ */
+function getPostSurgicalDietaryFallback(surgeryType: string): {
+  recommendation: string;
+  goodChoices: string[];
+  avoid: string[];
+  tips: string[];
+  warningSignsToReport?: string[];
+} {
+  switch (surgeryType) {
+    case "tonsillectomy":
+    case "throat surgery":
+      return {
+        recommendation: "After throat surgery, eating the right foods helps you heal faster and reduces pain. Focus on soft, cool foods for the first 1-2 weeks.",
+        goodChoices: [
+          "Ice cream, popsicles, and frozen yogurt (soothing and cold)",
+          "Smoothies and milkshakes (nutritious and easy to swallow)",
+          "Applesauce and mashed bananas",
+          "Yogurt and pudding",
+          "Mashed potatoes (cooled, not hot)",
+          "Scrambled eggs (soft and protein-rich)",
+          "Lukewarm broth and cream soups",
+          "Oatmeal or cream of wheat (cooled)",
+          "Soft pasta with butter or mild sauce",
+          "Jell-O and soft gelatin desserts",
+        ],
+        avoid: [
+          "Crunchy foods (chips, crackers, toast, raw vegetables) - can scratch healing tissue",
+          "Spicy foods - irritates the throat",
+          "Acidic foods (citrus, tomatoes, vinegar) - causes stinging and pain",
+          "Very hot foods or drinks - can increase bleeding risk",
+          "Hard or sharp foods (nuts, pretzels, popcorn)",
+          "Carbonated drinks - may cause discomfort",
+          "Red or purple foods/drinks during first few days - makes it hard to identify bleeding",
+        ],
+        tips: [
+          "Cold foods help reduce swelling and pain",
+          "Stay hydrated - drink plenty of water and clear fluids",
+          "It's okay to eat ice cream and popsicles - they're actually recommended!",
+          "Eat small, frequent meals rather than large ones",
+          "Let hot foods cool to lukewarm before eating",
+          "Pain may be worse in the morning - have cold water or ice chips ready",
+          "Gradually introduce regular foods after 1-2 weeks as healing progresses",
+        ],
+        warningSignsToReport: [
+          "Bright red bleeding from mouth or nose",
+          "Fever over 101°F (38.3°C)",
+          "Unable to drink fluids due to pain",
+          "Signs of dehydration (dark urine, dizziness)",
+        ],
+      };
+
+    case "abdominal surgery":
+      return {
+        recommendation: "After abdominal surgery, your digestive system needs time to recover. Follow a gradual progression from clear liquids to regular foods.",
+        goodChoices: [
+          "Clear liquids first (broth, Jell-O, apple juice, water)",
+          "Then advance to: yogurt, pudding, applesauce",
+          "Soft proteins: scrambled eggs, tender chicken, fish",
+          "Cooked vegetables (soft, not raw)",
+          "White rice, plain pasta, white bread",
+          "Bananas and canned fruits",
+          "Low-fat dairy products",
+        ],
+        avoid: [
+          "High-fiber foods initially (raw vegetables, whole grains, beans)",
+          "Fatty or fried foods - hard to digest",
+          "Spicy foods - may cause discomfort",
+          "Carbonated beverages - can cause gas and bloating",
+          "Alcohol - interferes with healing and medications",
+          "Large meals - eat small, frequent portions instead",
+        ],
+        tips: [
+          "Start with small portions and increase gradually",
+          "Chew food thoroughly",
+          "Stay hydrated between meals",
+          "Walk after eating to help digestion",
+          "Keep a food diary to track what works for you",
+          "Gradually add fiber back as your bowels return to normal",
+        ],
+      };
+
+    case "dental surgery":
+      return {
+        recommendation: "After dental surgery, protect the surgical site while maintaining nutrition. Soft foods and proper care help prevent complications.",
+        goodChoices: [
+          "Smoothies and protein shakes (don't use a straw!)",
+          "Yogurt and pudding",
+          "Mashed potatoes and sweet potatoes",
+          "Scrambled eggs",
+          "Applesauce and mashed bananas",
+          "Lukewarm soup (blended, no chunks)",
+          "Oatmeal (cooled)",
+          "Hummus and soft spreads",
+          "Ice cream (helps with swelling)",
+        ],
+        avoid: [
+          "DO NOT use straws - suction can dislodge blood clots (dry socket)",
+          "Crunchy foods (chips, nuts, popcorn)",
+          "Chewy or sticky foods (gum, caramel, tough meat)",
+          "Spicy or acidic foods",
+          "Very hot foods or drinks",
+          "Alcohol - interferes with healing and pain medications",
+          "Smoking - significantly delays healing",
+        ],
+        tips: [
+          "NO STRAWS for at least 1 week - very important!",
+          "Cold foods help reduce swelling",
+          "Chew on the opposite side from the surgical site",
+          "Rinse gently with salt water after 24 hours",
+          "Take pain medication with food to prevent nausea",
+        ],
+      };
+
+    default:
+      return {
+        recommendation: "After surgery, follow a soft diet to help your body heal. Progress gradually from liquids to soft foods to regular foods as tolerated.",
+        goodChoices: [
+          "Clear liquids (broth, water, juice without pulp)",
+          "Soft foods (yogurt, pudding, applesauce)",
+          "Mashed potatoes and soft vegetables",
+          "Scrambled eggs and soft proteins",
+          "Oatmeal and soft cereals",
+        ],
+        avoid: [
+          "Hard, crunchy, or tough foods",
+          "Spicy or acidic foods",
+          "Alcohol",
+          "Very hot foods",
+        ],
+        tips: [
+          "Eat small, frequent meals",
+          "Stay hydrated",
+          "Progress to regular foods gradually",
+          "Follow your surgeon's specific instructions",
+        ],
+      };
+  }
+}
+
+/**
  * Get dietary guidance - Uses USDA API for food lookups and condition-based recommendations
- * No LLM fallback - uses USDA data and clinical guidelines only
+ * For post-surgical patients, uses MedlinePlus API with clinical guideline fallback
  */
 async function executeGetDietaryGuidance(
   topic: string,
@@ -823,6 +1152,22 @@ async function executeGetDietaryGuidance(
     d.display.toLowerCase().includes("kidney") || d.display.toLowerCase().includes("renal")
   );
   const hasCOPD = patient.diagnoses.some((d) => d.display.toLowerCase().includes("copd"));
+
+  // Check for post-surgical conditions that require special diets
+  const diagnosesLower = patient.diagnoses.map((d) => d.display.toLowerCase());
+  const hasTonsillectomy = diagnosesLower.some((d) =>
+    d.includes("tonsillectomy") || d.includes("tonsil") || d.includes("adenoid")
+  );
+  const hasThroatSurgery = diagnosesLower.some((d) =>
+    d.includes("throat") || d.includes("pharyn") || d.includes("laryn") || d.includes("esophag")
+  );
+  const hasAbdominalSurgery = diagnosesLower.some((d) =>
+    d.includes("appendectomy") || d.includes("abdominal") || d.includes("bowel") ||
+    d.includes("intestin") || d.includes("colectomy") || d.includes("hernia repair")
+  );
+  const hasDentalSurgery = diagnosesLower.some((d) =>
+    d.includes("dental") || d.includes("tooth") || d.includes("wisdom teeth") || d.includes("extraction")
+  );
 
   const patientConditions = { hasHeartFailure, hasDiabetes, hasKidneyDisease, takesWarfarin: hasWarfarin, hasCOPD };
   const topicLower = topic.toLowerCase();
@@ -938,13 +1283,47 @@ async function executeGetDietaryGuidance(
     if (topicLower.includes(keyword)) {
       console.log(`[getDietaryGuidance] Matched condition keyword: ${keyword} -> ${condition}`);
       const suggestions = await getConditionBasedFoodSuggestions(condition);
+
+      // Also get food-drug interactions for ALL patient medications
+      const allFoodInteractions = getAllFoodInteractionsForMedications(patient.medications);
+      const medicationFoodWarnings: string[] = [];
+
+      if (allFoodInteractions.length > 0) {
+        // Group by severity for clearer presentation
+        const majorInteractions = allFoodInteractions.filter((i) => i.severity === "major");
+        const moderateInteractions = allFoodInteractions.filter((i) => i.severity === "moderate");
+
+        if (majorInteractions.length > 0) {
+          medicationFoodWarnings.push("⚠️ IMPORTANT Food-Medication Interactions:");
+          for (const interaction of majorInteractions) {
+            medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.recommendation}`);
+          }
+        }
+        if (moderateInteractions.length > 0) {
+          medicationFoodWarnings.push("📋 Other Food Considerations for Your Medications:");
+          for (const interaction of moderateInteractions) {
+            medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.timing || interaction.recommendation}`);
+          }
+        }
+      }
+
       return {
         toolName: "getDietaryGuidance",
         result: {
           topic,
           condition,
           ...suggestions,
-          source: "USDA/Clinical guidelines",
+          medicationFoodWarnings: medicationFoodWarnings.length > 0 ? medicationFoodWarnings : undefined,
+          foodDrugInteractions: allFoodInteractions.length > 0
+            ? allFoodInteractions.map((i) => ({
+                drug: i.drug,
+                food: i.food,
+                severity: i.severity,
+                recommendation: i.recommendation,
+                timing: i.timing,
+              }))
+            : undefined,
+          source: "USDA/Clinical Guidelines + Food-Drug Interaction Database",
         },
         success: true,
       };
@@ -1112,13 +1491,137 @@ async function executeGetDietaryGuidance(
     }
   }
 
-  // STEP 5: Default general healthy eating guidance (no LLM, just evidence-based basics)
+  // STEP 5: Post-surgical dietary guidance (takes priority for recovering patients)
+  // Try MedlinePlus API first for evidence-based guidance, fall back to clinical guidelines
+  const surgeryType = hasTonsillectomy
+    ? "tonsillectomy"
+    : hasThroatSurgery
+      ? "throat surgery"
+      : hasAbdominalSurgery
+        ? "abdominal surgery"
+        : hasDentalSurgery
+          ? "dental surgery"
+          : null;
+
+  if (surgeryType) {
+    console.log(`[getDietaryGuidance] Post-surgical patient detected: ${surgeryType}`);
+    const allFoodInteractions = getAllFoodInteractionsForMedications(patient.medications);
+
+    // Try MedlinePlus API for authoritative dietary guidance
+    const searchTerms = getSurgeryDietSearchTerms(surgeryType);
+    let apiGuidance: { summary: string; url: string } | null = null;
+
+    for (const searchTerm of searchTerms) {
+      try {
+        console.log(`[getDietaryGuidance] Searching MedlinePlus for: ${searchTerm}`);
+        const topics = await searchHealthTopics(searchTerm);
+        if (topics.length > 0 && topics[0].fullSummary) {
+          apiGuidance = {
+            summary: topics[0].fullSummary,
+            url: topics[0].url,
+          };
+          console.log(`[getDietaryGuidance] Found MedlinePlus guidance: ${topics[0].title}`);
+          break;
+        }
+      } catch (error) {
+        console.error(`[getDietaryGuidance] MedlinePlus search failed for ${searchTerm}:`, error);
+      }
+    }
+
+    // Build response with API data + clinical fallback
+    const fallbackGuidance = getPostSurgicalDietaryFallback(surgeryType);
+    const patientContext = {
+      age: patient.age,
+      conditions: patient.diagnoses.map((d) => d.display),
+      recentSurgery: surgeryType,
+    };
+
+    // Filter API response through LLM for patient-friendly language
+    let friendlyRecommendation = fallbackGuidance.recommendation;
+    if (apiGuidance?.summary) {
+      friendlyRecommendation = await makePatientFriendly(apiGuidance.summary, {
+        contentType: "dietary",
+        patientContext,
+        originalQuery: topic,
+      });
+    }
+
+    // Also filter the lists for patient-friendly language
+    const [friendlyGoodChoices, friendlyAvoid, friendlyTips] = await Promise.all([
+      makeListPatientFriendly(fallbackGuidance.goodChoices, {
+        listType: "foods_to_eat",
+        patientContext,
+      }),
+      makeListPatientFriendly(fallbackGuidance.avoid, {
+        listType: "foods_to_avoid",
+        patientContext,
+      }),
+      makeListPatientFriendly(fallbackGuidance.tips, {
+        listType: "tips",
+        patientContext,
+      }),
+    ]);
+
+    return {
+      toolName: "getDietaryGuidance",
+      result: {
+        topic,
+        surgeryType,
+        recommendation: friendlyRecommendation,
+        goodChoices: friendlyGoodChoices,
+        avoid: friendlyAvoid,
+        tips: friendlyTips,
+        warningSignsToReport: fallbackGuidance.warningSignsToReport,
+        foodDrugInteractions: allFoodInteractions.length > 0
+          ? allFoodInteractions.map((i) => ({
+              drug: i.drug,
+              food: i.food,
+              severity: i.severity,
+              recommendation: i.recommendation,
+            }))
+          : undefined,
+        source: apiGuidance
+          ? `MedlinePlus (${apiGuidance.url}) + Clinical best practices`
+          : "Post-surgical dietary guidelines + Clinical best practices",
+        learnMoreUrl: apiGuidance?.url,
+      },
+      success: true,
+    };
+  }
+
+  // STEP 6: Default general healthy eating guidance (no LLM, just evidence-based basics)
+  // But FIRST check for any food-drug interactions for the patient's medications
+  console.log("[getDietaryGuidance] Checking food-drug interactions before returning general guidance");
+
+  const allFoodInteractions = getAllFoodInteractionsForMedications(patient.medications);
+  const medicationFoodWarnings: string[] = [];
+
+  if (allFoodInteractions.length > 0) {
+    const majorInteractions = allFoodInteractions.filter((i) => i.severity === "major");
+    const moderateInteractions = allFoodInteractions.filter((i) => i.severity === "moderate");
+
+    if (majorInteractions.length > 0) {
+      medicationFoodWarnings.push("⚠️ IMPORTANT Food-Medication Interactions:");
+      for (const interaction of majorInteractions) {
+        medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.recommendation}`);
+      }
+    }
+    if (moderateInteractions.length > 0) {
+      medicationFoodWarnings.push("📋 Other Food Considerations for Your Medications:");
+      for (const interaction of moderateInteractions) {
+        medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.timing || interaction.recommendation}`);
+      }
+    }
+  }
+
   console.log("[getDietaryGuidance] Returning general healthy eating guidance");
   return {
     toolName: "getDietaryGuidance",
     result: {
       topic,
-      recommendation: "Here are general healthy eating guidelines. Ask about specific foods or conditions for more personalized advice.",
+      recommendation: medicationFoodWarnings.length > 0
+        ? "Here are dietary guidelines, including important information about your medications and food."
+        : "Here are general healthy eating guidelines. Ask about specific foods or conditions for more personalized advice.",
       goodChoices: [
         "Fresh fruits and vegetables",
         "Lean proteins (chicken, fish, beans)",
@@ -1138,7 +1641,19 @@ async function executeGetDietaryGuidance(
         "Eat regular meals - don't skip meals if on medications",
         "Ask your doctor or a dietitian for personalized advice",
       ],
-      source: "General nutrition guidelines",
+      medicationFoodWarnings: medicationFoodWarnings.length > 0 ? medicationFoodWarnings : undefined,
+      foodDrugInteractions: allFoodInteractions.length > 0
+        ? allFoodInteractions.map((i) => ({
+            drug: i.drug,
+            food: i.food,
+            severity: i.severity,
+            recommendation: i.recommendation,
+            timing: i.timing,
+          }))
+        : undefined,
+      source: allFoodInteractions.length > 0
+        ? "General nutrition guidelines + Food-Drug Interaction Database"
+        : "General nutrition guidelines",
     },
     success: true,
   };
@@ -1381,6 +1896,33 @@ async function executeGetPreventiveCare(
         }))
       : [];
 
+    // Filter descriptions through LLM for patient-friendly language
+    const patientContext = {
+      age: patient.age,
+      conditions: patient.diagnoses.map((d) => d.display),
+    };
+
+    // Make the details patient-friendly
+    const friendlyDetails = await Promise.all(
+      filteredRecommendations.slice(0, 10).map(async (rec) => {
+        const friendlyDescription = rec.description
+          ? await makePatientFriendly(rec.description, {
+              contentType: "preventive_care",
+              patientContext,
+              originalQuery: rec.title,
+            })
+          : "";
+        return {
+          title: rec.title,
+          category: rec.category,
+          description: friendlyDescription,
+          frequency: rec.frequency,
+          grade: rec.uspstfGrade,
+          learnMore: rec.actionUrl,
+        };
+      })
+    );
+
     return {
       toolName: "getPreventiveCare",
       result: {
@@ -1403,14 +1945,7 @@ async function executeGetPreventiveCare(
               count: 0,
               note: "No obvious care gaps identified. Continue with regular checkups.",
             },
-        details: filteredRecommendations.slice(0, 10).map((rec) => ({
-          title: rec.title,
-          category: rec.category,
-          description: rec.description,
-          frequency: rec.frequency,
-          grade: rec.uspstfGrade,
-          learnMore: rec.actionUrl,
-        })),
+        details: friendlyDetails,
         importantNote:
           "These are general recommendations based on national guidelines. Your individual needs may vary. Always discuss preventive care with your healthcare provider.",
         source: "MyHealthfinder (ODPHP) - USPSTF Guidelines",

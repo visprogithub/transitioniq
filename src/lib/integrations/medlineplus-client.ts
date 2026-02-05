@@ -1,13 +1,17 @@
 /**
  * MedlinePlus Client - Health Topic Information
  *
- * Uses the NLM MedlinePlus Connect API to fetch health topic information
+ * Uses the NLM MedlinePlus Web Services API to fetch health topic information
  * for symptoms, conditions, and medical concepts.
  *
  * API Documentation: https://medlineplus.gov/about/developers/webservices/
+ *
+ * Note: We use the healthTopics search API (wsearch.nlm.nih.gov) instead of
+ * the MedlinePlus Connect API because it supports plain text queries, while
+ * Connect requires ICD-9/ICD-10 codes.
  */
 
-const MEDLINEPLUS_BASE = "https://connect.medlineplus.gov/service";
+const MEDLINEPLUS_SEARCH_BASE = "https://wsearch.nlm.nih.gov/ws/query";
 
 export interface HealthTopicInfo {
   title: string;
@@ -31,21 +35,20 @@ export interface SymptomInfo {
 }
 
 /**
- * Search MedlinePlus for health topics
+ * Search MedlinePlus for health topics using the Web Services API
+ * This API accepts plain text queries and returns XML results
  */
 export async function searchHealthTopics(query: string): Promise<HealthTopicInfo[]> {
   try {
-    // MedlinePlus Connect v1 API
     const params = new URLSearchParams({
-      "mainSearchCriteria.v.cs": "2.16.840.1.113883.6.177", // MedlinePlus Topic ID system
-      "mainSearchCriteria.v.dn": query,
-      "informationRecipient.languageCode.c": "en",
-      "knowledgeResponseType": "application/json",
+      db: "healthTopics",
+      term: query,
+      retmax: "3", // Limit to top 3 results
     });
 
-    const url = `${MEDLINEPLUS_BASE}?${params}`;
+    const url = `${MEDLINEPLUS_SEARCH_BASE}?${params}`;
     const response = await fetch(url, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/xml" },
     });
 
     if (!response.ok) {
@@ -53,47 +56,63 @@ export async function searchHealthTopics(query: string): Promise<HealthTopicInfo
       return [];
     }
 
-    const data = await response.json();
+    const xmlText = await response.text();
 
-    // Parse the feed structure
-    const entries = data.feed?.entry || [];
-    return entries.map((entry: Record<string, unknown>) => ({
-      title: extractValue(entry, "title"),
-      summary: extractValue(entry, "summary"),
-      fullSummary: extractValue(entry, "content"),
-      url: extractLink(entry),
-      lastUpdated: extractValue(entry, "updated"),
-      relatedTopics: [],
-      source: "MEDLINEPLUS" as const,
-    }));
+    // Parse XML response (simple regex-based parsing to avoid XML dependencies)
+    const results: HealthTopicInfo[] = [];
+    const documentMatches = xmlText.match(/<document[^>]*>[\s\S]*?<\/document>/g) || [];
+
+    for (const docXml of documentMatches.slice(0, 3)) {
+      // Extract URL
+      const urlMatch = docXml.match(/url="([^"]+)"/);
+      const topicUrl = urlMatch ? urlMatch[1] : "";
+
+      // Extract title (remove HTML span tags)
+      const titleMatch = docXml.match(/<content name="title">([\s\S]*?)<\/content>/);
+      const title = titleMatch
+        ? titleMatch[1].replace(/<[^>]*>/g, "").replace(/&lt;[^&]*&gt;/g, "").trim()
+        : "";
+
+      // Extract full summary (remove HTML tags)
+      const summaryMatch = docXml.match(/<content name="FullSummary">([\s\S]*?)<\/content>/);
+      let fullSummary = "";
+      if (summaryMatch) {
+        fullSummary = summaryMatch[1]
+          .replace(/&lt;p&gt;/g, " ")
+          .replace(/&lt;\/p&gt;/g, " ")
+          .replace(/&lt;[^&]*&gt;/g, "")
+          .replace(/<[^>]*>/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+      }
+
+      // Extract snippet/summary
+      const snippetMatch = docXml.match(/<content name="snippet">([\s\S]*?)<\/content>/);
+      const snippet = snippetMatch
+        ? snippetMatch[1].replace(/<[^>]*>/g, "").replace(/&lt;[^&]*&gt;/g, "").trim()
+        : "";
+
+      if (title) {
+        results.push({
+          title,
+          summary: snippet || fullSummary.slice(0, 300),
+          fullSummary,
+          url: topicUrl,
+          lastUpdated: "",
+          relatedTopics: [],
+          source: "MEDLINEPLUS" as const,
+        });
+      }
+    }
+
+    console.log(`[MedlinePlus] Found ${results.length} results for "${query}"`);
+    return results;
   } catch (error) {
     console.error("[MedlinePlus] Search error:", error);
     return [];
   }
 }
 
-/**
- * Extract value from MedlinePlus entry structure
- */
-function extractValue(entry: Record<string, unknown>, field: string): string {
-  const fieldData = entry[field] as Record<string, unknown> | string | undefined;
-  if (!fieldData) return "";
-  if (typeof fieldData === "string") return fieldData;
-  return (fieldData._value as string) || (fieldData["#text"] as string) || "";
-}
-
-/**
- * Extract link from MedlinePlus entry
- */
-function extractLink(entry: Record<string, unknown>): string {
-  const links = entry.link as Array<Record<string, unknown>> | Record<string, unknown> | undefined;
-  if (!links) return "";
-  if (Array.isArray(links)) {
-    const link = links.find((l) => l.rel === "alternate" || !l.rel);
-    return (link?.href as string) || "";
-  }
-  return (links.href as string) || "";
-}
 
 /**
  * Get symptom-specific information with urgency guidance

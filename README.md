@@ -75,6 +75,7 @@ For a production clinical deployment, these free APIs would be replaced with val
 | **TF-IDF knowledge base** | Clinical NLP with embeddings | Zero-dependency vector search works for demos but lacks semantic understanding. Production would use medical-trained embeddings (PubMedBERT, ClinicalBERT) with vector databases. |
 | **CMS static tier lookup** | Real-time pharmacy benefit check | Static pricing estimates miss actual insurance coverage. Production would integrate with PBMs via Surescripts or NCPDP for real-time copay information. |
 | **In-memory food-drug database** | FDB or Lexicomp food interactions | Our ~50 food-drug pairs cover common cases but commercial databases have thousands of validated interactions with clinical significance ratings. |
+| **Local symptom triage KB** | ApiMedic, Infermedica, or Isabel | Our Schmitt-Thompson style triage covers ~10 critical symptoms. Commercial symptom checkers provide AI-powered differential diagnosis, structured intake, and evidence-based triage across thousands of conditions. Free tiers: ApiMedic (100 tx/mo), EndlessMedical (developer access). |
 | **Demo patient data** | FHIR R4 from Epic/Cerner | Synthetic patients for demos; production would use SMART on FHIR with real EHR integration. |
 
 ### Observability Resilience
@@ -229,6 +230,7 @@ TransitionIQ implements a **TRUE ReAct (Reasoning and Acting)** agent architectu
 
 - **Tools Return DATA Only**: Data tools (FDA, CMS, guidelines, RAG) return raw structured data. The ReAct agent does ALL reasoning and synthesis.
 - **LLM Decides Tool Order**: No hardcoded pipelines. The LLM reasons about what information it needs and calls tools dynamically.
+- **Auto-Fetch Missing Prerequisites**: If the LLM tries to call `analyze_readiness` before gathering required data (drug interactions, care gaps), the tool automatically fetches the missing data instead of failing. This makes the agent robust against LLM tool-ordering mistakes.
 - **Grounding Verification**: Optional verification that final answers are supported by tool observations (quick pattern-based or full LLM-based).
 - **LLM-Based Retry**: If JSON parsing fails, the agent asks the LLM to fix the format (no regex fallbacks).
 - **FDA Caching**: API results cached (RxCUI: 7d, interactions: 24h, labels: 24h, recalls: 12h) to reduce latency and API calls.

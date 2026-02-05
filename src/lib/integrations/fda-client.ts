@@ -12,6 +12,16 @@
 
 const OPENFDA_BASE = "https://api.fda.gov/drug";
 
+/**
+ * Get OpenFDA API key query parameter if available
+ * Without key: 240 req/min, 1,000/day
+ * With free key: 240 req/min, 120,000/day
+ */
+function getApiKeyParam(): string {
+  const apiKey = process.env.OPENFDA_API_KEY;
+  return apiKey ? `&api_key=${apiKey}` : "";
+}
+
 // Cache TTLs in milliseconds
 const CACHE_TTL = {
   DRUG_LABEL: 24 * 60 * 60 * 1000, // 24 hours - labels change rarely
@@ -203,12 +213,12 @@ async function fetchFDADrugInteractions(
 
   try {
     // Search by generic name in FDA label database
-    const url = `${OPENFDA_BASE}/label.json?search=openfda.generic_name:"${encodeURIComponent(drugName)}"&limit=1`;
+    const url = `${OPENFDA_BASE}/label.json?search=openfda.generic_name:"${encodeURIComponent(drugName)}"&limit=1${getApiKeyParam()}`;
     const response = await fetch(url);
 
     if (!response.ok) {
       // Try brand name if generic fails
-      const brandUrl = `${OPENFDA_BASE}/label.json?search=openfda.brand_name:"${encodeURIComponent(drugName)}"&limit=1`;
+      const brandUrl = `${OPENFDA_BASE}/label.json?search=openfda.brand_name:"${encodeURIComponent(drugName)}"&limit=1${getApiKeyParam()}`;
       const brandResponse = await fetch(brandUrl);
       if (!brandResponse.ok) {
         return interactions;
@@ -536,7 +546,7 @@ export async function getFAERSCount(drugName: string): Promise<number> {
   }
 
   try {
-    const url = `${OPENFDA_BASE}/event.json?search=patient.drug.medicinalproduct:"${encodeURIComponent(drugName)}"&count=receivedate`;
+    const url = `${OPENFDA_BASE}/event.json?search=patient.drug.medicinalproduct:"${encodeURIComponent(drugName)}"&count=receivedate${getApiKeyParam()}`;
     const response = await fetch(url);
 
     if (!response.ok) {
@@ -564,7 +574,7 @@ export async function getDrugSafetyInfo(drugName: string): Promise<DrugSafetyInf
   }
 
   try {
-    const url = `${OPENFDA_BASE}/label.json?search=openfda.brand_name:"${encodeURIComponent(drugName)}"+openfda.generic_name:"${encodeURIComponent(drugName)}"&limit=1`;
+    const url = `${OPENFDA_BASE}/label.json?search=openfda.brand_name:"${encodeURIComponent(drugName)}"+openfda.generic_name:"${encodeURIComponent(drugName)}"&limit=1${getApiKeyParam()}`;
     const response = await fetch(url);
 
     if (!response.ok) {
@@ -651,7 +661,7 @@ export async function checkDrugRecalls(
   try {
     const url = `${OPENFDA_BASE}/enforcement.json?search=openfda.brand_name:"${encodeURIComponent(
       drugName
-    )}"+openfda.generic_name:"${encodeURIComponent(drugName)}"&limit=5`;
+    )}"+openfda.generic_name:"${encodeURIComponent(drugName)}"&limit=5${getApiKeyParam()}`;
     const response = await fetch(url);
 
     if (!response.ok) {
@@ -702,7 +712,7 @@ export async function getCoReportedAdverseEvents(
       drug1
     )}"+AND+patient.drug.medicinalproduct:"${encodeURIComponent(
       drug2
-    )}"&limit=${limit}`;
+    )}"&limit=${limit}${getApiKeyParam()}`;
     const response = await fetch(url);
 
     if (!response.ok) {

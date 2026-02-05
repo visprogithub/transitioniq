@@ -403,18 +403,25 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       const url = URL.createObjectURL(blob);
       const audio = new Audio();
 
-      // Wait for enough audio to be buffered before playing (prevents clipping)
+      // Preload the entire audio file
+      audio.preload = "auto";
+
+      // Wait for the audio to be fully loaded (not just canplaythrough)
       await new Promise<void>((resolve, reject) => {
-        audio.oncanplaythrough = () => resolve();
+        audio.onloadeddata = () => resolve();
         audio.onerror = () => reject(new Error("Audio failed to load"));
         audio.src = url;
+        audio.load(); // Explicitly trigger loading
       });
 
-      // Check if aborted while buffering
+      // Check if aborted while loading
       if (abortController.signal.aborted) {
         URL.revokeObjectURL(url);
         return;
       }
+
+      // Ensure we're at the very beginning
+      audio.currentTime = 0;
 
       audio.onended = () => {
         URL.revokeObjectURL(url);
@@ -425,6 +432,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       audioRef.current = audio;
       setPlayingMessageIndex(messageIndex);
       setTtsLoading(null);
+
+      // Small delay after setting currentTime to ensure seek completes
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Check if aborted during delay
+      if (abortController.signal.aborted) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+
       await audio.play();
     } catch (error) {
       // Ignore abort errors — they're intentional
@@ -438,15 +455,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   // --- Voice: auto-play TTS for new assistant messages ---
   useEffect(() => {
     if (!autoPlayVoice || isVoiceRateLimited || !voiceEnabled) return;
-    // Find the last non-loading assistant message
+    // Find the last non-loading, non-streaming assistant message with actual content
     const lastAssistantIndex = messages.reduce<number>((acc, m, i) =>
-      m.role === "assistant" && !m.isLoading ? i : acc, -1);
+      m.role === "assistant" && !m.isLoading && !m.isStreaming && m.content?.trim() ? i : acc, -1);
     if (lastAssistantIndex <= 0) return; // skip welcome message (index 0)
     if (lastAssistantIndex === lastAutoPlayedRef.current) return; // already played
     lastAutoPlayedRef.current = lastAssistantIndex;
+    console.log(`[AutoPlay] Playing TTS for message ${lastAssistantIndex}`);
     playTTS(messages[lastAssistantIndex].content, lastAssistantIndex);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, autoPlayVoice, isVoiceRateLimited]);
+  }, [messages, autoPlayVoice, isVoiceRateLimited, voiceEnabled]);
 
   // Generate suggested questions based on patient data
   const suggestedQuestions: SuggestedQuestion[] = [
