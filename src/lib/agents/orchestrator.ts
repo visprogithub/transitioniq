@@ -527,7 +527,7 @@ export async function runAgent(
       const reactResult = await runReActLoop(userMessage, {
         systemPrompt: buildAssessmentSystemPrompt(input.patientId!),
         tools,
-        maxIterations: 12, // Allow enough iterations for full assessment
+        maxIterations: 15, // Allow enough iterations for full assessment
         threadId: state.sessionId,
         metadata: {
           patientId: input.patientId,
@@ -859,7 +859,7 @@ export async function* runAgentStreaming(
   const generator = runReActLoopStreaming(userMessage, {
     systemPrompt: buildAssessmentSystemPrompt(input.patientId),
     tools,
-    maxIterations: 12,
+    maxIterations: 15,
     threadId: state.sessionId,
     metadata: {
       patientId: input.patientId,

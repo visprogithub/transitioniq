@@ -58,14 +58,19 @@ function parsePlan(plan: string): PlanSection[] {
   for (const line of lines) {
     const trimmed = line.trim();
 
-    // Check for section headers (** or ## format)
-    const headerMatch = trimmed.match(/^\*\*(.+?)\*\*$/) || trimmed.match(/^##\s*(.+)$/);
+    // Check for section headers (** or ## or # format)
+    const headerMatch = trimmed.match(/^\*\*(.+?)\*\*$/) || trimmed.match(/^#{1,2}\s*(.+)$/);
     if (headerMatch) {
       const title = headerMatch[1].trim();
 
+      // Skip title headers (e.g., "# Discharge Plan for X") - they have no actionable items
+      const lowerTitle = title.toLowerCase();
+      if (lowerTitle.startsWith("discharge plan for") || lowerTitle.startsWith("transition plan for")) {
+        continue;
+      }
+
       // Determine priority from title
       let priority: PlanSection["priority"] = "standard";
-      const lowerTitle = title.toLowerCase();
       if (lowerTitle.includes("high priority") || lowerTitle.includes("must complete")) {
         priority = "high";
       } else if (lowerTitle.includes("moderate") || lowerTitle.includes("should complete")) {
@@ -101,7 +106,8 @@ function parsePlan(plan: string): PlanSection[] {
     }
   }
 
-  return sections;
+  // Filter out any sections that ended up with no items (empty headers)
+  return sections.filter(section => section.items.length > 0);
 }
 
 // Get icon and color for section priority
@@ -153,6 +159,27 @@ function getSectionStyle(priority: PlanSection["priority"]) {
 // Map custom item priority to section priority for matching
 function mapCustomPriority(priority: "high" | "moderate" | "standard"): PlanSection["priority"] {
   return priority;
+}
+
+// Get styling for custom item priority badges
+function getCustomPriorityStyle(priority: "high" | "moderate" | "standard") {
+  switch (priority) {
+    case "high":
+      return {
+        badgeColor: "bg-red-100 text-red-800",
+        label: "High Priority",
+      };
+    case "moderate":
+      return {
+        badgeColor: "bg-amber-100 text-amber-800",
+        label: "Moderate",
+      };
+    default:
+      return {
+        badgeColor: "bg-gray-100 text-gray-700",
+        label: "Standard",
+      };
+  }
 }
 
 export function DischargePlan({
@@ -554,6 +581,7 @@ export function DischargePlan({
               <div className="p-4 space-y-2">
                 {unmatchedCustom.map((ci) => {
                   const isChecked = checkedItems.has(`custom-${ci.id}`);
+                  const priorityStyle = getCustomPriorityStyle(ci.priority);
                   return (
                     <motion.div
                       key={`custom-${ci.id}`}
@@ -578,8 +606,8 @@ export function DischargePlan({
                       <span className={`flex-1 ${isChecked ? "line-through opacity-70" : ""}`}>
                         {ci.text}
                       </span>
-                      <span className="flex-shrink-0 text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">
-                        Custom
+                      <span className={`flex-shrink-0 text-xs px-1.5 py-0.5 rounded font-medium ${priorityStyle.badgeColor}`}>
+                        {priorityStyle.label}
                       </span>
                       {onRemoveCustomItem && (
                         <Tooltip content="Remove custom item" position="left">

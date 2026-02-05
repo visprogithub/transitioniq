@@ -401,7 +401,7 @@ Generate the final plan as a clear, formatted checklist that clinical staff and 
     const reactOptions = {
       systemPrompt: buildPlanGeneratorSystemPrompt(patient, analysis),
       tools,
-      maxIterations: 10,
+      maxIterations: 15,
       threadId: `plan-${patientId}`,
       metadata: {
         patientId,

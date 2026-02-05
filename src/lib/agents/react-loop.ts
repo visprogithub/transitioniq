@@ -19,7 +19,7 @@ import { extractJsonObject } from "@/lib/utils/llm-json";
 import { verifyGrounding, quickGroundingCheck, type GroundingResult } from "@/lib/verification/grounding";
 
 // Maximum iterations to prevent infinite loops
-const MAX_ITERATIONS = 10;
+const MAX_ITERATIONS = 15;
 
 /**
  * Tool definition for ReAct agents
@@ -478,17 +478,61 @@ Please fix and respond with valid JSON only:`;
       iterationSpan?.end();
     }
 
-    // If we hit max iterations without a final answer, synthesize one
-    const fallbackAnswer = `I've gathered information through ${steps.length} steps but reached the iteration limit. Based on what I found: ${steps
+    // If we hit max iterations without a final answer, make a synthesis LLM call
+    console.log(`[ReAct] Max iterations reached - synthesizing final answer from ${steps.length} steps`);
+
+    // Collect the observations (tool results) for synthesis - summarize rather than dump raw JSON
+    const synthesisObservations = steps
       .filter((s) => s.observation)
-      .map((s) => s.observation)
-      .slice(-3)
-      .join(" ")}`;
+      .map((s) => {
+        try {
+          const parsed = JSON.parse(s.observation!);
+          if (typeof parsed === "object" && parsed !== null) {
+            if (parsed.plan) return `Plan: ${String(parsed.plan).slice(0, 500)}`;
+            if (parsed.content) return String(parsed.content).slice(0, 500);
+            if (parsed.summary) return String(parsed.summary).slice(0, 500);
+            if (parsed.answer) return String(parsed.answer).slice(0, 500);
+            if (Array.isArray(parsed)) return `[${parsed.length} items retrieved]`;
+          }
+          return s.observation!.slice(0, 300);
+        } catch {
+          return s.observation!.slice(0, 300);
+        }
+      })
+      .slice(-5);
+
+    // Make a final synthesis call to produce a proper formatted answer
+    let fallbackAnswer: string;
+    try {
+      const synthesisPrompt = `You were working on a task but ran out of iterations. Based on the information gathered, provide a complete and well-formatted response.
+
+Original task context:
+${systemPrompt.slice(0, 1000)}
+
+Information gathered:
+${synthesisObservations.map((o, i) => `${i + 1}. ${o}`).join("\n")}
+
+Your previous thoughts:
+${steps.slice(-3).map((s) => s.thought).join("\n")}
+
+Now provide your final, complete response. Format it appropriately for the task (e.g., markdown checklist for discharge plans, clear prose for explanations). Do NOT include raw JSON in your response - format everything in a human-readable way.`;
+
+      const synthesisResponse = await provider.generate(synthesisPrompt, {
+        spanName: "react-synthesis-fallback",
+        metadata: { reason: "max_iterations_reached", steps: steps.length },
+      });
+
+      fallbackAnswer = synthesisResponse.content;
+      console.log(`[ReAct] Synthesis complete - generated ${fallbackAnswer.length} char response`);
+    } catch (synthesisError) {
+      console.error("[ReAct] Synthesis failed, using basic fallback:", synthesisError);
+      fallbackAnswer = `I gathered information through ${steps.length} steps but couldn't complete the task within the iteration limit. Please try again or simplify your request.`;
+    }
 
     const endTime = Date.now();
     const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
 
-    console.log(`[ReAct] Max iterations reached - Total tokens: ${totalTokens} (prompt: ${totalPromptTokens}, completion: ${totalCompletionTokens}), Est. cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
+    console.log(`[ReAct] Max iterations - Total tokens: ${totalTokens} (prompt: ${totalPromptTokens}, completion: ${totalCompletionTokens}), Est. cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
 
     trace?.update({
       output: {
@@ -766,12 +810,56 @@ Now provide your next step as JSON:`;
       iterationSpan?.end();
     }
 
-    // If we hit max iterations without a final answer, synthesize one
-    const fallbackAnswer = `I've gathered information through ${steps.length} steps but reached the iteration limit. Based on what I found: ${steps
+    // If we hit max iterations without a final answer, make a synthesis LLM call
+    console.log(`[ReAct Streaming] Max iterations reached - synthesizing final answer from ${steps.length} steps`);
+
+    // Collect the observations for synthesis - summarize rather than dump raw JSON
+    const synthesisObservations = steps
       .filter((s) => s.observation)
-      .map((s) => s.observation)
-      .slice(-3)
-      .join(" ")}`;
+      .map((s) => {
+        try {
+          const parsed = JSON.parse(s.observation!);
+          if (typeof parsed === "object" && parsed !== null) {
+            if (parsed.plan) return `Plan: ${String(parsed.plan).slice(0, 500)}`;
+            if (parsed.content) return String(parsed.content).slice(0, 500);
+            if (parsed.summary) return String(parsed.summary).slice(0, 500);
+            if (parsed.answer) return String(parsed.answer).slice(0, 500);
+            if (Array.isArray(parsed)) return `[${parsed.length} items retrieved]`;
+          }
+          return s.observation!.slice(0, 300);
+        } catch {
+          return s.observation!.slice(0, 300);
+        }
+      })
+      .slice(-5);
+
+    // Make a final synthesis call to produce a proper formatted answer
+    let fallbackAnswer: string;
+    try {
+      const synthesisPrompt = `You were working on a task but ran out of iterations. Based on the information gathered, provide a complete and well-formatted response.
+
+Original task context:
+${systemPrompt.slice(0, 1000)}
+
+Information gathered:
+${synthesisObservations.map((o, i) => `${i + 1}. ${o}`).join("\n")}
+
+Your previous thoughts:
+${steps.slice(-3).map((s) => s.thought).join("\n")}
+
+Now provide your final, complete response. Format it appropriately for the task (e.g., markdown checklist for discharge plans, clear prose for explanations). Do NOT include raw JSON in your response - format everything in a human-readable way.`;
+
+      const synthesisResponse = await provider.generate(synthesisPrompt, {
+        spanName: "react-synthesis-fallback-streaming",
+        metadata: { reason: "max_iterations_reached", steps: steps.length },
+      });
+
+      fallbackAnswer = synthesisResponse.content;
+      console.log(`[ReAct Streaming] Synthesis complete - generated ${fallbackAnswer.length} char response`);
+    } catch (synthesisError) {
+      console.error("[ReAct Streaming] Synthesis failed, using basic fallback:", synthesisError);
+      fallbackAnswer = `I gathered information through ${steps.length} steps but couldn't complete the task within the iteration limit. Please try again or simplify your request.`;
+    }
 
     const endTime = Date.now();
     const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
