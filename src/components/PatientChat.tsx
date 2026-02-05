@@ -411,6 +411,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       audioRef.current = audio;
       setPlayingMessageIndex(messageIndex);
       setTtsLoading(null);
+
+      // Small delay after setting currentTime to ensure seek completes
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Check if aborted during delay
+      if (abortController.signal.aborted) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+
       await audio.play();
     } catch (error) {
       // Ignore abort errors — they're intentional
