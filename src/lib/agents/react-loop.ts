@@ -16,6 +16,7 @@
 import { createLLMProvider, getActiveModelId } from "@/lib/integrations/llm-provider";
 import { getOpikClient } from "@/lib/integrations/opik";
 import { extractJsonObject } from "@/lib/utils/llm-json";
+import { verifyGrounding, quickGroundingCheck, type GroundingResult } from "@/lib/verification/grounding";
 
 // Maximum iterations to prevent infinite loops
 const MAX_ITERATIONS = 10;
@@ -59,6 +60,8 @@ export interface ReActResult {
   toolsUsed: string[];
   iterations: number;
   reasoningTrace: string;
+  /** Grounding verification result - checks if answer is supported by observations */
+  grounding?: GroundingResult;
   metadata: {
     model: string;
     startTime: string;
@@ -81,6 +84,13 @@ export interface ReActOptions {
   traceId?: string;
   threadId?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Enable grounding verification - checks if final answer is supported by tool observations
+   * "full" = LLM-based claim extraction and verification (slower, more accurate)
+   * "quick" = Pattern-based checks for dosages, times, percentages (faster)
+   * false/undefined = disabled
+   */
+  verifyGrounding?: "full" | "quick" | false;
 }
 
 /**
@@ -285,11 +295,48 @@ Now provide your next step as JSON:`;
         // Log final aggregated token usage
         console.log(`[ReAct] Complete - Total tokens: ${totalTokens} (prompt: ${totalPromptTokens}, completion: ${totalCompletionTokens}), Est. cost: $${estimatedCost?.toFixed(6) || "N/A"}`);
 
+        // Run grounding verification if enabled
+        let grounding: GroundingResult | undefined;
+        if (options.verifyGrounding) {
+          const observations = steps
+            .filter((s) => s.observation)
+            .map((s) => s.observation as string);
+
+          if (observations.length > 0) {
+            if (options.verifyGrounding === "full") {
+              console.log(`[ReAct] Running full grounding verification...`);
+              grounding = await verifyGrounding(finalAnswer, observations);
+              console.log(`[ReAct] Grounding: ${grounding.isGrounded ? "GROUNDED" : "UNGROUNDED"} (${grounding.groundedClaims}/${grounding.totalClaims} claims verified)`);
+            } else if (options.verifyGrounding === "quick") {
+              console.log(`[ReAct] Running quick grounding check...`);
+              const quick = quickGroundingCheck(finalAnswer, observations);
+              grounding = {
+                isGrounded: !quick.suspicious,
+                score: quick.suspicious ? 0.5 : 1,
+                totalClaims: quick.flags.length,
+                groundedClaims: 0,
+                ungroundedClaims: quick.flags.map((f) => ({
+                  claim: f,
+                  isGrounded: false,
+                  supportingEvidence: null,
+                  confidence: "medium" as const,
+                })),
+                allClaims: [],
+              };
+              if (quick.suspicious) {
+                console.log(`[ReAct] Quick check flags: ${quick.flags.join(", ")}`);
+              }
+            }
+          }
+        }
+
         trace?.update({
           output: {
             answer: finalAnswer,
             iterations: iteration,
             tools_used: toolsUsed,
+            grounding_verified: grounding?.isGrounded,
+            grounding_score: grounding?.score,
           },
           metadata: {
             total_tokens: totalTokens,
@@ -307,6 +354,7 @@ Now provide your next step as JSON:`;
           toolsUsed: [...new Set(toolsUsed)],
           iterations: iteration,
           reasoningTrace: steps.map((s) => `[${s.iteration}] ${s.thought}`).join("\n"),
+          grounding,
           metadata: {
             model: getActiveModelId(),
             startTime: new Date(startTime).toISOString(),
