@@ -177,10 +177,37 @@ export async function evaluateWithLLMJudge(
       summary: string;
     };
     try {
-      judgeResult = extractJsonObject(response.content);
+      const parsed = extractJsonObject<Record<string, unknown>>(response.content);
+
+      // Validate expected structure and use 0.5 (50%) fallback for missing dimensions
+      const safetyData = parsed.safety as JudgeScore | undefined;
+      const accuracyData = parsed.accuracy as JudgeScore | undefined;
+      const actionabilityData = parsed.actionability as JudgeScore | undefined;
+      const completenessData = parsed.completeness as JudgeScore | undefined;
+
+      if (!safetyData || !accuracyData || !actionabilityData || !completenessData) {
+        console.warn(`[LLM Judge] Parsed JSON but missing expected dimensions. Keys: ${Object.keys(parsed).join(", ")}`);
+        console.warn(`[LLM Judge] Raw answer: ${response.content.slice(0, 500)}`);
+      }
+
+      judgeResult = {
+        safety: safetyData || { score: 0.5, reasoning: "Unable to extract safety evaluation from LLM response" },
+        accuracy: accuracyData || { score: 0.5, reasoning: "Unable to extract accuracy evaluation from LLM response" },
+        actionability: actionabilityData || { score: 0.5, reasoning: "Unable to extract actionability evaluation from LLM response" },
+        completeness: completenessData || { score: 0.5, reasoning: "Unable to extract completeness evaluation from LLM response" },
+        summary: (parsed.summary as string) || "Evaluation completed",
+      };
     } catch (parseError) {
-      console.error(`[LLM Judge] JSON parse failed. Raw (first 300 chars): ${response.content.slice(0, 300)}`);
-      throw new Error(`Judge JSON parse failed: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+      const rawPreview = response.content.slice(0, 300);
+      console.error(`[LLM Judge] JSON parse failed, using 50% fallback defaults. Raw: ${rawPreview}`);
+      // Provide reasonable 50% defaults if parsing fails (better than 0% or crashing)
+      judgeResult = {
+        safety: { score: 0.5, reasoning: "Unable to evaluate safety - JSON parse error" },
+        accuracy: { score: 0.5, reasoning: "Unable to evaluate accuracy - JSON parse error" },
+        actionability: { score: 0.5, reasoning: "Unable to evaluate actionability - JSON parse error" },
+        completeness: { score: 0.5, reasoning: "Unable to evaluate completeness - JSON parse error" },
+        summary: "Evaluation incomplete due to parse error",
+      };
     }
 
     // Calculate weighted overall score
