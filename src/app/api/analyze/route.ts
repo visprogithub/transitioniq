@@ -6,9 +6,10 @@ import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/int
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
 import { getOpikClient, traceDataSourceCall, traceError, flushTraces } from "@/lib/integrations/opik";
 import { getActiveModelId, setActiveModel, resetLLMProvider, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
-import { runAgent, getSession } from "@/lib/agents/orchestrator";
+import { runAgent, runAgentStreaming, getSession } from "@/lib/agents/orchestrator";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import type { Patient } from "@/lib/types/patient";
+import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 export async function POST(request: NextRequest) {
   // Rate limit: agent pipeline (1-7 LLM calls)
@@ -27,6 +28,10 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { patientId, useAgent = true, sessionId, modelId } = body;
+
+    // Check if streaming is requested
+    const url = new URL(request.url);
+    const stream = url.searchParams.get("stream") === "true";
 
     // Pin the model for this request if explicitly provided
     if (modelId) {
@@ -47,6 +52,78 @@ export async function POST(request: NextRequest) {
     const patient = getPatient(patientId);
     if (!patient) {
       return NextResponse.json({ error: "Patient not found" }, { status: 404 });
+    }
+
+    // Streaming path: Use the streaming agent and return SSE events
+    if (stream && useAgent) {
+      console.log("[Analyze] Using streaming agent orchestrator");
+
+      const generator = runAgentStreaming({
+        patientId,
+        sessionId,
+        message: `Assess discharge readiness for patient ${patientId}`,
+      });
+
+      // Create SSE stream from the agent events
+      const encoder = new TextEncoder();
+      const sseStream = new ReadableStream({
+        async start(controller) {
+          try {
+            let capturedAnalysis: DischargeAnalysis | null = null;
+
+            // Forward all events from the generator
+            for await (const event of generator) {
+              // Capture the analysis when it's yielded
+              if (event.type === "analysis" && "analysis" in event) {
+                capturedAnalysis = event.analysis;
+              }
+
+              // Encode and send the event
+              const data = `data: ${JSON.stringify(event)}\n\n`;
+              controller.enqueue(encoder.encode(data));
+            }
+
+            // Emit a result event with the full response structure for the UI
+            if (capturedAnalysis) {
+              const session = getSession(sessionId || "");
+              const resultEvent = {
+                type: "result",
+                data: {
+                  score: capturedAnalysis.score,
+                  status: capturedAnalysis.status,
+                  riskFactors: capturedAnalysis.riskFactors || [],
+                  recommendations: capturedAnalysis.recommendations || [],
+                  analyzedAt: new Date().toISOString(),
+                  modelUsed: capturedAnalysis.modelUsed || getActiveModelId(),
+                  modelRequested: getActiveModelId(),
+                  agentUsed: true,
+                  agentFallbackUsed: false,
+                  sessionId: session?.sessionId,
+                },
+              };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(resultEvent)}\n\n`));
+            }
+
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          } catch (error) {
+            const errorEvent = {
+              type: "error",
+              error: error instanceof Error ? error.message : String(error),
+            };
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(sseStream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      });
     }
 
     // Track whether agent fallback occurs
@@ -142,14 +219,10 @@ export async function POST(request: NextRequest) {
     console.log("[Analyze] Using direct LLM (single-turn)");
 
     // Run data gathering in parallel with Opik tracing
+    // Note: checkDrugInteractions already has built-in fallback to known interactions
     const [drugInteractionsResult, careGapsResult] = await Promise.all([
       traceDataSourceCall("FDA", patientId, async () => {
-        try {
-          return await checkDrugInteractions(patient.medications);
-        } catch (error) {
-          console.error("FDA check failed:", error);
-          return getKnownInteractionsForPatient(patient);
-        }
+        return await checkDrugInteractions(patient.medications);
       }),
       traceDataSourceCall("Guidelines", patientId, async () => {
         return evaluateCareGaps(patient);
@@ -267,63 +340,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/**
- * Fallback function to get known drug interactions when FDA API fails
- */
-function getKnownInteractionsForPatient(patient: Patient): DrugInteraction[] {
-  const interactions: DrugInteraction[] = [];
-  const medNames = patient.medications.map((m) => m.name.toLowerCase());
-
-  // Check for warfarin + aspirin
-  if (medNames.some((m) => m.includes("warfarin")) && medNames.some((m) => m.includes("aspirin"))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Aspirin",
-      severity: "major",
-      description: "Concurrent use increases bleeding risk significantly. Monitor INR closely and watch for signs of bleeding.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Check for warfarin + eliquis (dual anticoagulation)
-  if (medNames.some((m) => m.includes("warfarin")) && medNames.some((m) => m.includes("eliquis"))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Eliquis (Apixaban)",
-      severity: "major",
-      description: "Dual anticoagulation therapy significantly increases bleeding risk. Generally contraindicated unless specific clinical indication.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Check for ACE inhibitor + potassium
-  if ((medNames.some((m) => m.includes("lisinopril")) || medNames.some((m) => m.includes("enalapril"))) &&
-      medNames.some((m) => m.includes("potassium"))) {
-    interactions.push({
-      drug1: "ACE Inhibitor",
-      drug2: "Potassium Chloride",
-      severity: "moderate",
-      description: "ACE inhibitors can increase potassium levels. Combined with potassium supplements, risk of hyperkalemia increases.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Check for digoxin presence (common interaction concerns)
-  if (medNames.some((m) => m.includes("digoxin"))) {
-    if (medNames.some((m) => m.includes("furosemide"))) {
-      interactions.push({
-        drug1: "Digoxin",
-        drug2: "Furosemide",
-        severity: "moderate",
-        description: "Loop diuretics can cause hypokalemia, increasing digoxin toxicity risk. Monitor potassium levels.",
-        source: "Clinical Guidelines",
-      });
-    }
-  }
-
-  return interactions;
-}
-
-// Note: Medication cost estimation now uses the CMS client (cms-client.ts)
-// which provides real Medicare Part D pricing data via CMS Open Data APIs
+// Note: Drug interaction fallback logic is built into checkDrugInteractions() in fda-client.ts
+// Note: Medication cost estimation uses the CMS client (cms-client.ts) for Medicare Part D pricing
 

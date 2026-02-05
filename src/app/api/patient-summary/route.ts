@@ -136,7 +136,16 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("[Patient Summary] Error:", error);
-    trace?.update({ metadata: { error: String(error) } });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+
+    // Set errorInfo so Opik dashboard counts this as an error trace
+    const errorInfo = {
+      exceptionType: error instanceof Error ? error.name : "Error",
+      message: errorMessage,
+      traceback: errorStack ?? errorMessage,
+    };
+    trace?.update({ errorInfo, metadata: { error: errorMessage } });
     trace?.end();
 
     return NextResponse.json(

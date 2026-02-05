@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Activity, Users, RefreshCw, ChevronDown, Sparkles, FileText, CheckCircle, FlaskConical, LayoutDashboard, Cpu, AlertTriangle, Heart, Info, X, ShieldAlert } from "lucide-react";
 import { PatientHeader } from "@/components/PatientHeader";
@@ -13,6 +13,8 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { DischargePlan } from "@/components/DischargePlan";
 import { Tooltip } from "@/components/Tooltip";
 import { JudgeScoreBadge, type JudgeEvaluation } from "@/components/JudgeScoreBadge";
+import { ThinkingSteps } from "@/components/ThinkingSteps";
+import { useReActStream, type ReActStep } from "@/hooks/useReActStream";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor, ClinicianEdits } from "@/lib/types/analysis";
 
@@ -160,6 +162,14 @@ export default function DashboardPage() {
     dismissedItemKeys: [],
   });
 
+  // Streaming state for plan generation ReAct steps
+  const [planStreamingSteps, setPlanStreamingSteps] = useState<ReActStep[]>([]);
+  const [planStreamingError, setPlanStreamingError] = useState<string | null>(null);
+
+  // Streaming state for analysis ReAct steps
+  const [analysisStreamingSteps, setAnalysisStreamingSteps] = useState<ReActStep[]>([]);
+  const [analysisStreamingError, setAnalysisStreamingError] = useState<string | null>(null);
+
   // Initialize session cookie on first visit (for server-side rate limiting)
   useEffect(() => {
     if (!document.cookie.includes("tiq_session=")) {
@@ -222,7 +232,7 @@ export default function DashboardPage() {
     loadPatient();
   }, [selectedPatientId]);
 
-  // Run discharge analysis (checks sessionStorage cache first)
+  // Run discharge analysis with streaming (checks sessionStorage cache first)
   async function runAnalysis() {
     if (!patient) return;
 
@@ -234,6 +244,8 @@ export default function DashboardPage() {
     setPlanRateLimitReset(null);
     setJudgeEvaluation(null);
     setJudgeError(null);
+    setAnalysisStreamingSteps([]);
+    setAnalysisStreamingError(null);
 
     // Check sessionStorage cache for same patient + model
     const cached = getCachedAnalysis(patient.id, currentModel);
@@ -253,53 +265,155 @@ export default function DashboardPage() {
     }
 
     try {
-      const response = await fetch("/api/analyze", {
+      // Use streaming API to show thinking steps in real-time
+      const streamUrl = `/api/analyze?stream=true`;
+      const response = await fetch(streamUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ patientId: patient.id, modelId: currentModel || undefined }),
       });
 
-      const data = await response.json();
-
-      // Check for demo rate limit (429 without suggestModelSwitch)
-      if (response.status === 429 && !data.suggestModelSwitch) {
-        throw new Error(data.message || "Demo rate limit reached. Please try again in a few minutes.");
-      }
-
-      // Check for model provider rate limit / usage limit error
-      if (response.status === 429 && data.suggestModelSwitch) {
-        setModelLimitError({
-          modelId: data.modelId,
-          provider: data.provider,
-          availableModels: data.availableModels || [],
-        });
-        setIsAnalyzing(false);
-        return;
-      }
-
       if (!response.ok) {
-        throw new Error(data.error || "Analysis failed");
+        const errorData = await response.json().catch(() => ({ error: "Analysis failed" }));
+
+        // Check for demo rate limit (429 without suggestModelSwitch)
+        if (response.status === 429 && !errorData.suggestModelSwitch) {
+          throw new Error(errorData.message || "Demo rate limit reached. Please try again in a few minutes.");
+        }
+
+        // Check for model provider rate limit / usage limit error
+        if (response.status === 429 && errorData.suggestModelSwitch) {
+          setModelLimitError({
+            modelId: errorData.modelId,
+            provider: errorData.provider,
+            availableModels: errorData.availableModels || [],
+          });
+          setIsAnalyzing(false);
+          return;
+        }
+
+        throw new Error(errorData.error || `HTTP ${response.status}`);
       }
 
-      // Cache the fresh analysis in sessionStorage
-      cacheAnalysis(patient.id, currentModel, data);
+      if (!response.body) {
+        throw new Error("No response body for streaming");
+      }
 
-      setAnalysis(data);
-      // Clear cached patient summary since analysis changed
-      setPatientSummary(null);
+      // Parse SSE stream
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let analysisData: AnalysisWithModel | null = null;
 
-      // Auto-expand high-severity risk factors
-      const highRiskIds = new Set<string>(
-        data.riskFactors
-          .filter((rf: RiskFactor) => rf.severity === "high")
-          .map((rf: RiskFactor) => rf.id)
-      );
-      setExpandedRiskFactors(highRiskIds);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      // Auto-trigger LLM-as-Judge evaluation (in background)
-      runJudgeEvaluation(patient.id, data);
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") continue;
+
+            try {
+              const event = JSON.parse(data);
+
+              switch (event.type) {
+                case "thought":
+                  setAnalysisStreamingSteps((prev) => [
+                    ...prev,
+                    {
+                      type: "thought",
+                      iteration: event.iteration,
+                      content: event.thought,
+                      timestamp: event.timestamp,
+                    },
+                  ]);
+                  break;
+
+                case "action":
+                  setAnalysisStreamingSteps((prev) => [
+                    ...prev,
+                    {
+                      type: "action",
+                      iteration: event.iteration,
+                      content: `Calling ${event.tool}`,
+                      tool: event.tool,
+                      timestamp: event.timestamp,
+                    },
+                  ]);
+                  break;
+
+                case "observation":
+                  setAnalysisStreamingSteps((prev) => [
+                    ...prev,
+                    {
+                      type: "observation",
+                      iteration: event.iteration,
+                      content: event.observation,
+                      timestamp: event.timestamp,
+                    },
+                  ]);
+                  break;
+
+                case "analysis":
+                  // Analysis data received from ReAct loop
+                  if (event.analysis) {
+                    analysisData = event.analysis;
+                  }
+                  break;
+
+                case "result":
+                  // Final result with full analysis data
+                  if (event.data) {
+                    analysisData = event.data;
+                  }
+                  break;
+
+                case "error":
+                  setAnalysisStreamingError(event.error);
+                  throw new Error(event.error);
+              }
+            } catch (parseError) {
+              if (parseError instanceof Error && parseError.message !== data) {
+                console.warn("[Analysis] Failed to parse SSE event:", data, parseError);
+              }
+            }
+          }
+        }
+      }
+
+      // Use the analysis data from the stream
+      if (analysisData) {
+        // Cache the fresh analysis in sessionStorage
+        cacheAnalysis(patient.id, currentModel, analysisData);
+
+        setAnalysis(analysisData);
+        // Clear cached patient summary since analysis changed
+        setPatientSummary(null);
+
+        // Auto-expand high-severity risk factors
+        const highRiskIds = new Set<string>(
+          (analysisData.riskFactors || [])
+            .filter((rf: RiskFactor) => rf.severity === "high")
+            .map((rf: RiskFactor) => rf.id)
+        );
+        setExpandedRiskFactors(highRiskIds);
+
+        // Auto-trigger LLM-as-Judge evaluation (in background)
+        runJudgeEvaluation(patient.id, analysisData);
+
+        // Clear streaming steps after analysis completes
+        setAnalysisStreamingSteps([]);
+      } else {
+        throw new Error("Analysis completed but no results received");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analysis failed");
+      setAnalysisStreamingSteps([]);
     } finally {
       setIsAnalyzing(false);
     }
@@ -335,35 +449,119 @@ export default function DashboardPage() {
     }
   }
 
-  // Generate discharge plan
+  // Generate discharge plan with streaming ReAct steps
   async function generatePlan() {
     if (!patient || !analysis) return;
 
     setIsGeneratingPlan(true);
     setError(null);
     setPlanRateLimitReset(null);
+    setPlanStreamingSteps([]);
+    setPlanStreamingError(null);
+    setDischargePlan(null);
 
     try {
-      const response = await fetch("/api/generate-plan", {
+      // Use streaming endpoint
+      const response = await fetch("/api/generate-plan?stream=true", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ patientId: patient.id, analysis, modelId: currentModel || undefined }),
       });
 
-      const data = await response.json();
-
-      // Demo rate limit — show amber countdown instead of red error
-      if (response.status === 429) {
-        const resetTime = Date.now() + (data.retryAfterMs || 60000);
-        setPlanRateLimitReset(resetTime);
-        setIsGeneratingPlan(false);
-        return;
+      // Handle non-streaming errors (rate limit, etc)
+      if (!response.ok) {
+        const contentType = response.headers.get("content-type");
+        if (contentType?.includes("application/json")) {
+          const data = await response.json();
+          if (response.status === 429) {
+            const resetTime = Date.now() + (data.retryAfterMs || 60000);
+            setPlanRateLimitReset(resetTime);
+            setIsGeneratingPlan(false);
+            return;
+          }
+          throw new Error(data.error || "Plan generation failed");
+        }
+        throw new Error(`HTTP ${response.status}`);
       }
 
-      if (!response.ok) throw new Error(data.error || "Plan generation failed");
-      setDischargePlan(data.plan);
+      if (!response.body) {
+        throw new Error("No response body for streaming");
+      }
+
+      // Process SSE stream
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") continue;
+
+            try {
+              const event = JSON.parse(data);
+
+              switch (event.type) {
+                case "thought":
+                  setPlanStreamingSteps(prev => [...prev, {
+                    type: "thought",
+                    iteration: event.iteration,
+                    content: event.thought,
+                    timestamp: event.timestamp,
+                  }]);
+                  break;
+
+                case "action":
+                  setPlanStreamingSteps(prev => [...prev, {
+                    type: "action",
+                    iteration: event.iteration,
+                    content: `Calling ${event.tool}`,
+                    tool: event.tool,
+                    timestamp: event.timestamp,
+                  }]);
+                  break;
+
+                case "observation":
+                  setPlanStreamingSteps(prev => [...prev, {
+                    type: "observation",
+                    iteration: event.iteration,
+                    content: event.observation,
+                    timestamp: event.timestamp,
+                  }]);
+                  break;
+
+                case "final":
+                  // Extract plan from result
+                  const plan = event.result?.answer || event.answer;
+                  const planStr = typeof plan === "string" ? plan : JSON.stringify(plan, null, 2);
+                  setDischargePlan(planStr);
+                  setIsGeneratingPlan(false);
+                  break;
+
+                case "error":
+                  setPlanStreamingError(event.error);
+                  setError(event.error);
+                  setIsGeneratingPlan(false);
+                  break;
+              }
+            } catch (parseErr) {
+              console.warn("[generatePlan] Failed to parse SSE event:", data);
+            }
+          }
+        }
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Plan generation failed");
+      const errorMsg = err instanceof Error ? err.message : "Plan generation failed";
+      setError(errorMsg);
+      setPlanStreamingError(errorMsg);
     } finally {
       setIsGeneratingPlan(false);
     }
@@ -885,14 +1083,19 @@ export default function DashboardPage() {
                     </motion.div>
                   )}
 
-                  {isGeneratingPlan && (
+                  {/* Show ReAct thinking steps while generating plan */}
+                  {(isGeneratingPlan || planStreamingSteps.length > 0) && !dischargePlan && (
                     <motion.div
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
-                      className="mt-6 text-center"
+                      className="mt-6"
                     >
-                      <RefreshCw className="w-6 h-6 text-emerald-500 animate-spin mx-auto mb-2" />
-                      <p className="text-sm text-gray-500">Generating transition plan...</p>
+                      <ThinkingSteps
+                        steps={planStreamingSteps}
+                        isStreaming={isGeneratingPlan}
+                        error={planStreamingError}
+                        title="Generating Transition Plan"
+                      />
                     </motion.div>
                   )}
                 </div>
@@ -909,9 +1112,19 @@ export default function DashboardPage() {
 
                   {isAnalyzing && (
                     <div className="space-y-3">
-                      {[1, 2, 3].map((i) => (
-                        <div key={i} className="h-20 bg-gray-100 rounded-lg animate-pulse" />
-                      ))}
+                      {analysisStreamingSteps.length > 0 ? (
+                        <ThinkingSteps
+                          steps={analysisStreamingSteps}
+                          isStreaming={true}
+                          error={analysisStreamingError}
+                          title="Agent Reasoning"
+                        />
+                      ) : (
+                        // Show skeleton loaders before first streaming event arrives
+                        [1, 2, 3].map((i) => (
+                          <div key={i} className="h-20 bg-gray-100 rounded-lg animate-pulse" />
+                        ))
+                      )}
                     </div>
                   )}
 

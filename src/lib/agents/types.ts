@@ -2,7 +2,23 @@
  * Agent Types for TransitionIQ Discharge Readiness Assessment
  */
 
-export type ToolName = "fetch_patient" | "check_drug_interactions" | "evaluate_care_gaps" | "estimate_costs" | "retrieve_knowledge" | "analyze_readiness" | "generate_plan";
+export type ToolName =
+  | "fetch_patient"
+  | "check_drug_interactions"
+  | "check_boxed_warnings"
+  | "check_drug_recalls"
+  | "get_comprehensive_drug_safety"
+  | "evaluate_care_gaps"
+  | "estimate_costs"
+  | "retrieve_knowledge"
+  | "analyze_readiness"
+  | "generate_plan"
+  // ReAct follow-up tools
+  | "generate_discharge_plan"
+  | "explain_risk_factor"
+  | "get_assessment_summary"
+  // Allow dynamic tool names from ReAct agents
+  | string;
 
 export interface ToolCall {
   id: string;
@@ -57,6 +73,30 @@ export interface DrugInteractionContext {
   drug2: string;
   severity: "major" | "moderate" | "minor";
   description: string;
+}
+
+export interface BoxedWarningContext {
+  drug: string;
+  warning: string;
+}
+
+export interface DrugRecallContext {
+  drugName: string;
+  recallNumber: string;
+  reason: string;
+  classification: string; // Class I, II, or III
+  status: string;
+  recallDate: string;
+}
+
+export interface ComprehensiveDrugSafetyContext {
+  drugName: string;
+  faersReportCount: number;
+  hasBoxedWarning: boolean;
+  boxedWarningSummary?: string;
+  recentRecalls: DrugRecallContext[];
+  topAdverseReactions: string[];
+  riskLevel: "high" | "moderate" | "low";
 }
 
 export interface CareGapContext {
@@ -121,6 +161,17 @@ export interface AgentResponse {
   toolsUsed: ToolCall[];
   requiresInput: boolean;
   suggestedActions?: string[];
+  /** ReAct agent trace - shows the Thought→Action→Observation reasoning loop */
+  reactTrace?: {
+    iterations: number;
+    reasoningTrace: string;
+    metadata: {
+      model: string;
+      startTime: string;
+      endTime: string;
+      totalLatencyMs: number;
+    };
+  };
 }
 
 export interface AgentGraph {

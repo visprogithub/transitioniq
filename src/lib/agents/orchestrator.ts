@@ -1,16 +1,25 @@
 /**
- * Agent Orchestrator - Plans and executes discharge readiness assessment
+ * Agent Orchestrator - ReAct-based Discharge Readiness Assessment
  *
- * Implements a ReAct-style agent loop:
- * 1. Plan: Determine which tools to call based on the goal
- * 2. Execute: Run tools in sequence, tracking results
- * 3. Reason: Analyze results and decide next steps
- * 4. Respond: Generate final response or request more input
+ * This orchestrator implements a TRUE ReAct (Reasoning and Acting) agent where:
+ * - The LLM decides which tools to call based on its reasoning
+ * - The LLM observes tool results and decides what to do next
+ * - The LLM determines when it has enough information to provide an answer
+ *
+ * NO hardcoded pipelines. The agent dynamically reasons about each step.
  */
 
 import { v4 as uuidv4 } from "uuid";
 import { executeTool } from "./tools";
-import { traceAgentExecution, traceToolCall, logToolCorrectness } from "./tracing";
+import {
+  runReActLoop,
+  runReActLoopStreaming,
+  createReActTool,
+  type ReActTool,
+  type ReActResult,
+  type ReActStreamEvent,
+} from "./react-loop";
+import { traceAgentExecution, logToolCorrectness } from "./tracing";
 import {
   createMemorySession,
   addConversationTurn,
@@ -24,8 +33,6 @@ import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import type {
   AgentState,
   AgentStep,
-  AgentPlan,
-  PlannedStep,
   ToolCall,
   AgentResponse,
   AgentGraph,
@@ -33,10 +40,13 @@ import type {
   DrugInteractionContext,
   CareGapContext,
   CostContext,
-  ToolName,
 } from "./types";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
+import {
+  identifyPreventiveCareGaps,
+  type PreventiveRecommendation,
+} from "@/lib/integrations/myhealthfinder-client";
 
 /**
  * In-memory session store (would be Redis/DB in production)
@@ -77,6 +87,19 @@ function cleanupAgentSessions(): void {
 }
 
 /**
+ * Accumulated context during agent execution
+ */
+interface ExecutionContext {
+  patient?: Patient;
+  drugInteractions?: unknown[];
+  careGaps?: unknown[];
+  preventiveCareGaps?: unknown[];
+  costs?: unknown[];
+  knowledgeContext?: unknown;
+  analysis?: DischargeAnalysis;
+}
+
+/**
  * Create a new agent session
  */
 export function createSession(goal: string): AgentState {
@@ -111,6 +134,383 @@ export function getSession(sessionId: string): AgentState | undefined {
 }
 
 /**
+ * Build the system prompt for the discharge assessment ReAct agent
+ */
+function buildAssessmentSystemPrompt(patientId: string): string {
+  return `You are a clinical discharge readiness assessment agent. Your job is to thoroughly assess whether a patient is ready for hospital discharge.
+
+## Your Goal
+Assess discharge readiness for patient "${patientId}" by gathering all relevant information and computing a comprehensive risk assessment.
+
+## Assessment Process
+You should reason about what information you need and gather it step by step:
+
+1. **Start by fetching the patient data** - You need to know who the patient is, their conditions, and medications
+2. **Check for drug interactions** - Look for dangerous medication combinations
+3. **Evaluate care gaps** - Check if clinical guidelines are being followed
+4. **Check preventive care gaps** - Identify missing screenings and vaccinations based on age/gender (USPSTF guidelines)
+5. **Estimate medication costs** - Identify potential financial barriers
+6. **Retrieve clinical knowledge** - Get relevant clinical context for the patient's conditions
+7. **Analyze readiness** - Once you have all the data, compute the final assessment
+
+## Important
+- Be thorough - a missed risk factor could harm the patient
+- Reason explicitly about what you've learned and what you still need
+- If a tool fails, reason about whether you can proceed or need to try again
+- Your final answer should summarize the assessment clearly
+
+## Output Format
+Your final answer should include:
+- The discharge readiness score (0-100)
+- The status (ready, caution, not_ready)
+- Key risk factors identified
+- Recommendations for the care team`;
+}
+
+/**
+ * Create the ReAct tools for discharge assessment
+ */
+function createAssessmentTools(
+  sessionId: string,
+  patientId: string,
+  executionContext: ExecutionContext
+): ReActTool[] {
+  return [
+    createReActTool(
+      "fetch_patient",
+      "Fetch patient demographic data, diagnoses, medications, allergies, labs, and vital signs. This is usually the first tool you should call.",
+      {
+        type: "object",
+        properties: {
+          patientId: { type: "string", description: "The patient ID to fetch" },
+        },
+        required: ["patientId"],
+      },
+      async (args) => {
+        const result = await executeTool("fetch_patient", { patientId: args.patientId || patientId });
+        if (result.success && result.data) {
+          const patientData = result.data as { raw: Patient };
+          executionContext.patient = patientData.raw;
+          setPatientContext(sessionId, patientData.raw);
+          storeToolResult(sessionId, "fetch_patient", result.data);
+          addReasoningStep(sessionId, `Fetched patient data: ${patientData.raw.name}, ${patientData.raw.age}yo, ${patientData.raw.medications.length} medications`);
+        }
+        return result.data;
+      }
+    ),
+
+    createReActTool(
+      "check_drug_interactions",
+      "Check for dangerous drug-drug interactions in the patient's medication list using FDA data. Requires patient data to be fetched first.",
+      {
+        type: "object",
+        properties: {
+          medications: {
+            type: "array",
+            description: "List of medication objects with name, dose, frequency",
+          },
+        },
+        required: [],
+      },
+      async (args) => {
+        const meds = args.medications || executionContext.patient?.medications || [];
+        const result = await executeTool("check_drug_interactions", { medications: meds });
+        if (result.success) {
+          executionContext.drugInteractions = result.data as unknown[];
+          storeToolResult(sessionId, "check_drug_interactions", result.data);
+          const interactions = result.data as unknown[];
+          addReasoningStep(sessionId, `Found ${interactions.length} drug interactions`);
+        }
+        return result.data;
+      }
+    ),
+
+    createReActTool(
+      "evaluate_care_gaps",
+      "Evaluate compliance with clinical practice guidelines (USPSTF, AHA, etc.) for the patient's conditions. Identifies gaps in recommended care.",
+      {
+        type: "object",
+        properties: {
+          patient: {
+            type: "object",
+            description: "The patient object (optional - uses cached patient if not provided)",
+          },
+        },
+        required: [],
+      },
+      async (args) => {
+        const patient = args.patient || executionContext.patient;
+        if (!patient) {
+          return { error: "No patient data available. Call fetch_patient first." };
+        }
+        const result = await executeTool("evaluate_care_gaps", { patient });
+        if (result.success) {
+          executionContext.careGaps = result.data as unknown[];
+          storeToolResult(sessionId, "evaluate_care_gaps", result.data);
+          const gaps = result.data as Array<{ status?: string }>;
+          const unmetGaps = gaps.filter((g) => g.status === "unmet");
+          addReasoningStep(sessionId, `Evaluated care gaps: ${unmetGaps.length} unmet guidelines`);
+        }
+        return result.data;
+      }
+    ),
+
+    createReActTool(
+      "estimate_costs",
+      "Estimate out-of-pocket medication costs using CMS pricing data. Helps identify financial barriers to medication adherence.",
+      {
+        type: "object",
+        properties: {
+          medications: {
+            type: "array",
+            description: "List of medication objects (optional - uses patient medications if not provided)",
+          },
+        },
+        required: [],
+      },
+      async (args) => {
+        const meds = args.medications || executionContext.patient?.medications || [];
+        const result = await executeTool("estimate_costs", { medications: meds });
+        if (result.success) {
+          executionContext.costs = result.data as unknown[];
+          storeToolResult(sessionId, "estimate_costs", result.data);
+          const costs = result.data as Array<{ monthlyOOP?: number }>;
+          const highCost = costs.filter((c) => (c.monthlyOOP || 0) > 50);
+          addReasoningStep(sessionId, `Estimated costs: ${highCost.length} medications with high out-of-pocket costs`);
+        }
+        return result.data;
+      }
+    ),
+
+    createReActTool(
+      "retrieve_knowledge",
+      "Retrieve relevant clinical knowledge from the knowledge base using TF-IDF RAG. Provides context about the patient's conditions and medications.",
+      {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Optional search query. If not provided, uses patient conditions as context.",
+          },
+        },
+        required: [],
+      },
+      async (args) => {
+        const patient = executionContext.patient;
+        const result = await executeTool("retrieve_knowledge", {
+          patient,
+          query: args.query,
+        });
+        if (result.success) {
+          executionContext.knowledgeContext = result.data;
+          storeToolResult(sessionId, "retrieve_knowledge", result.data);
+          addReasoningStep(sessionId, "Retrieved clinical knowledge context");
+        }
+        return result.data;
+      }
+    ),
+
+    createReActTool(
+      "check_preventive_care_gaps",
+      "Check for preventive care gaps based on age, gender, and documented conditions. Uses MyHealthfinder API (ODPHP) to identify missing screenings and vaccinations based on USPSTF guidelines.",
+      {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+      async () => {
+        const patient = executionContext.patient;
+        if (!patient) {
+          return { error: "No patient data available. Call fetch_patient first." };
+        }
+        try {
+          const gaps = await identifyPreventiveCareGaps(patient);
+          executionContext.preventiveCareGaps = gaps;
+          storeToolResult(sessionId, "check_preventive_care_gaps", gaps);
+          addReasoningStep(sessionId, `Identified ${gaps.length} preventive care gaps (colonoscopy, mammogram, vaccines, etc.)`);
+          return {
+            gapsIdentified: gaps.length,
+            gaps: gaps.map((g) => ({
+              recommendation: g.recommendation.title,
+              status: g.status,
+              reason: g.reason,
+              category: g.recommendation.category,
+            })),
+            source: "MyHealthfinder (ODPHP) - USPSTF Guidelines",
+          };
+        } catch (error) {
+          console.error("[check_preventive_care_gaps] Error:", error);
+          return { error: "Failed to check preventive care gaps", details: String(error) };
+        }
+      }
+    ),
+
+    createReActTool(
+      "analyze_readiness",
+      "Compute the final discharge readiness assessment. Call this ONLY after gathering patient data, drug interactions, care gaps, and costs. This tool uses an LLM to analyze all the data and produce a score.",
+      {
+        type: "object",
+        properties: {
+          includeKnowledge: {
+            type: "boolean",
+            description: "Whether to include knowledge base context in analysis",
+          },
+        },
+        required: [],
+      },
+      async () => {
+        if (!executionContext.patient) {
+          return { error: "No patient data. Call fetch_patient first." };
+        }
+
+        // Auto-fetch missing data if LLM skipped steps (makes agent more robust)
+        if (!executionContext.drugInteractions) {
+          console.log("[analyze_readiness] Auto-fetching missing drug interactions");
+          const drugResult = await executeTool("check_drug_interactions", {
+            medications: executionContext.patient.medications
+          });
+          if (drugResult.success) {
+            executionContext.drugInteractions = drugResult.data as unknown[];
+          }
+        }
+
+        if (!executionContext.careGaps) {
+          console.log("[analyze_readiness] Auto-fetching missing care gaps");
+          const gapResult = await executeTool("evaluate_care_gaps", {
+            patient: executionContext.patient
+          });
+          if (gapResult.success) {
+            executionContext.careGaps = gapResult.data as unknown[];
+          }
+        }
+
+        const result = await executeTool("analyze_readiness", {
+          patient: executionContext.patient,
+          drugInteractions: executionContext.drugInteractions || [],
+          careGaps: executionContext.careGaps || [],
+          preventiveCareGaps: executionContext.preventiveCareGaps || [],
+          costs: executionContext.costs || [],
+          knowledgeContext: executionContext.knowledgeContext,
+        });
+
+        if (result.success) {
+          executionContext.analysis = result.data as DischargeAnalysis;
+          storeToolResult(sessionId, "analyze_readiness", result.data);
+          const analysis = result.data as DischargeAnalysis;
+          addReasoningStep(sessionId, `Analysis complete: score=${analysis.score}, status=${analysis.status}`);
+
+          // Store assessment for long-term memory
+          await storeAssessment(patientId, analysis, getActiveModelId());
+        }
+        return result.data;
+      }
+    ),
+  ];
+}
+
+/**
+ * Convert ReAct result to AgentResponse
+ */
+function convertToAgentResponse(
+  sessionId: string,
+  patientId: string,
+  reactResult: ReActResult,
+  executionContext: ExecutionContext,
+  state: AgentState
+): AgentResponse {
+  // Build the execution graph from ReAct steps
+  const graph: AgentGraph = { nodes: [], edges: [] };
+
+  // Start node
+  graph.nodes.push({ id: "start", type: "start", label: "Agent Started", status: "success" });
+
+  // Add nodes for each ReAct step
+  let prevNodeId = "start";
+  for (const step of reactResult.steps) {
+    const nodeId = `step-${step.iteration}`;
+
+    if (step.action) {
+      graph.nodes.push({
+        id: nodeId,
+        type: "tool",
+        label: `${step.action.tool}`,
+        status: step.observation?.includes("error") ? "error" : "success",
+        metadata: {
+          thought: step.thought,
+          tool: step.action.tool,
+          args: step.action.args,
+        },
+      });
+    } else if (step.isFinal) {
+      graph.nodes.push({
+        id: nodeId,
+        type: "end",
+        label: "Final Answer",
+        status: "success",
+        metadata: { thought: step.thought },
+      });
+    }
+
+    graph.edges.push({ from: prevNodeId, to: nodeId });
+    prevNodeId = nodeId;
+  }
+
+  // Convert tool usages to ToolCall format
+  const toolsUsed: ToolCall[] = reactResult.steps
+    .filter((s) => s.action)
+    .map((s, i) => ({
+      id: `call-${i}`,
+      tool: s.action!.tool as ToolCall["tool"],
+      input: s.action!.args,
+      output: s.observation ? JSON.parse(s.observation) : null,
+      success: !s.observation?.includes("error"),
+      timestamp: s.timestamp,
+    }));
+
+  // Build response
+  const analysis = executionContext.analysis;
+
+  if (analysis) {
+    return {
+      sessionId,
+      message: reactResult.answer,
+      analysis: {
+        score: analysis.score,
+        status: analysis.status,
+        riskFactors: analysis.riskFactors,
+        recommendations: analysis.recommendations,
+        modelUsed: analysis.modelUsed,
+      },
+      agentGraph: graph,
+      toolsUsed,
+      requiresInput: false,
+      suggestedActions:
+        analysis.status !== "ready"
+          ? ["Generate discharge plan", "Review risk factors", "Run another assessment"]
+          : ["Generate discharge plan", "Complete discharge"],
+      reactTrace: {
+        iterations: reactResult.iterations,
+        reasoningTrace: reactResult.reasoningTrace,
+        metadata: reactResult.metadata,
+      },
+    };
+  }
+
+  return {
+    sessionId,
+    message: reactResult.answer,
+    agentGraph: graph,
+    toolsUsed,
+    requiresInput: false,
+    reactTrace: {
+      iterations: reactResult.iterations,
+      reasoningTrace: reactResult.reasoningTrace,
+      metadata: reactResult.metadata,
+    },
+  };
+}
+
+/**
  * Main agent execution entry point
  */
 export async function runAgent(
@@ -135,7 +535,6 @@ export async function runAgent(
       timestamp: new Date().toISOString(),
     });
 
-    // Also add to memory system
     addConversationTurn(state.sessionId, {
       role: "user",
       content: input.message,
@@ -155,517 +554,104 @@ export async function runAgent(
     }
   }
 
-  // Run the agent loop with tracing
-  return await traceAgentExecution(state.sessionId, state.patientId || "unknown", async () => {
-    return await agentLoop(state);
-  }, { threadId: state.sessionId });
-}
-
-/**
- * The main agent loop - implements ReAct pattern
- */
-async function agentLoop(state: AgentState): Promise<AgentResponse> {
-  const graph: AgentGraph = { nodes: [], edges: [] };
-  const toolsUsed: ToolCall[] = [];
-
-  // Start node
-  addGraphNode(graph, "start", "start", "Agent Started", "success");
-
-  try {
-    // Phase 1: Planning
-    state.status = "planning";
-    const planStep = addStep(state, "plan", "Analyzing request and planning execution...");
-    addGraphNode(graph, "plan", "plan", "Plan Execution", "running");
-
-    const plan = await createPlan(state);
-    planStep.content = `Plan: ${plan.reasoning}`;
-    updateGraphNode(graph, "plan", "success");
-    addGraphEdge(graph, "start", "plan");
-
-    // Phase 2: Tool Execution — dependency-aware with parallel batches
-    // Steps whose dependencies are all satisfied run concurrently via
-    // Promise.allSettled, giving ~2-3× speedup for the typical 6-step plan
-    // (steps 2-5 fan out in parallel after step 1).
-    state.status = "executing";
-    let patient: Patient | undefined;
-    let drugInteractions: unknown[] = [];
-    let careGaps: unknown[] = [];
-    let costs: unknown[] = [];
-    let knowledgeContext: unknown = undefined;
-    let analysis: DischargeAnalysis | undefined;
-
-    const completedOrders = new Set<number>();
-
-    // Group steps into batches where each batch's dependencies are already done
-    while (completedOrders.size < plan.steps.length) {
-      // Find all steps whose dependencies are satisfied and haven't run yet
-      const batch = plan.steps.filter(
-        (s) =>
-          !completedOrders.has(s.order) &&
-          s.dependsOn.every((dep) => completedOrders.has(dep))
-      );
-
-      if (batch.length === 0) {
-        // Safety: avoid infinite loop if deps can never be satisfied
-        throw new Error("Dependency deadlock: no runnable steps remaining");
-      }
-
-      // Set up graph nodes + edges for every step in this batch
-      for (const plannedStep of batch) {
-        const nodeId = `tool-${plannedStep.order}`;
-        addGraphNode(graph, nodeId, "tool", plannedStep.description, "running", {
-          tool: plannedStep.tool,
-        });
-
-        if (plannedStep.dependsOn.length === 0) {
-          addGraphEdge(graph, "plan", nodeId);
-        } else {
-          for (const dep of plannedStep.dependsOn) {
-            addGraphEdge(graph, `tool-${dep}`, nodeId);
-          }
-        }
-      }
-
-      // Execute the entire batch concurrently
-      const batchPromises = batch.map(async (plannedStep) => {
-        const input = buildToolInput(plannedStep.tool, {
-          patientId: state.patientId,
-          patient,
-          drugInteractions,
-          careGaps,
-          costs,
-          knowledgeContext,
-          analysis,
-        });
-
-        const toolCall = await executeTracedTool(plannedStep.tool, input, state.sessionId);
-        return { plannedStep, toolCall, input };
-      });
-
-      const batchResults = await Promise.allSettled(batchPromises);
-
-      // Process results in order so context updates are deterministic
-      for (const result of batchResults) {
-        if (result.status === "rejected") {
-          throw new Error(`Tool execution failed: ${result.reason}`);
-        }
-
-        const { plannedStep, toolCall, input } = result.value;
-        const nodeId = `tool-${plannedStep.order}`;
-        toolsUsed.push(toolCall);
-        addStep(state, "tool_call", `Executed ${plannedStep.tool}`, toolCall);
-
-        if (toolCall.success) {
-          updateGraphNode(graph, nodeId, "success", toolCall.duration);
-          storeToolResult(state.sessionId, plannedStep.tool, toolCall.output);
-          addReasoningStep(state.sessionId, `Tool ${plannedStep.tool} completed successfully`);
-
-          // Update context with tool results
-          switch (plannedStep.tool) {
-            case "fetch_patient":
-              const patientResult = toolCall.output as { raw: Patient };
-              patient = patientResult.raw;
-              state.context.patient = {
-                id: patient.id,
-                name: patient.name,
-                age: patient.age,
-                gender: patient.gender,
-                medicationCount: patient.medications.length,
-                conditionCount: patient.diagnoses.length,
-              };
-              setPatientContext(state.sessionId, patient);
-              break;
-            case "check_drug_interactions":
-              drugInteractions = toolCall.output as unknown[];
-              state.context.drugInteractions = drugInteractions as DrugInteractionContext[];
-              break;
-            case "evaluate_care_gaps":
-              careGaps = toolCall.output as unknown[];
-              state.context.careGaps = careGaps as CareGapContext[];
-              break;
-            case "estimate_costs":
-              costs = toolCall.output as unknown[];
-              state.context.costEstimates = costs as CostContext[];
-              break;
-            case "retrieve_knowledge":
-              knowledgeContext = toolCall.output;
-              break;
-            case "analyze_readiness":
-              analysis = toolCall.output as DischargeAnalysis;
-              state.context.analysis = {
-                score: analysis.score,
-                status: analysis.status,
-                riskFactorCount: analysis.riskFactors.length,
-                highRiskCount: analysis.riskFactors.filter((r) => r.severity === "high").length,
-              };
-
-              if (state.patientId) {
-                await storeAssessment(
-                  state.patientId,
-                  analysis,
-                  getActiveModelId()
-                );
-                addReasoningStep(
-                  state.sessionId,
-                  `Assessment stored: score=${analysis.score}, status=${analysis.status}`
-                );
-              }
-              break;
-          }
-
-          // Evaluate tool correctness (fire-and-forget for parallel steps)
-          evaluateToolCorrectness(plannedStep.tool, input, toolCall.output, state.sessionId);
-        } else {
-          updateGraphNode(graph, nodeId, "error", toolCall.duration);
-          addStep(state, "reasoning", `Tool ${plannedStep.tool} failed: ${toolCall.error}`);
-
-          if (plannedStep.required) {
-            throw new Error(`Required tool ${plannedStep.tool} failed: ${toolCall.error}`);
-          }
-        }
-
-        completedOrders.add(plannedStep.order);
-      }
-    }
-
-    // Phase 3: Response Generation
-    const lastOrder = Math.max(...plan.steps.map((s) => s.order));
-    addGraphNode(graph, "respond", "end", "Generate Response", "running");
-    addGraphEdge(graph, `tool-${lastOrder}`, "respond");
-
-    const response = generateResponse(state, analysis, graph, toolsUsed);
-    updateGraphNode(graph, "respond", "success");
-
-    // Add assistant message to history
-    state.context.conversationHistory.push({
-      role: "assistant",
-      content: response.message,
-      timestamp: new Date().toISOString(),
-      toolCalls: toolsUsed,
-    });
-
-    // Also add to memory system with metadata
-    addConversationTurn(state.sessionId, {
-      role: "assistant",
-      content: response.message,
-      metadata: {
-        toolCalls: toolsUsed.map((tc) => ({ tool: tc.tool, success: tc.success ?? false })),
-        analysisScore: analysis?.score,
-        model: getActiveModelId(),
-      },
-    });
-
-    state.status = "completed";
-    state.updatedAt = new Date().toISOString();
-
-    return response;
-  } catch (error) {
-    state.status = "error";
-    addStep(state, "reasoning", `Error: ${error instanceof Error ? error.message : "Unknown error"}`);
-    addGraphNode(graph, "error", "end", "Error", "error");
-
-    return {
-      sessionId: state.sessionId,
-      message: `I encountered an error while assessing discharge readiness: ${error instanceof Error ? error.message : "Unknown error"}`,
-      agentGraph: graph,
-      toolsUsed,
-      requiresInput: false,
-    };
-  }
-}
-
-/**
- * Create an execution plan based on the current goal and context
- */
-async function createPlan(state: AgentState): Promise<AgentPlan> {
-  const steps: PlannedStep[] = [];
-
-  // If we have a patient ID, plan the full assessment workflow
-  if (state.patientId) {
-    steps.push({
-      order: 1,
-      tool: "fetch_patient",
-      description: "Fetch patient data (FHIR-structured synthetic data)",
-      dependsOn: [],
-      required: true,
-    });
-
-    steps.push({
-      order: 2,
-      tool: "check_drug_interactions",
-      description: "Check drug interactions via FDA",
-      dependsOn: [1],
-      required: true,
-    });
-
-    steps.push({
-      order: 3,
-      tool: "evaluate_care_gaps",
-      description: "Evaluate clinical guideline compliance",
-      dependsOn: [1],
-      required: true,
-    });
-
-    steps.push({
-      order: 4,
-      tool: "estimate_costs",
-      description: "Estimate medication costs via CMS",
-      dependsOn: [1],
-      required: false,
-    });
-
-    steps.push({
-      order: 5,
-      tool: "retrieve_knowledge",
-      description: "Retrieve relevant clinical knowledge via TF-IDF RAG",
-      dependsOn: [1],
-      required: false,
-    });
-
-    steps.push({
-      order: 6,
-      tool: "analyze_readiness",
-      description: "Compute discharge readiness score",
-      dependsOn: [2, 3, 4, 5],
-      required: true,
-    });
-
-    return {
-      goal: state.currentGoal,
-      steps,
-      reasoning: `Will assess patient ${state.patientId} by: 1) Fetching patient data, 2) Checking FDA drug interactions, 3) Evaluating care gaps, 4) Estimating costs, 5) Retrieving clinical knowledge via RAG, 6) Computing readiness score`,
-    };
-  }
-
-  // If no patient ID, we need more input
-  return {
-    goal: state.currentGoal,
-    steps: [],
-    reasoning: "Need patient ID to proceed with assessment",
-  };
-}
-
-/**
- * Build input for a tool based on accumulated context
- */
-function buildToolInput(
-  tool: ToolName,
-  context: {
-    patientId?: string;
-    patient?: Patient;
-    drugInteractions?: unknown[];
-    careGaps?: unknown[];
-    costs?: unknown[];
-    knowledgeContext?: unknown;
-    analysis?: DischargeAnalysis;
-  }
-): Record<string, unknown> {
-  switch (tool) {
-    case "fetch_patient":
-      return { patientId: context.patientId };
-    case "check_drug_interactions":
-      return { medications: context.patient?.medications || [] };
-    case "evaluate_care_gaps":
-      return { patient: context.patient };
-    case "estimate_costs":
-      return { medications: context.patient?.medications || [] };
-    case "retrieve_knowledge":
-      return { patient: context.patient };
-    case "analyze_readiness":
-      return {
-        patient: context.patient,
-        drugInteractions: context.drugInteractions,
-        careGaps: context.careGaps,
-        costs: context.costs,
-        knowledgeContext: context.knowledgeContext,
-      };
-    case "generate_plan":
-      return {
-        analysis: context.analysis,
-        patient: context.patient,
-      };
-    default:
-      return {};
-  }
-}
-
-/**
- * Execute a tool with tracing
- */
-async function executeTracedTool(
-  tool: ToolName,
-  input: Record<string, unknown>,
-  sessionId: string
-): Promise<ToolCall> {
-  const callId = uuidv4();
-
-  const result = await traceToolCall(tool, sessionId, async () => {
-    return await executeTool(tool, input);
-  }, { threadId: sessionId });
-
-  return {
-    id: callId,
-    tool,
-    input,
-    output: result.data,
-    success: result.success,
-    error: result.error,
-    duration: result.duration,
-    timestamp: new Date().toISOString(),
-  };
-}
-
-/**
- * Evaluate tool correctness and log to Opik
- */
-async function evaluateToolCorrectness(
-  tool: ToolName,
-  input: Record<string, unknown>,
-  output: unknown,
-  sessionId: string
-): Promise<void> {
-  let isCorrect = true;
-  let reason = "Tool executed successfully";
-
-  // Tool-specific correctness checks
-  switch (tool) {
-    case "fetch_patient":
-      const patientOutput = output as { id?: string };
-      isCorrect = !!patientOutput?.id;
-      reason = isCorrect ? "Patient data retrieved" : "No patient data returned";
-      break;
-
-    case "check_drug_interactions":
-      const interactions = output as unknown[];
-      // Correct if it returned an array (even empty)
-      isCorrect = Array.isArray(interactions);
-      reason = isCorrect ? `Found ${interactions.length} interactions` : "Invalid interaction format";
-      break;
-
-    case "evaluate_care_gaps":
-      const gaps = output as unknown[];
-      isCorrect = Array.isArray(gaps);
-      reason = isCorrect ? `Evaluated ${gaps.length} guidelines` : "Invalid care gap format";
-      break;
-
-    case "analyze_readiness":
-      const analysis = output as { score?: number; status?: string };
-      isCorrect = typeof analysis?.score === "number" && !!analysis?.status;
-      reason = isCorrect
-        ? `Score: ${analysis.score}, Status: ${analysis.status}`
-        : "Invalid analysis output";
-      break;
-  }
-
-  await logToolCorrectness(tool, sessionId, isCorrect, reason);
-}
-
-/**
- * Generate the final response
- */
-function generateResponse(
-  state: AgentState,
-  analysis: DischargeAnalysis | undefined,
-  graph: AgentGraph,
-  toolsUsed: ToolCall[]
-): AgentResponse {
-  if (!analysis) {
+  // If no patient ID, request one
+  if (!input.patientId) {
     return {
       sessionId: state.sessionId,
       message: "I need a patient ID to assess discharge readiness. Please provide a patient ID.",
-      agentGraph: graph,
-      toolsUsed,
+      agentGraph: { nodes: [], edges: [] },
+      toolsUsed: [],
       requiresInput: true,
       suggestedActions: ["Provide patient ID", "Select demo patient"],
     };
   }
 
-  // Use supportive clinical language — this is decision SUPPORT, not a verdict
-  const statusNarrativeMap: Record<string, string> = {
-    ready: "Assessment indicates patient is on track for transition",
-    caution: "Assessment identified items for review before transition",
-    not_ready: "Assessment identified significant concerns requiring further review",
-  };
-  const statusText = statusNarrativeMap[analysis.status] || "Assessment in progress";
+  // Run the ReAct agent loop with tracing
+  return await traceAgentExecution(
+    state.sessionId,
+    input.patientId,
+    async () => {
+      // Create execution context to accumulate data across tool calls
+      const executionContext: ExecutionContext = {};
 
-  const highRisks = analysis.riskFactors.filter((r) => r.severity === "high");
-  const riskSummary = highRisks.length > 0
-    ? ` Found ${highRisks.length} high-risk factor(s) that need attention.`
-    : "";
+      // Create tools with access to execution context
+      const tools = createAssessmentTools(state.sessionId, input.patientId!, executionContext);
 
-  return {
-    sessionId: state.sessionId,
-    message: `Assessment complete for ${state.context.patient?.name || state.patientId}. Score: ${analysis.score}/100. ${statusText}.${riskSummary}`,
-    analysis: {
-      score: analysis.score,
-      status: analysis.status,
-      riskFactors: analysis.riskFactors,
-      recommendations: analysis.recommendations,
-      modelUsed: analysis.modelUsed,
+      // Build the user message for the ReAct loop
+      const userMessage = input.message || `Please assess discharge readiness for patient ${input.patientId}`;
+
+      // Run the ReAct loop - the LLM decides what to do
+      const reactResult = await runReActLoop(userMessage, {
+        systemPrompt: buildAssessmentSystemPrompt(input.patientId!),
+        tools,
+        maxIterations: 15, // Allow enough iterations for full assessment
+        threadId: state.sessionId,
+        metadata: {
+          patientId: input.patientId,
+          sessionId: state.sessionId,
+        },
+      });
+
+      // Convert to AgentResponse format
+      const response = convertToAgentResponse(
+        state.sessionId,
+        input.patientId!,
+        reactResult,
+        executionContext,
+        state
+      );
+
+      // Update state
+      state.context.analysis = executionContext.analysis
+        ? {
+            score: executionContext.analysis.score,
+            status: executionContext.analysis.status,
+            riskFactorCount: executionContext.analysis.riskFactors.length,
+            highRiskCount: executionContext.analysis.riskFactors.filter((r) => r.severity === "high").length,
+          }
+        : undefined;
+
+      if (executionContext.patient) {
+        state.context.patient = {
+          id: executionContext.patient.id,
+          name: executionContext.patient.name,
+          age: executionContext.patient.age,
+          gender: executionContext.patient.gender,
+          medicationCount: executionContext.patient.medications.length,
+          conditionCount: executionContext.patient.diagnoses.length,
+        };
+      }
+
+      // Add assistant message to history
+      state.context.conversationHistory.push({
+        role: "assistant",
+        content: response.message,
+        timestamp: new Date().toISOString(),
+        toolCalls: response.toolsUsed,
+      });
+
+      addConversationTurn(state.sessionId, {
+        role: "assistant",
+        content: response.message,
+        metadata: {
+          toolCalls: response.toolsUsed.map((tc) => ({ tool: tc.tool, success: tc.success ?? false })),
+          analysisScore: executionContext.analysis?.score,
+          model: getActiveModelId(),
+          reactIterations: reactResult.iterations,
+        },
+      });
+
+      state.status = "completed";
+      state.updatedAt = new Date().toISOString();
+
+      return response;
     },
-    agentGraph: graph,
-    toolsUsed,
-    requiresInput: false,
-    suggestedActions: analysis.status !== "ready"
-      ? ["Generate discharge plan", "Review risk factors", "Run another assessment"]
-      : ["Generate discharge plan", "Complete discharge"],
-  };
+    { threadId: state.sessionId }
+  );
 }
 
 /**
- * Helper: Add a step to the agent state
- */
-function addStep(state: AgentState, type: AgentStep["type"], content: string, toolCall?: ToolCall): AgentStep {
-  const step: AgentStep = {
-    id: uuidv4(),
-    type,
-    content,
-    toolCall,
-    timestamp: new Date().toISOString(),
-  };
-  state.steps.push(step);
-  return step;
-}
-
-/**
- * Helper: Add a node to the agent graph
- */
-function addGraphNode(
-  graph: AgentGraph,
-  id: string,
-  type: GraphNode["type"],
-  label: string,
-  status: GraphNode["status"],
-  metadata?: Record<string, unknown>
-): void {
-  graph.nodes.push({ id, type, label, status, metadata });
-}
-
-/**
- * Helper: Update a node's status in the graph
- */
-function updateGraphNode(
-  graph: AgentGraph,
-  id: string,
-  status: GraphNode["status"],
-  duration?: number
-): void {
-  const node = graph.nodes.find((n) => n.id === id);
-  if (node) {
-    node.status = status;
-    if (duration) node.duration = duration;
-  }
-}
-
-/**
- * Helper: Add an edge to the agent graph
- */
-function addGraphEdge(graph: AgentGraph, from: string, to: string, label?: string): void {
-  graph.edges.push({ from, to, label });
-}
-
-/**
- * Continue a conversation with follow-up
+ * Continue a conversation with follow-up using ReAct
  */
 export async function continueConversation(
   sessionId: string,
@@ -683,40 +669,10 @@ export async function continueConversation(
     timestamp: new Date().toISOString(),
   });
 
-  // Handle follow-up requests
-  const lowerMessage = message.toLowerCase();
-
-  if (lowerMessage.includes("generate plan") || lowerMessage.includes("discharge plan")) {
-    // Generate discharge plan if we have analysis
-    if (state.context.analysis && state.context.patient) {
-      const toolCall = await executeTracedTool(
-        "generate_plan",
-        {
-          analysis: state.context.analysis,
-          patient: state.context.patient,
-        },
-        sessionId
-      );
-
-      const response: AgentResponse = {
-        sessionId,
-        message: "Here is the discharge planning checklist:",
-        plan: toolCall.output as string,
-        agentGraph: { nodes: [], edges: [] },
-        toolsUsed: [toolCall],
-        requiresInput: false,
-      };
-
-      state.context.conversationHistory.push({
-        role: "assistant",
-        content: response.message,
-        timestamp: new Date().toISOString(),
-        toolCalls: [toolCall],
-      });
-
-      return response;
-    }
-  }
+  addConversationTurn(sessionId, {
+    role: "user",
+    content: message,
+  });
 
   // Check if asking for different patient
   const patientMatch = message.match(/patient\s+(\S+)/i);
@@ -724,13 +680,330 @@ export async function continueConversation(
     return runAgent({ patientId: patientMatch[1], sessionId });
   }
 
-  // Generic follow-up response
-  return {
-    sessionId,
-    message: "How can I help you further? You can ask me to generate a discharge plan, assess a different patient, or explain any risk factors.",
-    agentGraph: { nodes: [], edges: [] },
-    toolsUsed: [],
-    requiresInput: true,
-    suggestedActions: ["Generate discharge plan", "Assess another patient", "Explain risk factors"],
+  // For follow-up requests, use a simplified ReAct loop
+  const executionContext: ExecutionContext = {
+    patient: state.context.patient as unknown as Patient,
+    analysis: state.context.analysis as unknown as DischargeAnalysis,
   };
+
+  // Create follow-up tools
+  const followUpTools: ReActTool[] = [
+    createReActTool(
+      "generate_discharge_plan",
+      "Generate a detailed discharge planning checklist based on the assessment. Only available if an assessment has been completed.",
+      {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+      async () => {
+        if (!state.context.analysis || !state.context.patient) {
+          return { error: "No assessment available. Please run an assessment first." };
+        }
+        const result = await executeTool("generate_plan", {
+          analysis: state.context.analysis,
+          patient: state.context.patient,
+        });
+        return result.data;
+      }
+    ),
+    createReActTool(
+      "explain_risk_factor",
+      "Explain a specific risk factor from the assessment in more detail.",
+      {
+        type: "object",
+        properties: {
+          riskFactor: { type: "string", description: "The risk factor to explain" },
+        },
+        required: ["riskFactor"],
+      },
+      async (args) => {
+        const analysis = state.context.analysis;
+        if (!analysis) {
+          return { error: "No assessment available." };
+        }
+        // Find matching risk factor
+        const rf = (analysis as { riskFactors?: Array<{ title: string; description: string; severity: string; resolution?: string }> }).riskFactors?.find(
+          (r) => r.title.toLowerCase().includes(String(args.riskFactor).toLowerCase())
+        );
+        if (rf) {
+          return {
+            title: rf.title,
+            description: rf.description,
+            severity: rf.severity,
+            resolution: rf.resolution,
+          };
+        }
+        return { error: `Risk factor "${args.riskFactor}" not found in assessment.` };
+      }
+    ),
+    createReActTool(
+      "get_assessment_summary",
+      "Get a summary of the current assessment including score, status, and key risk factors.",
+      {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+      async () => {
+        const analysis = state.context.analysis;
+        const patient = state.context.patient;
+        if (!analysis) {
+          return { error: "No assessment available." };
+        }
+        return {
+          patientName: patient?.name,
+          score: analysis.score,
+          status: analysis.status,
+          riskFactorCount: analysis.riskFactorCount,
+          highRiskCount: analysis.highRiskCount,
+        };
+      }
+    ),
+  ];
+
+  const followUpSystemPrompt = `You are a clinical discharge readiness assistant continuing a conversation about patient ${state.patientId || "unknown"}.
+
+## Current Context
+${state.context.analysis ? `Assessment score: ${state.context.analysis.score}/100, Status: ${state.context.analysis.status}` : "No assessment has been completed yet."}
+${state.context.patient ? `Patient: ${state.context.patient.name}` : ""}
+
+## Your Task
+Help the user with their follow-up request. You can:
+- Generate a discharge plan
+- Explain risk factors
+- Provide assessment summaries
+- Answer questions about the patient's discharge readiness
+
+If the user wants to assess a different patient, tell them to provide a new patient ID.`;
+
+  const reactResult = await runReActLoop(message, {
+    systemPrompt: followUpSystemPrompt,
+    tools: followUpTools,
+    maxIterations: 5,
+    threadId: sessionId,
+    metadata: {
+      patientId: state.patientId,
+      isFollowUp: true,
+    },
+  });
+
+  const toolsUsed: ToolCall[] = reactResult.steps
+    .filter((s) => s.action)
+    .map((s, i) => ({
+      id: `call-${i}`,
+      tool: s.action!.tool as ToolCall["tool"],
+      input: s.action!.args,
+      output: s.observation ? JSON.parse(s.observation) : null,
+      success: !s.observation?.includes("error"),
+      timestamp: s.timestamp,
+    }));
+
+  // Check if a plan was generated
+  const planStep = reactResult.steps.find((s) => s.action?.tool === "generate_discharge_plan" && s.observation);
+  const plan = planStep?.observation ? JSON.parse(planStep.observation) : undefined;
+
+  const response: AgentResponse = {
+    sessionId,
+    message: reactResult.answer,
+    plan: plan || undefined,
+    agentGraph: { nodes: [], edges: [] },
+    toolsUsed,
+    requiresInput: false,
+    suggestedActions: ["Generate discharge plan", "Assess another patient", "Explain risk factors"],
+    reactTrace: {
+      iterations: reactResult.iterations,
+      reasoningTrace: reactResult.reasoningTrace,
+      metadata: reactResult.metadata,
+    },
+  };
+
+  state.context.conversationHistory.push({
+    role: "assistant",
+    content: response.message,
+    timestamp: new Date().toISOString(),
+    toolCalls: toolsUsed,
+  });
+
+  addConversationTurn(sessionId, {
+    role: "assistant",
+    content: response.message,
+    metadata: {
+      toolCalls: toolsUsed.map((tc) => ({ tool: tc.tool, success: tc.success ?? false })),
+      reactIterations: reactResult.iterations,
+    },
+  });
+
+  return response;
+}
+
+/**
+ * Streaming agent stream event type
+ */
+export type AgentStreamEvent =
+  | ReActStreamEvent
+  | { type: "analysis"; analysis: DischargeAnalysis };
+
+/**
+ * Streaming version of runAgent - yields events as the agent reasons
+ *
+ * This allows the UI to show thinking steps in real-time while the agent
+ * gathers information and computes the assessment.
+ */
+export async function* runAgentStreaming(
+  input: { patientId?: string; message?: string; sessionId?: string }
+): AsyncGenerator<AgentStreamEvent, AgentResponse, unknown> {
+  // Get or create session
+  let state: AgentState;
+  if (input.sessionId && sessions.has(input.sessionId)) {
+    state = sessions.get(input.sessionId)!;
+  } else {
+    const goal = input.patientId
+      ? `Assess discharge readiness for patient ${input.patientId}`
+      : "Help with discharge readiness assessment";
+    state = createSession(goal);
+  }
+
+  // Add user message to conversation history
+  if (input.message) {
+    state.context.conversationHistory.push({
+      role: "user",
+      content: input.message,
+      timestamp: new Date().toISOString(),
+    });
+
+    addConversationTurn(state.sessionId, {
+      role: "user",
+      content: input.message,
+    });
+  }
+
+  if (input.patientId) {
+    state.patientId = input.patientId;
+
+    // Check for patient history in long-term memory
+    const patientContext = getAssessmentContext(input.patientId);
+    if (patientContext.previousAssessments.length > 0) {
+      addReasoningStep(
+        state.sessionId,
+        `Found ${patientContext.previousAssessments.length} previous assessments. Score trend: ${patientContext.scoreTrend}`
+      );
+    }
+  }
+
+  // If no patient ID, return early with request
+  if (!input.patientId) {
+    return {
+      sessionId: state.sessionId,
+      message: "I need a patient ID to assess discharge readiness. Please provide a patient ID.",
+      agentGraph: { nodes: [], edges: [] },
+      toolsUsed: [],
+      requiresInput: true,
+      suggestedActions: ["Provide patient ID", "Select demo patient"],
+    };
+  }
+
+  // Create execution context to accumulate data across tool calls
+  const executionContext: ExecutionContext = {};
+
+  // Create tools with access to execution context
+  const tools = createAssessmentTools(state.sessionId, input.patientId, executionContext);
+
+  // Build the user message for the ReAct loop
+  const userMessage = input.message || `Please assess discharge readiness for patient ${input.patientId}`;
+
+  // Run the streaming ReAct loop
+  const generator = runReActLoopStreaming(userMessage, {
+    systemPrompt: buildAssessmentSystemPrompt(input.patientId),
+    tools,
+    maxIterations: 15,
+    threadId: state.sessionId,
+    metadata: {
+      patientId: input.patientId,
+      sessionId: state.sessionId,
+    },
+  });
+
+  let reactResult: ReActResult | undefined;
+
+  // Forward all events from the ReAct loop
+  for await (const event of generator) {
+    // Yield the event to the caller
+    yield event;
+
+    // Capture the final result
+    if (event.type === "final") {
+      reactResult = event.result;
+
+      // If we captured an analysis in execution context, yield it
+      if (executionContext.analysis) {
+        yield { type: "analysis", analysis: executionContext.analysis };
+      }
+    }
+  }
+
+  // If we didn't get a result, create a default error response
+  if (!reactResult) {
+    return {
+      sessionId: state.sessionId,
+      message: "Analysis failed to complete",
+      agentGraph: { nodes: [], edges: [] },
+      toolsUsed: [],
+      requiresInput: false,
+    };
+  }
+
+  // Convert to AgentResponse format
+  const response = convertToAgentResponse(
+    state.sessionId,
+    input.patientId,
+    reactResult,
+    executionContext,
+    state
+  );
+
+  // Update state
+  state.context.analysis = executionContext.analysis
+    ? {
+        score: executionContext.analysis.score,
+        status: executionContext.analysis.status,
+        riskFactorCount: executionContext.analysis.riskFactors.length,
+        highRiskCount: executionContext.analysis.riskFactors.filter((r) => r.severity === "high").length,
+      }
+    : undefined;
+
+  if (executionContext.patient) {
+    state.context.patient = {
+      id: executionContext.patient.id,
+      name: executionContext.patient.name,
+      age: executionContext.patient.age,
+      gender: executionContext.patient.gender,
+      medicationCount: executionContext.patient.medications.length,
+      conditionCount: executionContext.patient.diagnoses.length,
+    };
+  }
+
+  // Add assistant message to history
+  state.context.conversationHistory.push({
+    role: "assistant",
+    content: response.message,
+    timestamp: new Date().toISOString(),
+    toolCalls: response.toolsUsed,
+  });
+
+  addConversationTurn(state.sessionId, {
+    role: "assistant",
+    content: response.message,
+    metadata: {
+      toolCalls: response.toolsUsed.map((tc) => ({ tool: tc.tool, success: tc.success ?? false })),
+      analysisScore: executionContext.analysis?.score,
+      model: getActiveModelId(),
+      reactIterations: reactResult.iterations,
+    },
+  });
+
+  state.status = "completed";
+  state.updatedAt = new Date().toISOString();
+
+  return response;
 }

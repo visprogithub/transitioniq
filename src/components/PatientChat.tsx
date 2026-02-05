@@ -21,9 +21,21 @@ import {
   MicOff,
   Volume2,
   Square,
+  Brain,
+  Wrench,
+  Eye,
 } from "lucide-react";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
+
+// ReAct streaming step for displaying thinking process
+interface ReActStep {
+  type: "thought" | "action" | "observation";
+  iteration: number;
+  content: string;
+  tool?: string;
+  timestamp: string;
+}
 
 // Web Speech API types (vendor-prefixed in most browsers)
 interface SpeechRecognitionEvent {
@@ -59,6 +71,8 @@ interface ChatMessage {
   timestamp: Date;
   toolsUsed?: Array<{ name: string; result: unknown }>;
   isLoading?: boolean;
+  thinkingSteps?: ReActStep[];
+  isStreaming?: boolean;
 }
 
 // Limits (should match API)
@@ -389,18 +403,25 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       const url = URL.createObjectURL(blob);
       const audio = new Audio();
 
-      // Wait for enough audio to be buffered before playing (prevents clipping)
+      // Preload the entire audio file
+      audio.preload = "auto";
+
+      // Wait for the audio to be fully loaded (not just canplaythrough)
       await new Promise<void>((resolve, reject) => {
-        audio.oncanplaythrough = () => resolve();
+        audio.onloadeddata = () => resolve();
         audio.onerror = () => reject(new Error("Audio failed to load"));
         audio.src = url;
+        audio.load(); // Explicitly trigger loading
       });
 
-      // Check if aborted while buffering
+      // Check if aborted while loading
       if (abortController.signal.aborted) {
         URL.revokeObjectURL(url);
         return;
       }
+
+      // Ensure we're at the very beginning
+      audio.currentTime = 0;
 
       audio.onended = () => {
         URL.revokeObjectURL(url);
@@ -411,6 +432,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       audioRef.current = audio;
       setPlayingMessageIndex(messageIndex);
       setTtsLoading(null);
+
+      // Small delay after setting currentTime to ensure seek completes
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Check if aborted during delay
+      if (abortController.signal.aborted) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+
       await audio.play();
     } catch (error) {
       // Ignore abort errors — they're intentional
@@ -424,15 +455,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   // --- Voice: auto-play TTS for new assistant messages ---
   useEffect(() => {
     if (!autoPlayVoice || isVoiceRateLimited || !voiceEnabled) return;
-    // Find the last non-loading assistant message
+    // Find the last non-loading, non-streaming assistant message with actual content
     const lastAssistantIndex = messages.reduce<number>((acc, m, i) =>
-      m.role === "assistant" && !m.isLoading ? i : acc, -1);
+      m.role === "assistant" && !m.isLoading && !m.isStreaming && m.content?.trim() ? i : acc, -1);
     if (lastAssistantIndex <= 0) return; // skip welcome message (index 0)
     if (lastAssistantIndex === lastAutoPlayedRef.current) return; // already played
     lastAutoPlayedRef.current = lastAssistantIndex;
+    console.log(`[AutoPlay] Playing TTS for message ${lastAssistantIndex}`);
     playTTS(messages[lastAssistantIndex].content, lastAssistantIndex);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, autoPlayVoice, isVoiceRateLimited]);
+  }, [messages, autoPlayVoice, isVoiceRateLimited, voiceEnabled]);
 
   // Generate suggested questions based on patient data
   const suggestedQuestions: SuggestedQuestion[] = [
@@ -541,26 +573,28 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
     setIsLoading(true);
     setShowSuggestions(false);
 
-    // Add loading message
-    const loadingMessage: ChatMessage = {
+    // Add streaming message placeholder with thinking steps
+    const streamingMessage: ChatMessage = {
       role: "assistant",
       content: "",
       timestamp: new Date(),
-      isLoading: true,
+      isStreaming: true,
+      thinkingSteps: [],
     };
-    setMessages((prev) => [...prev, loadingMessage]);
+    setMessages((prev) => [...prev, streamingMessage]);
 
     try {
       // Send the conversation history WITHOUT the current message
       // (the API receives `message` separately and the history should be prior context)
       const historyForAPI = messages
-        .filter((m) => !m.isLoading) // Exclude loading placeholders
+        .filter((m) => !m.isLoading && !m.isStreaming) // Exclude loading/streaming placeholders
         .map((m) => ({
           role: m.role,
           content: m.content,
         }));
 
-      const response = await fetch("/api/patient-chat", {
+      // Use streaming endpoint
+      const response = await fetch("/api/patient-chat?stream=true", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -571,52 +605,152 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         }),
       });
 
-      if (response.status === 429) {
-        const errorData = await response.json().catch(() => ({}));
-
-        if (errorData.category === "chat") {
-          // Session-wide demo rate limit — show countdown banner
-          const resetTime = Date.now() + (errorData.retryAfterMs || 60000);
-          setChatRateLimitReset(resetTime);
-          // Remove the loading message without adding an error bubble
-          setMessages((prev) => prev.filter((m) => !m.isLoading));
-          setIsLoading(false);
-          return;
-        }
-
-        // Per-patient 1s cooldown — show as error bubble
-        throw new Error(errorData.error || "Please wait a moment before sending another message");
-      }
-
+      // Handle non-streaming errors (rate limit, etc)
       if (!response.ok) {
-        throw new Error("Failed to get response");
+        const contentType = response.headers.get("content-type");
+        if (contentType?.includes("application/json")) {
+          const errorData = await response.json();
+          if (response.status === 429) {
+            if (errorData.category === "chat") {
+              const resetTime = Date.now() + (errorData.retryAfterMs || 60000);
+              setChatRateLimitReset(resetTime);
+              setMessages((prev) => prev.filter((m) => !m.isStreaming));
+              setIsLoading(false);
+              return;
+            }
+            throw new Error(errorData.error || "Please wait a moment before sending another message");
+          }
+          throw new Error(errorData.error || "Failed to get response");
+        }
+        throw new Error(`HTTP ${response.status}`);
       }
 
-      const data = await response.json();
-
-      // Check for limit warning from API
-      if (data.limitWarning) {
-        setLimitWarning(data.limitWarning);
+      if (!response.body) {
+        throw new Error("No response body for streaming");
       }
 
-      // Replace loading message with actual response
+      // Process SSE stream
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let currentSteps: ReActStep[] = [];
+      let finalContent = "";
+      let toolsUsed: Array<{ name: string; result: unknown }> = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") continue;
+
+            try {
+              const event = JSON.parse(data);
+
+              switch (event.type) {
+                case "thought":
+                  currentSteps = [...currentSteps, {
+                    type: "thought",
+                    iteration: event.iteration,
+                    content: event.thought,
+                    timestamp: event.timestamp,
+                  }];
+                  // Update the streaming message with new thinking steps
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    const lastIdx = newMessages.length - 1;
+                    if (newMessages[lastIdx]?.isStreaming) {
+                      newMessages[lastIdx] = {
+                        ...newMessages[lastIdx],
+                        thinkingSteps: currentSteps,
+                      };
+                    }
+                    return newMessages;
+                  });
+                  break;
+
+                case "action":
+                  currentSteps = [...currentSteps, {
+                    type: "action",
+                    iteration: event.iteration,
+                    content: `Calling ${event.tool}`,
+                    tool: event.tool,
+                    timestamp: event.timestamp,
+                  }];
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    const lastIdx = newMessages.length - 1;
+                    if (newMessages[lastIdx]?.isStreaming) {
+                      newMessages[lastIdx] = {
+                        ...newMessages[lastIdx],
+                        thinkingSteps: currentSteps,
+                      };
+                    }
+                    return newMessages;
+                  });
+                  break;
+
+                case "observation":
+                  currentSteps = [...currentSteps, {
+                    type: "observation",
+                    iteration: event.iteration,
+                    content: event.observation,
+                    timestamp: event.timestamp,
+                  }];
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    const lastIdx = newMessages.length - 1;
+                    if (newMessages[lastIdx]?.isStreaming) {
+                      newMessages[lastIdx] = {
+                        ...newMessages[lastIdx],
+                        thinkingSteps: currentSteps,
+                      };
+                    }
+                    return newMessages;
+                  });
+                  break;
+
+                case "final":
+                  finalContent = event.result?.answer || event.answer || "";
+                  toolsUsed = event.result?.toolsUsed?.map((t: string) => ({ name: t, result: null })) || [];
+                  break;
+
+                case "error":
+                  throw new Error(event.error);
+              }
+            } catch (parseErr) {
+              if (parseErr instanceof Error && parseErr.message !== "Unexpected end of JSON input") {
+                console.warn("[PatientChat] SSE parse error:", parseErr);
+              }
+            }
+          }
+        }
+      }
+
+      // Replace streaming message with final response
       setMessages((prev) => {
-        const newMessages = prev.filter((m) => !m.isLoading);
+        const newMessages = prev.filter((m) => !m.isStreaming);
         return [
           ...newMessages,
           {
             role: "assistant" as const,
-            content: data.response,
+            content: finalContent,
             timestamp: new Date(),
-            toolsUsed: data.toolsUsed,
+            toolsUsed: toolsUsed.length > 0 ? toolsUsed : undefined,
           },
         ];
       });
     } catch (error) {
       console.error("Chat error:", error);
-      // Replace loading message with error
+      // Replace streaming message with error
       setMessages((prev) => {
-        const newMessages = prev.filter((m) => !m.isLoading);
+        const newMessages = prev.filter((m) => !m.isStreaming);
         return [
           ...newMessages,
           {
@@ -869,6 +1003,46 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
                   <div className="flex items-center gap-2">
                     <Loader2 className="w-4 h-4 animate-spin" />
                     <span className="text-sm">Thinking...</span>
+                  </div>
+                ) : message.isStreaming ? (
+                  /* Show thinking steps while streaming */
+                  <div className="space-y-2">
+                    {message.thinkingSteps && message.thinkingSteps.length > 0 ? (
+                      <div className="space-y-1.5">
+                        {message.thinkingSteps.slice(-3).map((step, i) => (
+                          <motion.div
+                            key={`${step.iteration}-${step.type}-${i}`}
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            className={`flex items-start gap-2 text-xs p-1.5 rounded ${
+                              step.type === "thought"
+                                ? "bg-purple-100/50 text-purple-800"
+                                : step.type === "action"
+                                ? "bg-blue-100/50 text-blue-800"
+                                : "bg-green-100/50 text-green-800"
+                            }`}
+                          >
+                            {step.type === "thought" ? (
+                              <Brain className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                            ) : step.type === "action" ? (
+                              <Wrench className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                            ) : (
+                              <Eye className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                            )}
+                            <span className="line-clamp-2">{step.content}</span>
+                          </motion.div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span className="text-sm">Starting...</span>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2 text-gray-500">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span className="text-xs">Generating response...</span>
+                    </div>
                   </div>
                 ) : (
                   <>

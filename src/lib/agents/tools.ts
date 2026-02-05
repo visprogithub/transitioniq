@@ -6,7 +6,12 @@
  */
 
 import { getPatient } from "@/lib/data/demo-patients";
-import { checkDrugInteractions } from "@/lib/integrations/fda-client";
+import {
+  checkDrugInteractions,
+  checkBoxedWarnings,
+  checkDrugRecalls,
+  getComprehensiveDrugSafety,
+} from "@/lib/integrations/fda-client";
 import {
   analyzeDischargeReadiness as llmAnalyzeReadiness,
   generateDischargePlan as llmGeneratePlan,
@@ -14,19 +19,20 @@ import {
 import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import { estimateMedicationCosts } from "@/lib/integrations/cms-client";
 import { evaluateCareGaps as ruleBasedCareGaps } from "@/lib/integrations/guidelines-client";
-import {
-  getCareGapEvaluationPrompt,
-  formatCareGapEvaluationPrompt,
-  getCostEstimationPrompt,
-  formatCostEstimationPrompt,
-  getKnowledgeRetrievalPrompt,
-  formatKnowledgeRetrievalPrompt,
-} from "@/lib/integrations/opik-prompts";
-import { retrieveKnowledge, getIndexStats } from "@/lib/knowledge-base/knowledge-index";
+import { retrieveKnowledge } from "@/lib/knowledge-base/knowledge-index";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
-import type { ToolResult, ToolName, PatientContext, DrugInteractionContext, CareGapContext, CostContext } from "./types";
-import { extractJsonArray } from "@/lib/utils/llm-json";
+import type {
+  ToolResult,
+  ToolName,
+  PatientContext,
+  DrugInteractionContext,
+  BoxedWarningContext,
+  DrugRecallContext,
+  ComprehensiveDrugSafetyContext,
+  CareGapContext,
+  CostContext,
+} from "./types";
 
 /**
  * Tool Registry - Maps tool names to their implementations
@@ -40,9 +46,27 @@ export const TOOLS: Record<ToolName, ToolDefinition> = {
   },
   check_drug_interactions: {
     name: "check_drug_interactions",
-    description: "Check for drug-drug interactions using FDA RxNorm database",
+    description: "Check for drug-drug interactions using FDA Drug Label database (official prescribing information)",
     parameters: ["medications"],
     execute: checkDrugInteractionsTool,
+  },
+  check_boxed_warnings: {
+    name: "check_boxed_warnings",
+    description: "Check for FDA Black Box Warnings on medications - the most serious safety warnings",
+    parameters: ["medications"],
+    execute: checkBoxedWarningsTool,
+  },
+  check_drug_recalls: {
+    name: "check_drug_recalls",
+    description: "Check for recent FDA drug recalls and enforcement actions",
+    parameters: ["drugName"],
+    execute: checkDrugRecallsTool,
+  },
+  get_comprehensive_drug_safety: {
+    name: "get_comprehensive_drug_safety",
+    description: "Get comprehensive FDA safety profile including FAERS adverse event counts, boxed warnings, recalls, and risk level",
+    parameters: ["drugName"],
+    execute: getComprehensiveDrugSafetyTool,
   },
   evaluate_care_gaps: {
     name: "evaluate_care_gaps",
@@ -153,201 +177,202 @@ async function checkDrugInteractionsTool(input: Record<string, unknown>): Promis
 }
 
 /**
- * Evaluate care gaps using LLM reasoning augmented with rule-based data
+ * Check for FDA Black Box Warnings on medications
+ * Uses real FDA label data via OpenFDA API
+ */
+async function checkBoxedWarningsTool(input: Record<string, unknown>): Promise<ToolResult<BoxedWarningContext[]>> {
+  const startTime = Date.now();
+  const medications = input.medications as Patient["medications"];
+
+  try {
+    const warnings = await checkBoxedWarnings(
+      medications.map((m) => ({ name: m.name }))
+    );
+
+    console.log(`[Agent Tool] FDA boxed warnings: found ${warnings.length} for ${medications.length} medications`);
+
+    return {
+      success: true,
+      data: warnings.map((w) => ({
+        drug: w.drug,
+        warning: w.warning,
+      })),
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    console.error("[Agent Tool] FDA boxed warning check failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "FDA boxed warning check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Check for recent FDA drug recalls
+ * Uses OpenFDA enforcement API
+ */
+async function checkDrugRecallsTool(input: Record<string, unknown>): Promise<ToolResult<DrugRecallContext[]>> {
+  const startTime = Date.now();
+  const drugName = input.drugName as string;
+
+  try {
+    const recalls = await checkDrugRecalls(drugName);
+
+    console.log(`[Agent Tool] FDA recalls: found ${recalls.length} for ${drugName}`);
+
+    return {
+      success: true,
+      data: recalls.map((r) => ({
+        drugName: r.drugName,
+        recallNumber: r.recallNumber,
+        reason: r.reason,
+        classification: r.classification,
+        status: r.status,
+        recallDate: r.recallDate,
+      })),
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    console.error("[Agent Tool] FDA recall check failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "FDA recall check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Get comprehensive FDA safety profile for a drug
+ * Combines FAERS adverse event counts, boxed warnings, recalls, and risk level
+ */
+async function getComprehensiveDrugSafetyTool(input: Record<string, unknown>): Promise<ToolResult<ComprehensiveDrugSafetyContext>> {
+  const startTime = Date.now();
+  const drugName = input.drugName as string;
+
+  try {
+    const safety = await getComprehensiveDrugSafety(drugName);
+
+    console.log(`[Agent Tool] Comprehensive safety for ${drugName}: FAERS=${safety.faersReportCount}, boxedWarning=${safety.hasBoxedWarning}, recalls=${safety.recentRecalls.length}, risk=${safety.riskLevel}`);
+
+    return {
+      success: true,
+      data: {
+        drugName: safety.drugName,
+        faersReportCount: safety.faersReportCount,
+        hasBoxedWarning: safety.hasBoxedWarning,
+        boxedWarningSummary: safety.boxedWarningSummary,
+        recentRecalls: safety.recentRecalls.map((r) => ({
+          drugName: r.drugName,
+          recallNumber: r.recallNumber,
+          reason: r.reason,
+          classification: r.classification,
+          status: r.status,
+          recallDate: r.recallDate,
+        })),
+        topAdverseReactions: safety.topAdverseReactions,
+        riskLevel: safety.riskLevel,
+      },
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    console.error("[Agent Tool] Comprehensive safety check failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Comprehensive safety check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Evaluate care gaps using rule-based clinical guidelines data
  *
- * AI-first approach: The LLM performs the primary analysis, but receives
- * deterministic rule-based results from guidelines-client.ts as grounding
- * data to reduce hallucinations and improve accuracy.
+ * Returns DATA ONLY - no internal LLM call.
+ * The ReAct agent synthesizes this data in its reasoning.
  */
 async function evaluateCareGapsTool(input: Record<string, unknown>): Promise<ToolResult<CareGapContext[]>> {
   const startTime = Date.now();
   const patient = input.patient as Patient;
 
-  console.log(`[Agent Tool] evaluate_care_gaps using model: ${getActiveModelId()}`);
-
   try {
-    // Gather deterministic rule-based data to augment LLM reasoning
+    // Get rule-based care gap data from clinical guidelines
     const ruleResults = ruleBasedCareGaps(patient);
-    const ruleBasedSummary = ruleResults
-      .map((r) => `- ${r.guideline} (${r.organization}, Grade ${r.grade}): ${r.status}${r.status === "unmet" ? ` — ${r.recommendation}` : ""}`)
-      .join("\n");
 
-    console.log(`[Agent Tool] Rule-based pre-check found ${ruleResults.length} applicable guidelines (${ruleResults.filter((r) => r.status === "unmet").length} unmet)`);
+    console.log(`[Agent Tool] Care gaps: ${ruleResults.length} guidelines checked, ${ruleResults.filter((r) => r.status === "unmet").length} unmet`);
 
-    // LLM performs primary analysis, augmented with rule-based data
-    const { createLLMProvider } = await import("@/lib/integrations/llm-provider");
-    const provider = createLLMProvider(getActiveModelId());
-
-    const { template } = await getCareGapEvaluationPrompt();
-    const prompt = formatCareGapEvaluationPrompt(template, {
-      patientName: patient.name,
-      patientAge: patient.age,
-      patientGender: patient.gender === "M" ? "Male" : "Female",
-      diagnoses: patient.diagnoses.map((d) => d.display).join(", "),
-      medications: patient.medications.map((m) => `${m.name} ${m.dose}`).join(", "),
-      labs: patient.recentLabs?.map((l) => `${l.name}: ${l.value} ${l.unit}${l.abnormal ? " [ABNORMAL]" : ""}`).join(", ") || "None available",
-      vitals: patient.vitalSigns ? `BP ${patient.vitalSigns.bloodPressure}, HR ${patient.vitalSigns.heartRate}` : "Not available",
-      existingGaps: ruleBasedSummary || "No rule-based gaps identified",
-    });
-
-    const response = await provider.generate(prompt, {
-      spanName: "care-gap-evaluation",
-      metadata: {
-        patient_id: patient.id,
-        diagnosis_count: patient.diagnoses.length,
-        medication_count: patient.medications.length,
-        rule_based_gap_count: ruleResults.length,
-        rule_based_unmet_count: ruleResults.filter((r) => r.status === "unmet").length,
-      },
-    });
-
-    // Parse LLM response (handles Qwen3 thinking tokens, trailing commas, etc.)
-    const llmGaps = extractJsonArray<CareGapContext[]>(response.content);
-
-    // Merge rule-based + LLM results, deduplicating by guideline name
-    const mergedGaps: CareGapContext[] = ruleResults.map((r) => ({
-      guideline: r.guideline,
-      status: r.status,
-      grade: r.grade,
-    }));
-
-    const existingNames = new Set(mergedGaps.map((g) => g.guideline.toLowerCase()));
-    for (const llmGap of llmGaps) {
-      if (!existingNames.has(llmGap.guideline.toLowerCase())) {
-        mergedGaps.push(llmGap);
-        existingNames.add(llmGap.guideline.toLowerCase());
-      }
-    }
-
-    console.log(`[Agent Tool] Care gap evaluation: ${ruleResults.length} rule-based + ${llmGaps.length} LLM = ${mergedGaps.length} total (after dedup)`);
-
+    // Return DATA only - ReAct agent does the synthesis
     return {
       success: true,
-      data: mergedGaps,
+      data: ruleResults.map((r) => ({
+        guideline: r.guideline,
+        status: r.status,
+        grade: r.grade,
+      })),
       duration: Date.now() - startTime,
     };
   } catch (error) {
     console.error("[Agent Tool] Care gap evaluation failed:", error);
-
-    // Fallback: return rule-based results if LLM fails
-    try {
-      const fallbackResults = ruleBasedCareGaps(patient);
-      console.warn("[Agent Tool] Using rule-based fallback for care gaps");
-      return {
-        success: true,
-        data: fallbackResults.map((r) => ({
-          guideline: r.guideline,
-          status: r.status,
-          grade: r.grade,
-        })),
-        duration: Date.now() - startTime,
-      };
-    } catch {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : "Care gap evaluation failed",
-        duration: Date.now() - startTime,
-      };
-    }
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Care gap evaluation failed",
+      duration: Date.now() - startTime,
+    };
   }
 }
 
 /**
- * Estimate medication costs using CMS data → LLM reasoning
+ * Estimate medication costs using CMS pricing data
  *
- * All tool data flows through the LLM for reasoning:
- * 1. CMS client provides factual grounding (KNOWN_DRUG_TIERS, NDC API, heuristics)
- * 2. LLM reasons over the CMS data via Opik-versioned prompt
- * 3. Fallback: if LLM fails, use raw CMS data directly
+ * Returns DATA ONLY - no internal LLM call.
+ * The ReAct agent synthesizes this data in its reasoning.
  */
 async function estimateCostsTool(input: Record<string, unknown>): Promise<ToolResult<CostContext[]>> {
   const startTime = Date.now();
   const medications = input.medications as Patient["medications"];
 
-  console.log(`[Agent Tool] estimate_costs using model: ${getActiveModelId()}`);
-
   try {
-    // Gather CMS data as grounding for LLM reasoning
+    // Get CMS pricing data
     const cmsEstimates = await estimateMedicationCosts(
       medications.map((m) => ({ name: m.name, dose: m.dose, frequency: m.frequency }))
     );
 
-    const cmsDataSummary = cmsEstimates
-      .map((e) => `- ${e.drugName}: $${e.estimatedMonthlyOOP}/mo, Tier ${e.tierLevel || "unknown"}, ${e.coveredByMedicarePartD ? "Covered" : "Not covered"}${e.priorAuthRequired ? ", Prior Auth Required" : ""} (Source: ${e.source})`)
-      .join("\n");
+    const totalOOP = cmsEstimates.reduce((s, e) => s + e.estimatedMonthlyOOP, 0);
+    console.log(`[Agent Tool] CMS costs: ${cmsEstimates.length} medications, total $${totalOOP}/month`);
 
-    console.log(`[Agent Tool] CMS grounding data gathered for ${cmsEstimates.length} medications`);
-
-    // LLM reasons over the CMS data
-    const { createLLMProvider } = await import("@/lib/integrations/llm-provider");
-    const provider = createLLMProvider(getActiveModelId());
-
-    const { template } = await getCostEstimationPrompt();
-    const medicationList = medications.map((m) => `- ${m.name} ${m.dose} ${m.frequency}`).join("\n");
-    const prompt = formatCostEstimationPrompt(template, {
-      medicationList,
-      cmsData: cmsDataSummary,
-    });
-
-    const response = await provider.generate(prompt, {
-      spanName: "cost-estimation",
-      metadata: {
-        medication_count: medications.length,
-        cms_total_oop: cmsEstimates.reduce((s, e) => s + e.estimatedMonthlyOOP, 0),
-      },
-    });
-
-    // Parse LLM response (handles Qwen3 thinking tokens, trailing commas, etc.)
-    const costs = extractJsonArray<CostContext[]>(response.content);
-
-    console.log(`[Agent Tool] LLM cost analysis: ${costs.length} medications, total $${costs.reduce((s, c) => s + c.monthlyOOP, 0)}/month`);
-
+    // Return DATA only - ReAct agent does the synthesis
     return {
       success: true,
-      data: costs,
+      data: cmsEstimates.map((e) => ({
+        medication: e.drugName,
+        monthlyOOP: e.estimatedMonthlyOOP,
+        covered: e.coveredByMedicarePartD,
+      })),
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] LLM cost estimation failed, falling back to CMS data:", error);
-
-    // Fallback: use raw CMS data if LLM fails
-    try {
-      const fallbackEstimates = await estimateMedicationCosts(
-        medications.map((m) => ({ name: m.name, dose: m.dose, frequency: m.frequency }))
-      );
-      console.warn("[Agent Tool] Using CMS data fallback for costs");
-      return {
-        success: true,
-        data: fallbackEstimates.map((e) => ({
-          medication: e.drugName,
-          monthlyOOP: e.estimatedMonthlyOOP,
-          covered: e.coveredByMedicarePartD,
-        })),
-        duration: Date.now() - startTime,
-      };
-    } catch {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : "Cost estimation failed",
-        duration: Date.now() - startTime,
-      };
-    }
+    console.error("[Agent Tool] Cost estimation failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Cost estimation failed",
+      duration: Date.now() - startTime,
+    };
   }
 }
 
 /**
- * Knowledge retrieval context type
+ * Knowledge retrieval result - raw search data
  */
 interface KnowledgeContext {
-  summary: string;
-  relevantFindings: {
-    category: string;
-    finding: string;
-    importance: string;
+  query: string;
+  results: {
+    title: string;
+    type: string;
+    content: string;
+    score: number;
   }[];
-  patientCounselingPoints: string[];
-  monitoringNeeded: string[];
-  redFlags: string[];
   searchStats: {
     documentsSearched: number;
     resultsFound: number;
@@ -356,20 +381,15 @@ interface KnowledgeContext {
 }
 
 /**
- * Retrieve and synthesize clinical knowledge using TF-IDF RAG → LLM reasoning
+ * Retrieve clinical knowledge using TF-IDF search
  *
- * Architecture:
- * 1. Build search query from patient context (conditions + medications)
- * 2. TF-IDF search over ~400 knowledge-base documents
- * 3. LLM synthesizes retrieved context for patient-specific relevance
- * 4. Fallback: return raw search results if LLM fails
+ * Returns DATA ONLY - no internal LLM call.
+ * The ReAct agent synthesizes this data in its reasoning.
  */
 async function retrieveKnowledgeTool(input: Record<string, unknown>): Promise<ToolResult<KnowledgeContext>> {
   const startTime = Date.now();
   const patient = input.patient as Patient;
   const customQuery = input.query as string | undefined;
-
-  console.log(`[Agent Tool] retrieve_knowledge using model: ${getActiveModelId()}`);
 
   try {
     // Build search query from patient context
@@ -378,77 +398,23 @@ async function retrieveKnowledgeTool(input: Record<string, unknown>): Promise<To
     const searchQuery = customQuery || `${conditions} ${meds}`;
 
     // TF-IDF retrieval from knowledge base
-    const { results, formatted, documentCount } = retrieveKnowledge(searchQuery, {
+    const { results, documentCount } = retrieveKnowledge(searchQuery, {
       topK: 8,
     });
 
-    const stats = getIndexStats();
-    console.log(`[Agent Tool] Knowledge retrieval: searched ${documentCount} documents, found ${results.length} relevant (top score: ${results[0]?.score?.toFixed(3) || 0})`);
-    console.log(`[Agent Tool] Index stats: ${JSON.stringify(stats.documentsByType)}`);
+    console.log(`[Agent Tool] Knowledge search: ${results.length} results from ${documentCount} documents (top score: ${results[0]?.score?.toFixed(3) || 0})`);
 
-    if (results.length === 0) {
-      return {
-        success: true,
-        data: {
-          summary: "No relevant entries found in the clinical knowledge base for this patient's conditions and medications.",
-          relevantFindings: [],
-          patientCounselingPoints: [],
-          monitoringNeeded: [],
-          redFlags: [],
-          searchStats: { documentsSearched: documentCount, resultsFound: 0, topScore: 0 },
-        },
-        duration: Date.now() - startTime,
-      };
-    }
-
-    // LLM synthesizes the retrieved context
-    const { createLLMProvider } = await import("@/lib/integrations/llm-provider");
-    const provider = createLLMProvider(getActiveModelId());
-
-    const { template } = await getKnowledgeRetrievalPrompt();
-    const prompt = formatKnowledgeRetrievalPrompt(template, {
-      patientName: patient.name,
-      patientAge: patient.age,
-      patientGender: patient.gender === "M" ? "Male" : "Female",
-      diagnoses: conditions,
-      medications: meds,
-      query: searchQuery,
-      retrievedContext: formatted,
-    });
-
-    const response = await provider.generate(prompt, {
-      spanName: "knowledge-retrieval",
-      metadata: {
-        patient_id: patient.id,
-        search_query: searchQuery,
-        results_found: results.length,
-        top_score: results[0]?.score || 0,
-        document_types: results.map((r) => r.document.type),
-        index_total_docs: documentCount,
-        index_vocabulary_size: stats.vocabularySize,
-      },
-    });
-
-    // Parse LLM response
-    const { extractJsonObject } = await import("@/lib/utils/llm-json");
-    const synthesis = extractJsonObject<{
-      summary: string;
-      relevantFindings: { category: string; finding: string; importance: string }[];
-      patientCounselingPoints: string[];
-      monitoringNeeded: string[];
-      redFlags: string[];
-    }>(response.content);
-
-    console.log(`[Agent Tool] Knowledge synthesis: ${synthesis.relevantFindings?.length || 0} findings, ${synthesis.redFlags?.length || 0} red flags`);
-
+    // Return DATA only - ReAct agent does the synthesis
     return {
       success: true,
       data: {
-        summary: synthesis.summary || "Knowledge base search completed.",
-        relevantFindings: synthesis.relevantFindings || [],
-        patientCounselingPoints: synthesis.patientCounselingPoints || [],
-        monitoringNeeded: synthesis.monitoringNeeded || [],
-        redFlags: synthesis.redFlags || [],
+        query: searchQuery,
+        results: results.map((r) => ({
+          title: r.document.title,
+          type: r.document.type,
+          content: r.document.content.slice(0, 500), // Truncate for context efficiency
+          score: r.score,
+        })),
         searchStats: {
           documentsSearched: documentCount,
           resultsFound: results.length,
@@ -458,44 +424,12 @@ async function retrieveKnowledgeTool(input: Record<string, unknown>): Promise<To
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] Knowledge retrieval failed, returning raw search results:", error);
-
-    // Fallback: return raw search results without LLM synthesis
-    try {
-      const conditions = patient.diagnoses.map((d) => d.display).join(", ");
-      const meds = patient.medications.map((m) => m.name).join(", ");
-      const { results, documentCount } = retrieveKnowledge(
-        customQuery || `${conditions} ${meds}`,
-        { topK: 5 }
-      );
-
-      return {
-        success: true,
-        data: {
-          summary: results.map((r) => `${r.document.title}: ${r.document.content.slice(0, 200)}`).join("\n"),
-          relevantFindings: results.map((r) => ({
-            category: r.document.type,
-            finding: r.document.title,
-            importance: "informational" as const,
-          })),
-          patientCounselingPoints: [],
-          monitoringNeeded: [],
-          redFlags: [],
-          searchStats: {
-            documentsSearched: documentCount,
-            resultsFound: results.length,
-            topScore: results[0]?.score || 0,
-          },
-        },
-        duration: Date.now() - startTime,
-      };
-    } catch {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : "Knowledge retrieval failed",
-        duration: Date.now() - startTime,
-      };
-    }
+    console.error("[Agent Tool] Knowledge retrieval failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Knowledge retrieval failed",
+      duration: Date.now() - startTime,
+    };
   }
 }
 

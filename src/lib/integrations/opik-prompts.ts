@@ -474,7 +474,15 @@ Analyze this patient's transition readiness and provide:
    - Patients with active safety concerns (e.g. supratherapeutic INR, duplicate anticoagulants, toxic drug levels, severe neutropenia, dangerous Beers Criteria violations in elderly, dialysis-dependent with hyperkalemia) should score 15-35.
    - Only the most extreme cases (multiple simultaneous acute crises, hemodynamic instability) should score below 15.
 
-2. A list of risk factors categorized by severity (high/moderate/low)
+2. A COMPREHENSIVE list of risk factors categorized by severity (high/moderate/low)
+   - You MUST include risk factors from EACH category that has concerns:
+     • drug_interaction: Flag ALL drug interactions listed in the FDA section
+     • cost_barrier: Flag ALL medications with high out-of-pocket costs (>$50/month) from the CMS section
+     • care_gap: Flag ALL unmet guidelines from the Care Gap section
+     • lab_abnormality: Flag ALL abnormal lab values
+     • follow_up: Flag any missing follow-up care
+   - Do NOT omit any category. If cost barriers exist in the CMS data, you MUST create cost_barrier risk factors.
+   - Be thorough - missing a risk factor could harm the patient.
 
 3. Specific recommendations for safe discharge
 
@@ -503,6 +511,13 @@ IMPORTANT SOURCE LABELING RULES:
 - General lab abnormalities not tied to medications → "FHIR"
 - Care gaps from clinical guidelines → "Guidelines"
 - Cost/affordability barriers → "CMS"
+
+COMPLETENESS REQUIREMENTS:
+- You MUST create a risk factor for EVERY drug interaction listed above (not just the first few)
+- You MUST create a cost_barrier risk factor for EVERY medication costing >$100/month OOP
+- You MUST create a lab_abnormality risk factor for EVERY abnormal lab value
+- The total number of risk factors should reflect the complexity of the case
+- A patient with 12 medications and multiple abnormal labs should have 5-10+ risk factors
 
 If there are major drug interactions or unmet Grade A guidelines, the score should reflect significant risk.`;
 
