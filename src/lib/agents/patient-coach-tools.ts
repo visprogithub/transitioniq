@@ -28,7 +28,7 @@ import {
 
 // Import external API clients
 import { getPatientFriendlyDrugInfo as getDailyMedDrugInfo } from "@/lib/integrations/dailymed-client";
-import { getPatientSymptomAssessment, searchHealthTopics } from "@/lib/integrations/medlineplus-client";
+import { getPatientSymptomAssessment } from "@/lib/integrations/medlineplus-client";
 import { extractJsonObject } from "@/lib/utils/llm-json";
 import {
   evaluateFoodChoice,
@@ -979,16 +979,150 @@ Respond in JSON:
 }
 
 /**
- * Get search terms for surgery-specific dietary guidance from MedlinePlus
+ * Generate personalized post-surgical dietary guidance using LLM
+ * Takes into account patient age, surgery type, medications, and any API context
  */
-function getSurgeryDietSearchTerms(surgeryType: string): string[] {
-  const searchTermMap: Record<string, string[]> = {
-    tonsillectomy: ["tonsillectomy diet", "soft foods after throat surgery", "tonsil removal recovery"],
-    "throat surgery": ["throat surgery diet", "soft diet after surgery", "swallowing difficulty foods"],
-    "abdominal surgery": ["diet after abdominal surgery", "post surgery diet", "soft diet after surgery"],
-    "dental surgery": ["diet after tooth extraction", "soft foods after dental surgery", "wisdom teeth recovery diet"],
-  };
-  return searchTermMap[surgeryType] || ["soft diet after surgery", "post operative diet"];
+async function generatePostSurgicalDietaryGuidance(
+  surgeryType: string,
+  patient: Patient,
+  topic: string,
+  apiContext: string | undefined,
+  foodDrugInteractions: Array<{ drug: string; food: string; severity: string; recommendation: string }>
+): Promise<{
+  topic: string;
+  surgeryType: string;
+  recommendation: string;
+  goodChoices: string[];
+  avoid: string[];
+  tips: string[];
+  warningSignsToReport: string[];
+} | null> {
+  const llm = createLLMProvider();
+
+  const foodInteractionContext = foodDrugInteractions.length > 0
+    ? `\nIMPORTANT FOOD-DRUG INTERACTIONS for this patient's medications:\n${foodDrugInteractions.map(i => `- ${i.food} with ${i.drug} (${i.severity}): ${i.recommendation}`).join("\n")}`
+    : "";
+
+  const prompt = `You are a pediatric/surgical recovery dietitian. Generate personalized dietary guidance for this patient.
+
+PATIENT:
+- Age: ${patient.age} years old
+- Recent surgery: ${surgeryType}
+- Current medications: ${patient.medications.map(m => m.name).join(", ") || "none listed"}
+- Conditions: ${patient.diagnoses.map(d => d.display).join(", ")}
+${foodInteractionContext}
+
+${apiContext ? `REFERENCE INFORMATION (from medical database):\n${apiContext.slice(0, 1000)}\n` : ""}
+
+PATIENT'S QUESTION: "${topic}"
+
+Generate dietary guidance that is:
+1. AGE-APPROPRIATE (${patient.age} years old - ${patient.age < 12 ? "child-friendly foods and language" : patient.age < 18 ? "teen-appropriate" : "adult"})
+2. SURGERY-SPECIFIC (${surgeryType} recovery needs)
+3. CONSIDERS THEIR MEDICATIONS (avoid foods that interact)
+4. PRACTICAL (everyday foods they can actually find)
+
+Respond with ONLY a valid JSON object (no markdown, no explanation):
+{
+  "recommendation": "A warm, personalized 2-3 sentence overview of what to eat during recovery",
+  "goodChoices": ["5-8 specific foods that are good for THIS patient - be specific, not generic"],
+  "avoid": ["4-6 specific foods/drinks to avoid and brief reason why"],
+  "tips": ["4-5 practical tips for eating during recovery"],
+  "warningSignsToReport": ["3-4 warning signs related to eating/drinking that need medical attention"]
+}`;
+
+  try {
+    console.log(`[generatePostSurgicalDietaryGuidance] Generating personalized guidance for ${patient.age}yo ${surgeryType} patient`);
+    const response = await llm.generate(prompt);
+    const parsed = extractJsonObject(response.content || "");
+
+    if (parsed && typeof parsed === "object" && "recommendation" in parsed) {
+      return {
+        topic,
+        surgeryType,
+        recommendation: String(parsed.recommendation || ""),
+        goodChoices: Array.isArray(parsed.goodChoices) ? parsed.goodChoices.map(String) : [],
+        avoid: Array.isArray(parsed.avoid) ? parsed.avoid.map(String) : [],
+        tips: Array.isArray(parsed.tips) ? parsed.tips.map(String) : [],
+        warningSignsToReport: Array.isArray(parsed.warningSignsToReport) ? parsed.warningSignsToReport.map(String) : [],
+      };
+    }
+  } catch (error) {
+    console.error("[generatePostSurgicalDietaryGuidance] LLM generation failed:", error);
+  }
+
+  return null; // Fallback to hardcoded
+}
+
+/**
+ * Generate personalized general dietary guidance using LLM
+ * For patients without specific surgical needs but who still need personalized advice
+ */
+async function generateGeneralDietaryGuidance(
+  patient: Patient,
+  topic: string,
+  foodDrugInteractions: Array<{ drug: string; food: string; severity: string; recommendation: string; timing?: string }>
+): Promise<{
+  topic: string;
+  recommendation: string;
+  goodChoices: string[];
+  avoid: string[];
+  tips: string[];
+} | null> {
+  const llm = createLLMProvider();
+
+  const foodInteractionContext = foodDrugInteractions.length > 0
+    ? `\nIMPORTANT FOOD-DRUG INTERACTIONS for this patient's medications:\n${foodDrugInteractions.map(i => `- ${i.food} with ${i.drug} (${i.severity}): ${i.recommendation}`).join("\n")}`
+    : "";
+
+  const conditionContext = patient.diagnoses.length > 0
+    ? `Conditions: ${patient.diagnoses.map(d => d.display).join(", ")}`
+    : "No specific conditions listed";
+
+  const prompt = `You are a clinical dietitian. Generate personalized dietary guidance for this patient.
+
+PATIENT:
+- Age: ${patient.age} years old
+- ${conditionContext}
+- Current medications: ${patient.medications.map(m => m.name).join(", ") || "none listed"}
+${foodInteractionContext}
+
+PATIENT'S QUESTION: "${topic}"
+
+Generate dietary guidance that is:
+1. AGE-APPROPRIATE (${patient.age} years old)
+2. CONSIDERS THEIR CONDITIONS (${patient.diagnoses.map(d => d.display).join(", ") || "general health"})
+3. CONSIDERS THEIR MEDICATIONS (especially any food interactions listed above)
+4. ANSWERS THEIR SPECIFIC QUESTION about "${topic}"
+5. PRACTICAL (everyday foods they can actually find and prepare)
+
+Respond with ONLY a valid JSON object (no markdown, no explanation):
+{
+  "recommendation": "A warm, personalized 2-3 sentence response that directly addresses their question about ${topic}",
+  "goodChoices": ["5-7 specific foods that are good for THIS patient given their question - be specific"],
+  "avoid": ["3-5 specific foods/drinks to avoid based on their medications and conditions"],
+  "tips": ["3-4 practical tips related to their dietary question"]
+}`;
+
+  try {
+    console.log(`[generateGeneralDietaryGuidance] Generating personalized guidance for ${patient.age}yo patient, topic: ${topic}`);
+    const response = await llm.generate(prompt);
+    const parsed = extractJsonObject(response.content || "");
+
+    if (parsed && typeof parsed === "object" && "recommendation" in parsed) {
+      return {
+        topic,
+        recommendation: String(parsed.recommendation || ""),
+        goodChoices: Array.isArray(parsed.goodChoices) ? parsed.goodChoices.map(String) : [],
+        avoid: Array.isArray(parsed.avoid) ? parsed.avoid.map(String) : [],
+        tips: Array.isArray(parsed.tips) ? parsed.tips.map(String) : [],
+      };
+    }
+  } catch (error) {
+    console.error("[generateGeneralDietaryGuidance] LLM generation failed:", error);
+  }
+
+  return null;
 }
 
 /**
@@ -1507,71 +1641,45 @@ async function executeGetDietaryGuidance(
     console.log(`[getDietaryGuidance] Post-surgical patient detected: ${surgeryType}`);
     const allFoodInteractions = getAllFoodInteractionsForMedications(patient.medications);
 
-    // Try MedlinePlus API for authoritative dietary guidance
-    const searchTerms = getSurgeryDietSearchTerms(surgeryType);
-    let apiGuidance: { summary: string; url: string } | null = null;
+    // Use LLM to generate personalized dietary guidance
+    // LLM has knowledge of post-surgical dietary needs + we provide patient context
+    // Note: MedlinePlus is a health topics API, not a dietary database -
+    // its search results are too unreliable for dietary guidance
+    const llmGuidance = await generatePostSurgicalDietaryGuidance(
+      surgeryType,
+      patient,
+      topic,
+      undefined, // No external API context - LLM knows post-surgical diets
+      allFoodInteractions
+    );
 
-    for (const searchTerm of searchTerms) {
-      try {
-        console.log(`[getDietaryGuidance] Searching MedlinePlus for: ${searchTerm}`);
-        const topics = await searchHealthTopics(searchTerm);
-        if (topics.length > 0 && topics[0].fullSummary) {
-          apiGuidance = {
-            summary: topics[0].fullSummary,
-            url: topics[0].url,
-          };
-          console.log(`[getDietaryGuidance] Found MedlinePlus guidance: ${topics[0].title}`);
-          break;
-        }
-      } catch (error) {
-        console.error(`[getDietaryGuidance] MedlinePlus search failed for ${searchTerm}:`, error);
-      }
+    if (llmGuidance) {
+      return {
+        toolName: "getDietaryGuidance",
+        result: {
+          ...llmGuidance,
+          foodDrugInteractions: allFoodInteractions.length > 0
+            ? allFoodInteractions.map((i) => ({
+                drug: i.drug,
+                food: i.food,
+                severity: i.severity,
+                recommendation: i.recommendation,
+              }))
+            : undefined,
+          source: "AI-personalized guidance + Food-Drug Interaction Database",
+        },
+        success: true,
+      };
     }
 
-    // Build response with API data + clinical fallback
+    // Fallback to hardcoded if LLM fails
     const fallbackGuidance = getPostSurgicalDietaryFallback(surgeryType);
-    const patientContext = {
-      age: patient.age,
-      conditions: patient.diagnoses.map((d) => d.display),
-      recentSurgery: surgeryType,
-    };
-
-    // Filter API response through LLM for patient-friendly language
-    let friendlyRecommendation = fallbackGuidance.recommendation;
-    if (apiGuidance?.summary) {
-      friendlyRecommendation = await makePatientFriendly(apiGuidance.summary, {
-        contentType: "dietary",
-        patientContext,
-        originalQuery: topic,
-      });
-    }
-
-    // Also filter the lists for patient-friendly language
-    const [friendlyGoodChoices, friendlyAvoid, friendlyTips] = await Promise.all([
-      makeListPatientFriendly(fallbackGuidance.goodChoices, {
-        listType: "foods_to_eat",
-        patientContext,
-      }),
-      makeListPatientFriendly(fallbackGuidance.avoid, {
-        listType: "foods_to_avoid",
-        patientContext,
-      }),
-      makeListPatientFriendly(fallbackGuidance.tips, {
-        listType: "tips",
-        patientContext,
-      }),
-    ]);
-
     return {
       toolName: "getDietaryGuidance",
       result: {
         topic,
         surgeryType,
-        recommendation: friendlyRecommendation,
-        goodChoices: friendlyGoodChoices,
-        avoid: friendlyAvoid,
-        tips: friendlyTips,
-        warningSignsToReport: fallbackGuidance.warningSignsToReport,
+        ...fallbackGuidance,
         foodDrugInteractions: allFoodInteractions.length > 0
           ? allFoodInteractions.map((i) => ({
               drug: i.drug,
@@ -1580,48 +1688,48 @@ async function executeGetDietaryGuidance(
               recommendation: i.recommendation,
             }))
           : undefined,
-        source: apiGuidance
-          ? `MedlinePlus (${apiGuidance.url}) + Clinical best practices`
-          : "Post-surgical dietary guidelines + Clinical best practices",
-        learnMoreUrl: apiGuidance?.url,
+        source: "Clinical dietary guidelines (fallback)",
       },
       success: true,
     };
   }
 
-  // STEP 6: Default general healthy eating guidance (no LLM, just evidence-based basics)
-  // But FIRST check for any food-drug interactions for the patient's medications
-  console.log("[getDietaryGuidance] Checking food-drug interactions before returning general guidance");
+  // STEP 6: Use LLM to generate personalized dietary guidance
+  // This covers patients without specific conditions/surgery but still need personalized advice
+  console.log("[getDietaryGuidance] Generating personalized dietary guidance via LLM");
 
   const allFoodInteractions = getAllFoodInteractionsForMedications(patient.medications);
-  const medicationFoodWarnings: string[] = [];
 
-  if (allFoodInteractions.length > 0) {
-    const majorInteractions = allFoodInteractions.filter((i) => i.severity === "major");
-    const moderateInteractions = allFoodInteractions.filter((i) => i.severity === "moderate");
+  // Try LLM for personalized guidance
+  const llmGuidance = await generateGeneralDietaryGuidance(patient, topic, allFoodInteractions);
 
-    if (majorInteractions.length > 0) {
-      medicationFoodWarnings.push("⚠️ IMPORTANT Food-Medication Interactions:");
-      for (const interaction of majorInteractions) {
-        medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.recommendation}`);
-      }
-    }
-    if (moderateInteractions.length > 0) {
-      medicationFoodWarnings.push("📋 Other Food Considerations for Your Medications:");
-      for (const interaction of moderateInteractions) {
-        medicationFoodWarnings.push(`  • ${interaction.food} with ${interaction.drug}: ${interaction.timing || interaction.recommendation}`);
-      }
-    }
+  if (llmGuidance) {
+    return {
+      toolName: "getDietaryGuidance",
+      result: {
+        ...llmGuidance,
+        foodDrugInteractions: allFoodInteractions.length > 0
+          ? allFoodInteractions.map((i) => ({
+              drug: i.drug,
+              food: i.food,
+              severity: i.severity,
+              recommendation: i.recommendation,
+              timing: i.timing,
+            }))
+          : undefined,
+        source: "AI-personalized dietary guidance + Food-Drug Interaction Database",
+      },
+      success: true,
+    };
   }
 
-  console.log("[getDietaryGuidance] Returning general healthy eating guidance");
+  // Hardcoded fallback only if LLM fails completely
+  console.log("[getDietaryGuidance] LLM failed, returning hardcoded fallback");
   return {
     toolName: "getDietaryGuidance",
     result: {
       topic,
-      recommendation: medicationFoodWarnings.length > 0
-        ? "Here are dietary guidelines, including important information about your medications and food."
-        : "Here are general healthy eating guidelines. Ask about specific foods or conditions for more personalized advice.",
+      recommendation: "Here are general healthy eating guidelines. Ask about specific foods for more personalized advice.",
       goodChoices: [
         "Fresh fruits and vegetables",
         "Lean proteins (chicken, fish, beans)",
@@ -1641,7 +1749,6 @@ async function executeGetDietaryGuidance(
         "Eat regular meals - don't skip meals if on medications",
         "Ask your doctor or a dietitian for personalized advice",
       ],
-      medicationFoodWarnings: medicationFoodWarnings.length > 0 ? medicationFoodWarnings : undefined,
       foodDrugInteractions: allFoodInteractions.length > 0
         ? allFoodInteractions.map((i) => ({
             drug: i.drug,
@@ -1651,9 +1758,7 @@ async function executeGetDietaryGuidance(
             timing: i.timing,
           }))
         : undefined,
-      source: allFoodInteractions.length > 0
-        ? "General nutrition guidelines + Food-Drug Interaction Database"
-        : "General nutrition guidelines",
+      source: "General nutrition guidelines (fallback)",
     },
     success: true,
   };
