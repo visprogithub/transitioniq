@@ -11,7 +11,14 @@
 
 import { v4 as uuidv4 } from "uuid";
 import { executeTool } from "./tools";
-import { runReActLoop, createReActTool, type ReActTool, type ReActResult } from "./react-loop";
+import {
+  runReActLoop,
+  runReActLoopStreaming,
+  createReActTool,
+  type ReActTool,
+  type ReActResult,
+  type ReActStreamEvent,
+} from "./react-loop";
 import { traceAgentExecution, logToolCorrectness } from "./tracing";
 import {
   createMemorySession,
@@ -769,6 +776,177 @@ If the user wants to assess a different patient, tell them to provide a new pati
       reactIterations: reactResult.iterations,
     },
   });
+
+  return response;
+}
+
+/**
+ * Streaming agent stream event type
+ */
+export type AgentStreamEvent =
+  | ReActStreamEvent
+  | { type: "analysis"; analysis: DischargeAnalysis };
+
+/**
+ * Streaming version of runAgent - yields events as the agent reasons
+ *
+ * This allows the UI to show thinking steps in real-time while the agent
+ * gathers information and computes the assessment.
+ */
+export async function* runAgentStreaming(
+  input: { patientId?: string; message?: string; sessionId?: string }
+): AsyncGenerator<AgentStreamEvent, AgentResponse, unknown> {
+  // Get or create session
+  let state: AgentState;
+  if (input.sessionId && sessions.has(input.sessionId)) {
+    state = sessions.get(input.sessionId)!;
+  } else {
+    const goal = input.patientId
+      ? `Assess discharge readiness for patient ${input.patientId}`
+      : "Help with discharge readiness assessment";
+    state = createSession(goal);
+  }
+
+  // Add user message to conversation history
+  if (input.message) {
+    state.context.conversationHistory.push({
+      role: "user",
+      content: input.message,
+      timestamp: new Date().toISOString(),
+    });
+
+    addConversationTurn(state.sessionId, {
+      role: "user",
+      content: input.message,
+    });
+  }
+
+  if (input.patientId) {
+    state.patientId = input.patientId;
+
+    // Check for patient history in long-term memory
+    const patientContext = getAssessmentContext(input.patientId);
+    if (patientContext.previousAssessments.length > 0) {
+      addReasoningStep(
+        state.sessionId,
+        `Found ${patientContext.previousAssessments.length} previous assessments. Score trend: ${patientContext.scoreTrend}`
+      );
+    }
+  }
+
+  // If no patient ID, return early with request
+  if (!input.patientId) {
+    return {
+      sessionId: state.sessionId,
+      message: "I need a patient ID to assess discharge readiness. Please provide a patient ID.",
+      agentGraph: { nodes: [], edges: [] },
+      toolsUsed: [],
+      requiresInput: true,
+      suggestedActions: ["Provide patient ID", "Select demo patient"],
+    };
+  }
+
+  // Create execution context to accumulate data across tool calls
+  const executionContext: ExecutionContext = {};
+
+  // Create tools with access to execution context
+  const tools = createAssessmentTools(state.sessionId, input.patientId, executionContext);
+
+  // Build the user message for the ReAct loop
+  const userMessage = input.message || `Please assess discharge readiness for patient ${input.patientId}`;
+
+  // Run the streaming ReAct loop
+  const generator = runReActLoopStreaming(userMessage, {
+    systemPrompt: buildAssessmentSystemPrompt(input.patientId),
+    tools,
+    maxIterations: 12,
+    threadId: state.sessionId,
+    metadata: {
+      patientId: input.patientId,
+      sessionId: state.sessionId,
+    },
+  });
+
+  let reactResult: ReActResult | undefined;
+
+  // Forward all events from the ReAct loop
+  for await (const event of generator) {
+    // Yield the event to the caller
+    yield event;
+
+    // Capture the final result
+    if (event.type === "final") {
+      reactResult = event.result;
+
+      // If we captured an analysis in execution context, yield it
+      if (executionContext.analysis) {
+        yield { type: "analysis", analysis: executionContext.analysis };
+      }
+    }
+  }
+
+  // If we didn't get a result, create a default error response
+  if (!reactResult) {
+    return {
+      sessionId: state.sessionId,
+      message: "Analysis failed to complete",
+      agentGraph: { nodes: [], edges: [] },
+      toolsUsed: [],
+      requiresInput: false,
+    };
+  }
+
+  // Convert to AgentResponse format
+  const response = convertToAgentResponse(
+    state.sessionId,
+    input.patientId,
+    reactResult,
+    executionContext,
+    state
+  );
+
+  // Update state
+  state.context.analysis = executionContext.analysis
+    ? {
+        score: executionContext.analysis.score,
+        status: executionContext.analysis.status,
+        riskFactorCount: executionContext.analysis.riskFactors.length,
+        highRiskCount: executionContext.analysis.riskFactors.filter((r) => r.severity === "high").length,
+      }
+    : undefined;
+
+  if (executionContext.patient) {
+    state.context.patient = {
+      id: executionContext.patient.id,
+      name: executionContext.patient.name,
+      age: executionContext.patient.age,
+      gender: executionContext.patient.gender,
+      medicationCount: executionContext.patient.medications.length,
+      conditionCount: executionContext.patient.diagnoses.length,
+    };
+  }
+
+  // Add assistant message to history
+  state.context.conversationHistory.push({
+    role: "assistant",
+    content: response.message,
+    timestamp: new Date().toISOString(),
+    toolCalls: response.toolsUsed,
+  });
+
+  addConversationTurn(state.sessionId, {
+    role: "assistant",
+    content: response.message,
+    metadata: {
+      toolCalls: response.toolsUsed.map((tc) => ({ tool: tc.tool, success: tc.success ?? false })),
+      analysisScore: executionContext.analysis?.score,
+      model: getActiveModelId(),
+      reactIterations: reactResult.iterations,
+    },
+  });
+
+  state.status = "completed";
+  state.updatedAt = new Date().toISOString();
 
   return response;
 }

@@ -1,30 +1,26 @@
 /**
- * LLM-as-Judge Evaluation Module - ReAct-based Verification
+ * LLM-as-Judge Evaluation Module - Direct LLM Evaluation
  *
- * Uses a ReAct agent to evaluate discharge assessments by:
- * - Verifying drug interactions mentioned in the assessment
- * - Checking if risk factors are clinically appropriate
- * - Validating that all patient medications were considered
- * - Comparing recommendations against clinical guidelines
+ * Uses a direct LLM call (not ReAct) to evaluate discharge assessments:
+ * 1. Gather all FDA verification data upfront (interactions, boxed warnings, coverage)
+ * 2. Pass everything to the LLM in one comprehensive prompt
+ * 3. LLM evaluates and returns structured JSON scores
  *
- * NOT just a single scoring LLM call - the judge actively investigates
- * and verifies claims before scoring.
+ * This approach separates concerns:
+ * - Data gathering is deterministic (API calls)
+ * - Evaluation/judgment is where LLM reasoning matters
+ *
+ * The ReAct agent creates assessments; this simple LLM judges them.
  */
 
 import { createLLMProvider, getActiveModelId, getAvailableModels } from "@/lib/integrations/llm-provider";
 import { getOpikClient } from "@/lib/integrations/opik";
-import { getLLMJudgePrompt } from "@/lib/integrations/opik-prompts";
-import { runReActLoop, createReActTool, type ReActTool } from "@/lib/agents/react-loop";
-// Use REAL external APIs for verification, not static knowledge base
 import {
   checkDrugInteractions,
-  getDrugSafetyInfo,
   checkBoxedWarnings,
-  getComprehensiveDrugSafety,
-  type DrugInteraction as FDADrugInteraction,
 } from "@/lib/integrations/fda-client";
 import type { Patient } from "@/lib/types/patient";
-import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
+import type { DischargeAnalysis } from "@/lib/types/analysis";
 import { extractJsonObject } from "@/lib/utils/llm-json";
 
 /**
@@ -61,6 +57,7 @@ export interface JudgeEvaluation {
     riskFactorsValidated: boolean;
     guidelinesChecked: string[];
   };
+  // No longer using ReAct, but keep for API compatibility
   reactTrace?: {
     iterations: number;
     toolsUsed: string[];
@@ -69,374 +66,148 @@ export interface JudgeEvaluation {
 }
 
 /**
- * Build the system prompt for the judge ReAct agent
+ * Verification data gathered from FDA APIs before LLM evaluation
  */
-function buildJudgeSystemPrompt(): string {
-  return `You are a clinical quality assurance specialist evaluating AI-generated discharge readiness assessments.
-
-## Your Role
-Critically evaluate the assessment for safety, accuracy, actionability, and completeness. You have access to tools to VERIFY claims made in the assessment.
-
-## Evaluation Dimensions
-
-1. **SAFETY (40% weight)**
-   - Are all critical risks identified?
-   - Would acting on this assessment harm the patient?
-   - Are dangerous drug interactions flagged?
-   - Are appropriate warnings included?
-
-2. **ACCURACY (25% weight)**
-   - Is the score appropriate for the patient's condition?
-   - Are risk factors correctly categorized and severity-rated?
-   - Do the findings match the patient data?
-
-3. **ACTIONABILITY (20% weight)**
-   - Are recommendations specific and implementable?
-   - Can clinicians act on the information provided?
-   - Are next steps clear?
-
-4. **COMPLETENESS (15% weight)**
-   - Are all patient medications considered?
-   - Are relevant conditions addressed?
-   - Any obvious gaps in the assessment?
-
-## Your Process
-1. First, VERIFY drug interactions using the FDA RxNorm API - check if the assessment caught REAL interactions
-2. Check FDA boxed warnings - any medications with Black Box Warnings that were missed?
-3. Validate risk severities using FDA safety data
-4. Check medication coverage
-5. Then provide your final evaluation scores based on REAL FDA data
-
-IMPORTANT: You are verifying against REAL external FDA/RxNorm APIs, not static data. The FDA data is authoritative.
-
-## Output Format - CRITICAL
-When you have gathered enough information from the tools, respond with a ReAct final answer containing ONLY the evaluation JSON object.
-
-Your final_answer MUST be EXACTLY this JSON structure (no additional text):
-{
-  "safety": {"score": 0.85, "reasoning": "Your specific reasoning about safety..."},
-  "accuracy": {"score": 0.75, "reasoning": "Your specific reasoning about accuracy..."},
-  "actionability": {"score": 0.80, "reasoning": "Your specific reasoning about actionability..."},
-  "completeness": {"score": 0.70, "reasoning": "Your specific reasoning about completeness..."},
-  "summary": "One sentence overall assessment"
-}
-
-IMPORTANT:
-- Scores must be decimal numbers between 0.0 and 1.0 (e.g., 0.85 not 85%)
-- Each reasoning must be a specific explanation, not generic text
-- The final_answer field must contain ONLY this JSON, no other text
-
-Be CRITICAL but fair. Deduct points for missed risks or inaccuracies.`;
+interface VerificationData {
+  drugInteractions: {
+    fdaInteractionsFound: number;
+    assessmentInteractionsFlagged: number;
+    missedInteractions: string[];
+    allCaught: boolean;
+    details: Array<{
+      drugs: string;
+      severity: string;
+      description: string;
+    }>;
+  };
+  boxedWarnings: {
+    medicationsWithWarnings: number;
+    missedInAssessment: string[];
+    allFlagged: boolean;
+    warnings: Array<{
+      drug: string;
+      summary: string;
+    }>;
+  };
+  medicationCoverage: {
+    total: number;
+    mentioned: number;
+    notMentioned: string[];
+    missedHighRisk: string[];
+    coveragePercent: number;
+  };
 }
 
 /**
- * Create ReAct tools for the judge to verify claims using REAL external APIs
+ * Gather all verification data from FDA APIs
  */
-function createJudgeTools(patient: Patient, analysis: DischargeAnalysis): ReActTool[] {
-  return [
-    createReActTool(
-      "verify_drug_interactions_fda",
-      "Check the patient's medications for drug interactions using the REAL FDA RxNorm API. Compare against what was flagged in the assessment to find missed interactions.",
-      {
-        type: "object",
-        properties: {},
-        required: [],
-      },
-      async () => {
-        const meds = patient.medications.map((m) => ({ name: m.name }));
+async function gatherVerificationData(
+  patient: Patient,
+  analysis: DischargeAnalysis
+): Promise<VerificationData> {
+  const meds = patient.medications.map((m) => ({ name: m.name }));
 
-        // Call REAL FDA/RxNorm API for drug interactions
-        console.log(`[LLM Judge] Calling FDA RxNorm API for ${meds.length} medications...`);
-        const fdaInteractions = await checkDrugInteractions(meds);
+  console.log(`[LLM Judge] Gathering FDA verification data for ${meds.length} medications...`);
 
-        // Find interactions mentioned in assessment
-        const assessmentInteractions = analysis.riskFactors.filter(
-          (rf) => rf.category === "drug_interaction"
+  // Gather data in parallel
+  const [fdaInteractions, boxedWarnings] = await Promise.all([
+    checkDrugInteractions(meds),
+    checkBoxedWarnings(meds),
+  ]);
+
+  // Analyze drug interactions
+  const assessmentInteractions = analysis.riskFactors.filter(
+    (rf) => rf.category === "drug_interaction"
+  );
+
+  const missedInteractions: string[] = [];
+  for (const interaction of fdaInteractions) {
+    if (interaction.severity === "major" || interaction.severity === "moderate") {
+      const found = assessmentInteractions.some(
+        (ai) =>
+          ai.title.toLowerCase().includes(interaction.drug1.toLowerCase()) ||
+          ai.title.toLowerCase().includes(interaction.drug2.toLowerCase())
+      );
+      if (!found) {
+        missedInteractions.push(
+          `${interaction.drug1} + ${interaction.drug2} (${interaction.severity})`
         );
-
-        // Check for missed interactions from the REAL API
-        const missed: string[] = [];
-        for (const interaction of fdaInteractions) {
-          if (interaction.severity === "major" || interaction.severity === "moderate") {
-            const found = assessmentInteractions.some(
-              (ai) =>
-                ai.title.toLowerCase().includes(interaction.drug1.toLowerCase()) ||
-                ai.title.toLowerCase().includes(interaction.drug2.toLowerCase())
-            );
-            if (!found) {
-              missed.push(`${interaction.drug1} + ${interaction.drug2} (${interaction.severity}) - Source: ${interaction.source}`);
-            }
-          }
-        }
-
-        return {
-          source: "FDA RxNorm API (REAL external data)",
-          totalMedications: meds.length,
-          fdaInteractionsFound: fdaInteractions.length,
-          interactionsFlaggedInAssessment: assessmentInteractions.length,
-          missedInteractions: missed,
-          allInteractionsCaught: missed.length === 0,
-          fdaInteractionDetails: fdaInteractions.slice(0, 5).map((i) => ({
-            drugs: `${i.drug1} + ${i.drug2}`,
-            severity: i.severity,
-            description: i.description.slice(0, 200),
-            source: i.source,
-          })),
-        };
       }
-    ),
+    }
+  }
 
-    createReActTool(
-      "check_fda_safety_info",
-      "Get REAL FDA safety information for a medication including boxed warnings, adverse reactions, and contraindications.",
-      {
-        type: "object",
-        properties: {
-          medicationName: {
-            type: "string",
-            description: "Name of the medication to look up",
-          },
-        },
-        required: ["medicationName"],
-      },
-      async (args) => {
-        const medName = String(args.medicationName);
-        console.log(`[LLM Judge] Calling FDA API for safety info on ${medName}...`);
+  // Analyze boxed warnings
+  const assessmentHighRisk = analysis.riskFactors.filter((rf) => rf.severity === "high");
+  const missedBoxedWarnings: string[] = [];
 
-        const safety = await getDrugSafetyInfo(medName);
+  for (const w of boxedWarnings) {
+    const flagged = assessmentHighRisk.some(
+      (rf) => rf.title.toLowerCase().includes(w.drug.toLowerCase())
+    );
+    if (!flagged) {
+      missedBoxedWarnings.push(w.drug);
+    }
+  }
 
-        if (!safety) {
-          return {
-            source: "FDA OpenFDA API",
-            medication: medName,
-            found: false,
-            message: "No FDA label data found for this medication",
-          };
-        }
+  // Check medication coverage
+  const patientMeds = patient.medications.map((m) => m.name.toLowerCase());
+  const assessmentText = JSON.stringify(analysis).toLowerCase();
 
-        return {
-          source: "FDA OpenFDA Label API (REAL external data)",
-          medication: safety.drugName,
-          found: true,
-          hasBoxedWarning: !!safety.boxedWarning,
-          boxedWarning: safety.boxedWarning?.slice(0, 300),
-          warningsCount: safety.warnings.length,
-          adverseReactionsCount: safety.adverseReactions.length,
-          contraindicationsCount: safety.contraindications.length,
-          topWarnings: safety.warnings.slice(0, 2).map((w) => w.slice(0, 150)),
-        };
-      }
-    ),
+  const mentioned: string[] = [];
+  const notMentioned: string[] = [];
 
-    createReActTool(
-      "check_boxed_warnings",
-      "Check if any of the patient's medications have FDA Black Box Warnings using REAL FDA data.",
-      {
-        type: "object",
-        properties: {},
-        required: [],
-      },
-      async () => {
-        const meds = patient.medications.map((m) => ({ name: m.name }));
-        console.log(`[LLM Judge] Checking FDA boxed warnings for ${meds.length} medications...`);
+  for (const med of patientMeds) {
+    if (assessmentText.includes(med)) {
+      mentioned.push(med);
+    } else {
+      notMentioned.push(med);
+    }
+  }
 
-        const warnings = await checkBoxedWarnings(meds);
+  const highRiskMeds = ["warfarin", "insulin", "metformin", "digoxin", "lithium", "amiodarone"];
+  const missedHighRisk = notMentioned.filter((m) =>
+    highRiskMeds.some((hr) => m.includes(hr))
+  );
 
-        // Check if assessment flagged these
-        const assessmentHighRisk = analysis.riskFactors.filter((rf) => rf.severity === "high");
-        const missedBoxedWarnings: string[] = [];
-
-        for (const w of warnings) {
-          const flagged = assessmentHighRisk.some(
-            (rf) => rf.title.toLowerCase().includes(w.drug.toLowerCase())
-          );
-          if (!flagged) {
-            missedBoxedWarnings.push(w.drug);
-          }
-        }
-
-        return {
-          source: "FDA OpenFDA Label API (REAL external data)",
-          medicationsChecked: meds.length,
-          medicationsWithBoxedWarnings: warnings.length,
-          boxedWarnings: warnings.map((w) => ({
-            drug: w.drug,
-            warningSummary: w.warning.slice(0, 200),
-          })),
-          missedInAssessment: missedBoxedWarnings,
-          allBoxedWarningsFlagged: missedBoxedWarnings.length === 0,
-        };
-      }
-    ),
-
-    createReActTool(
-      "get_comprehensive_drug_safety",
-      "Get comprehensive safety profile for a medication from FDA including FAERS adverse event reports, recalls, and risk level.",
-      {
-        type: "object",
-        properties: {
-          medicationName: {
-            type: "string",
-            description: "Name of the medication to get comprehensive safety for",
-          },
-        },
-        required: ["medicationName"],
-      },
-      async (args) => {
-        const medName = String(args.medicationName);
-        console.log(`[LLM Judge] Getting comprehensive FDA safety for ${medName}...`);
-
-        const safety = await getComprehensiveDrugSafety(medName);
-
-        return {
-          source: "FDA OpenFDA APIs (REAL external data - FAERS, Labels, Enforcement)",
-          medication: safety.drugName,
-          faersAdverseEventReports: safety.faersReportCount,
-          hasBoxedWarning: safety.hasBoxedWarning,
-          boxedWarningSummary: safety.boxedWarningSummary,
-          recentRecalls: safety.recentRecalls.map((r) => ({
-            reason: r.reason.slice(0, 100),
-            classification: r.classification,
-            status: r.status,
-          })),
-          fdaRiskLevel: safety.riskLevel,
-          topAdverseReactions: safety.topAdverseReactions.slice(0, 3),
-        };
-      }
-    ),
-
-    createReActTool(
-      "check_medication_coverage",
-      "Verify that all patient medications were considered in the assessment.",
-      {
-        type: "object",
-        properties: {},
-        required: [],
-      },
-      async () => {
-        const patientMeds = patient.medications.map((m) => m.name.toLowerCase());
-        const assessmentText = JSON.stringify(analysis).toLowerCase();
-
-        const mentioned: string[] = [];
-        const notMentioned: string[] = [];
-
-        for (const med of patientMeds) {
-          if (assessmentText.includes(med)) {
-            mentioned.push(med);
-          } else {
-            notMentioned.push(med);
-          }
-        }
-
-        // Check for high-risk medications not mentioned
-        const highRiskMeds = ["warfarin", "insulin", "metformin", "digoxin", "lithium", "amiodarone"];
-        const missedHighRisk = notMentioned.filter((m) =>
-          highRiskMeds.some((hr) => m.includes(hr))
-        );
-
-        return {
-          totalMedications: patientMeds.length,
-          medicationsMentioned: mentioned.length,
-          medicationsNotMentioned: notMentioned,
-          missedHighRiskMeds: missedHighRisk,
-          coveragePercent: Math.round((mentioned.length / patientMeds.length) * 100),
-        };
-      }
-    ),
-
-    createReActTool(
-      "validate_risk_severity",
-      "Check if risk factor severities are appropriate based on FDA safety data.",
-      {
-        type: "object",
-        properties: {
-          riskFactorTitle: {
-            type: "string",
-            description: "The title of the risk factor to validate",
-          },
-        },
-        required: ["riskFactorTitle"],
-      },
-      async (args) => {
-        const title = String(args.riskFactorTitle).toLowerCase();
-        const rf = analysis.riskFactors.find(
-          (r) => r.title.toLowerCase().includes(title) || title.includes(r.title.toLowerCase())
-        );
-
-        if (!rf) {
-          return { error: `Risk factor "${args.riskFactorTitle}" not found in assessment` };
-        }
-
-        // Extract medication name if this is drug-related
-        const medMatch = rf.title.match(/(\w+(?:\s+\w+)?)\s*[-–]/);
-        let fdaValidation = null;
-
-        if (medMatch) {
-          const medName = medMatch[1];
-          try {
-            const safety = await getComprehensiveDrugSafety(medName);
-            fdaValidation = {
-              medication: medName,
-              fdaRiskLevel: safety.riskLevel,
-              hasBoxedWarning: safety.hasBoxedWarning,
-              faersReports: safety.faersReportCount,
-            };
-          } catch {
-            // Ignore FDA lookup failures
-          }
-        }
-
-        // Check if severity seems appropriate
-        let appropriateness = "appropriate";
-        if (fdaValidation) {
-          if (rf.severity === "low" && fdaValidation.fdaRiskLevel === "high") {
-            appropriateness = "UNDER-RATED - FDA classifies this as high-risk but assessment rated it low";
-          } else if (rf.severity === "low" && fdaValidation.hasBoxedWarning) {
-            appropriateness = "UNDER-RATED - FDA has boxed warning but assessment rated it low";
-          } else if (rf.severity === "high" && fdaValidation.fdaRiskLevel === "low") {
-            appropriateness = "potentially over-rated - FDA classifies this as low-risk";
-          }
-        }
-
-        return {
-          riskFactor: rf.title,
-          assignedSeverity: rf.severity,
-          severityAssessment: appropriateness,
-          category: rf.category,
-          hasResolution: !!rf.resolution,
-          fdaValidation,
-        };
-      }
-    ),
-
-    createReActTool(
-      "get_assessment_summary",
-      "Get a summary of the assessment being evaluated.",
-      {
-        type: "object",
-        properties: {},
-        required: [],
-      },
-      async () => {
-        return {
-          score: analysis.score,
-          status: analysis.status,
-          riskFactorCount: analysis.riskFactors.length,
-          highRiskCount: analysis.riskFactors.filter((r) => r.severity === "high").length,
-          moderateRiskCount: analysis.riskFactors.filter((r) => r.severity === "moderate").length,
-          lowRiskCount: analysis.riskFactors.filter((r) => r.severity === "low").length,
-          recommendationCount: analysis.recommendations.length,
-          categories: [...new Set(analysis.riskFactors.map((r) => r.category))],
-        };
-      }
-    ),
-  ];
+  return {
+    drugInteractions: {
+      fdaInteractionsFound: fdaInteractions.length,
+      assessmentInteractionsFlagged: assessmentInteractions.length,
+      missedInteractions,
+      allCaught: missedInteractions.length === 0,
+      details: fdaInteractions.slice(0, 5).map((i) => ({
+        drugs: `${i.drug1} + ${i.drug2}`,
+        severity: i.severity,
+        description: i.description.slice(0, 200),
+      })),
+    },
+    boxedWarnings: {
+      medicationsWithWarnings: boxedWarnings.length,
+      missedInAssessment: missedBoxedWarnings,
+      allFlagged: missedBoxedWarnings.length === 0,
+      warnings: boxedWarnings.map((w) => ({
+        drug: w.drug,
+        summary: w.warning.slice(0, 200),
+      })),
+    },
+    medicationCoverage: {
+      total: patientMeds.length,
+      mentioned: mentioned.length,
+      notMentioned,
+      missedHighRisk,
+      coveragePercent: Math.round((mentioned.length / patientMeds.length) * 100),
+    },
+  };
 }
 
 /**
- * Build context for the judge
+ * Build the evaluation prompt with all context and verification data
  */
-function buildJudgeContext(patient: Patient, analysis: DischargeAnalysis): string {
+function buildEvaluationPrompt(
+  patient: Patient,
+  analysis: DischargeAnalysis,
+  verification: VerificationData
+): string {
   const riskFactorsSummary = analysis.riskFactors
     .map(
       (rf) =>
@@ -450,7 +221,9 @@ function buildJudgeContext(patient: Patient, analysis: DischargeAnalysis): strin
     .map((m) => `  - ${m.name} ${m.dose} ${m.frequency}`)
     .join("\n");
 
-  return `## PATIENT DATA
+  return `You are a clinical quality assurance specialist. Evaluate this AI-generated discharge assessment.
+
+## PATIENT DATA
 Name: ${patient.name}
 Age: ${patient.age} years old
 Diagnoses: ${patient.diagnoses.map((d) => d.display).join(", ")}
@@ -460,7 +233,7 @@ ${medicationsSummary}
 
 Allergies: ${patient.allergies.length > 0 ? patient.allergies.join(", ") : "None documented"}
 
-## ASSESSMENT TO EVALUATE
+## ASSESSMENT BEING EVALUATED
 Discharge Score: ${analysis.score}/100
 Status: ${analysis.status}
 
@@ -468,11 +241,71 @@ Risk Factors Identified (${analysis.riskFactors.length}):
 ${riskFactorsSummary || "None identified"}
 
 Recommendations:
-${analysis.recommendations.map((r, i) => `  ${i + 1}. ${r}`).join("\n") || "None provided"}`;
+${analysis.recommendations.map((r, i) => `  ${i + 1}. ${r}`).join("\n") || "None provided"}
+
+## FDA VERIFICATION DATA (Ground Truth)
+
+### Drug Interactions (from FDA RxNorm API)
+- FDA found ${verification.drugInteractions.fdaInteractionsFound} interactions
+- Assessment flagged ${verification.drugInteractions.assessmentInteractionsFlagged} interactions
+- Missed interactions: ${verification.drugInteractions.missedInteractions.length > 0 ? verification.drugInteractions.missedInteractions.join(", ") : "None - all caught"}
+${verification.drugInteractions.details.length > 0 ? `- Details:\n${verification.drugInteractions.details.map((d) => `    * ${d.drugs} (${d.severity}): ${d.description}`).join("\n")}` : ""}
+
+### Boxed Warnings (from FDA OpenFDA API)
+- ${verification.boxedWarnings.medicationsWithWarnings} medications have FDA Black Box Warnings
+- Missed in assessment: ${verification.boxedWarnings.missedInAssessment.length > 0 ? verification.boxedWarnings.missedInAssessment.join(", ") : "None - all flagged"}
+${verification.boxedWarnings.warnings.length > 0 ? `- Warnings:\n${verification.boxedWarnings.warnings.map((w) => `    * ${w.drug}: ${w.summary}`).join("\n")}` : ""}
+
+### Medication Coverage
+- ${verification.medicationCoverage.coveragePercent}% of medications mentioned in assessment
+- Not mentioned: ${verification.medicationCoverage.notMentioned.length > 0 ? verification.medicationCoverage.notMentioned.join(", ") : "All mentioned"}
+- Missed high-risk medications: ${verification.medicationCoverage.missedHighRisk.length > 0 ? verification.medicationCoverage.missedHighRisk.join(", ") : "None"}
+
+## YOUR TASK
+
+Evaluate the assessment on these dimensions:
+
+1. **SAFETY (40% weight)** - Did the assessment identify critical risks? Would acting on it harm the patient? Were dangerous drug interactions and boxed warnings properly flagged?
+
+2. **ACCURACY (25% weight)** - Is the score appropriate? Are risk factors correctly categorized? Do findings match patient data?
+
+3. **ACTIONABILITY (20% weight)** - Are recommendations specific and implementable? Are next steps clear?
+
+4. **COMPLETENESS (15% weight)** - Were all medications considered? Any obvious gaps?
+
+## RESPONSE FORMAT
+
+Respond with ONLY this JSON object (no other text):
+
+{
+  "safety": {
+    "score": 0.0-1.0,
+    "reasoning": "Specific explanation referencing the FDA verification data"
+  },
+  "accuracy": {
+    "score": 0.0-1.0,
+    "reasoning": "Specific explanation"
+  },
+  "actionability": {
+    "score": 0.0-1.0,
+    "reasoning": "Specific explanation"
+  },
+  "completeness": {
+    "score": 0.0-1.0,
+    "reasoning": "Specific explanation referencing medication coverage"
+  },
+  "summary": "One sentence overall assessment"
+}
+
+Be CRITICAL. Deduct points for:
+- Missed drug interactions (major safety issue)
+- Missed boxed warnings (major safety issue)
+- Low medication coverage
+- Vague or non-actionable recommendations`;
 }
 
 /**
- * Evaluate a discharge analysis using ReAct-based LLM judge
+ * Evaluate a discharge analysis using direct LLM call
  */
 export async function evaluateWithLLMJudge(
   patient: Patient,
@@ -483,52 +316,40 @@ export async function evaluateWithLLMJudge(
   const judgeModel = modelId || getJudgeModelId();
 
   const trace = opik?.trace({
-    name: "llm-judge-react",
+    name: "llm-judge-direct",
     metadata: {
       patient_id: patient.id,
       analysis_score: analysis.score,
       analysis_status: analysis.status,
       judge_model: judgeModel,
-      agentic: true,
-      react: true,
+      approach: "direct-llm", // Not ReAct
     },
   });
 
   try {
-    console.log(`[LLM Judge] Using ReAct agent with model: ${judgeModel}`);
+    console.log(`[LLM Judge] Using direct LLM evaluation with model: ${judgeModel}`);
 
-    // Create verification tools
-    const tools = createJudgeTools(patient, analysis);
+    // Step 1: Gather all FDA verification data upfront
+    const verification = await gatherVerificationData(patient, analysis);
 
-    // Build context
-    const context = buildJudgeContext(patient, analysis);
+    console.log(`[LLM Judge] FDA data gathered - ${verification.drugInteractions.fdaInteractionsFound} interactions, ${verification.boxedWarnings.medicationsWithWarnings} boxed warnings`);
 
-    // Run the ReAct judge loop
-    const reactResult = await runReActLoop(
-      `Evaluate this discharge assessment. Use the available tools to verify claims, then provide evaluation scores.
+    // Step 2: Build comprehensive prompt
+    const prompt = buildEvaluationPrompt(patient, analysis, verification);
 
-${context}
+    // Step 3: Single LLM call for evaluation
+    const provider = createLLMProvider();
+    const response = await provider.generate(prompt, {
+      spanName: "judge-evaluation",
+      metadata: {
+        patientId: patient.id,
+        purpose: "evaluation",
+      },
+    });
 
-Steps:
-1. Call verify_drug_interactions_fda to check for missed interactions
-2. Call check_medication_coverage to verify all meds were considered
-3. Call check_boxed_warnings if high-risk medications are present
-4. After gathering evidence, provide your final_answer as ONLY this JSON object:
+    console.log(`[LLM Judge] LLM response received (${response.content.length} chars)`);
 
-{"safety":{"score":0.0-1.0,"reasoning":"..."},"accuracy":{"score":0.0-1.0,"reasoning":"..."},"actionability":{"score":0.0-1.0,"reasoning":"..."},"completeness":{"score":0.0-1.0,"reasoning":"..."},"summary":"..."}`,
-      {
-        systemPrompt: buildJudgeSystemPrompt(),
-        tools,
-        maxIterations: 8,
-        threadId: `judge-${patient.id}`,
-        metadata: {
-          patientId: patient.id,
-          purpose: "evaluation",
-        },
-      }
-    );
-
-    // Parse the final evaluation from the ReAct answer
+    // Step 4: Parse the JSON response
     let judgeResult: {
       safety: JudgeScore;
       accuracy: JudgeScore;
@@ -537,52 +358,18 @@ Steps:
       summary: string;
     };
 
-    // Ensure answer is a string before processing
-    const answerStr = typeof reactResult.answer === "string"
-      ? reactResult.answer
-      : JSON.stringify(reactResult.answer);
-
-    console.log(`[LLM Judge] ReAct completed in ${reactResult.iterations} iterations, tools: ${reactResult.toolsUsed.join(", ")}`);
-    console.log(`[LLM Judge] Answer (first 500 chars): ${answerStr.slice(0, 500)}`);
-
     try {
-      const parsed = extractJsonObject<Record<string, unknown>>(answerStr);
-
-      // Validate that the parsed object has the expected structure
-      // LLM might return the scores nested differently or with different keys
-      const safetyData = (parsed.safety as JudgeScore | undefined) || (parsed.Safety as JudgeScore | undefined);
-      const accuracyData = (parsed.accuracy as JudgeScore | undefined) || (parsed.Accuracy as JudgeScore | undefined);
-      const actionabilityData = (parsed.actionability as JudgeScore | undefined) || (parsed.Actionability as JudgeScore | undefined);
-      const completenessData = (parsed.completeness as JudgeScore | undefined) || (parsed.Completeness as JudgeScore | undefined);
-
-      // Check if we got at least one valid dimension
-      const hasValidData = safetyData?.score !== undefined ||
-                           accuracyData?.score !== undefined ||
-                           actionabilityData?.score !== undefined ||
-                           completenessData?.score !== undefined;
-
-      if (!hasValidData) {
-        console.warn(`[LLM Judge] Parsed JSON but missing expected dimensions. Keys: ${Object.keys(parsed).join(", ")}`);
-        console.warn(`[LLM Judge] Raw answer: ${answerStr.slice(0, 500)}`);
-      }
-
-      judgeResult = {
-        safety: safetyData || { score: 0.5, reasoning: "Unable to extract safety evaluation from LLM response" },
-        accuracy: accuracyData || { score: 0.5, reasoning: "Unable to extract accuracy evaluation from LLM response" },
-        actionability: actionabilityData || { score: 0.5, reasoning: "Unable to extract actionability evaluation from LLM response" },
-        completeness: completenessData || { score: 0.5, reasoning: "Unable to extract completeness evaluation from LLM response" },
-        summary: (parsed.summary as string) || "Evaluation completed",
-      };
+      judgeResult = extractJsonObject(response.content);
+      console.log(`[LLM Judge] Successfully parsed evaluation JSON`);
     } catch (parseError) {
-      const rawPreview = typeof answerStr === "string" ? answerStr.slice(0, 300) : String(answerStr);
-      console.error(`[LLM Judge] JSON parse failed, using defaults. Raw: ${rawPreview}`);
+      console.error(`[LLM Judge] JSON parse failed. Raw response: ${response.content.slice(0, 500)}`);
       // Provide reasonable defaults if parsing fails
       judgeResult = {
-        safety: { score: 0.5, reasoning: "Unable to fully evaluate safety - JSON parse error" },
-        accuracy: { score: 0.5, reasoning: "Unable to fully evaluate accuracy - JSON parse error" },
-        actionability: { score: 0.5, reasoning: "Unable to fully evaluate actionability - JSON parse error" },
-        completeness: { score: 0.5, reasoning: "Unable to fully evaluate completeness - JSON parse error" },
-        summary: "Evaluation completed with parsing issues - scores may be approximate",
+        safety: { score: 0.5, reasoning: "Unable to parse LLM response" },
+        accuracy: { score: 0.5, reasoning: "Unable to parse LLM response" },
+        actionability: { score: 0.5, reasoning: "Unable to parse LLM response" },
+        completeness: { score: 0.5, reasoning: "Unable to parse LLM response" },
+        summary: "Evaluation completed with parsing issues",
       };
     }
 
@@ -600,14 +387,6 @@ Steps:
       (judgeResult.actionability?.score || 0) * weights.actionability +
       (judgeResult.completeness?.score || 0) * weights.completeness;
 
-    // Extract verification results from tool observations
-    const drugVerificationStep = reactResult.steps.find(
-      (s) => s.action?.tool === "verify_drug_interactions_fda"
-    );
-    const verificationResults = drugVerificationStep?.observation
-      ? JSON.parse(drugVerificationStep.observation)
-      : undefined;
-
     const evaluation: JudgeEvaluation = {
       safety: judgeResult.safety || { score: 0, reasoning: "Not evaluated" },
       accuracy: judgeResult.accuracy || { score: 0, reasoning: "Not evaluated" },
@@ -616,18 +395,11 @@ Steps:
       overall: Math.round(overall * 100) / 100,
       summary: judgeResult.summary || "Evaluation complete",
       timestamp: new Date().toISOString(),
-      verificationResults: verificationResults
-        ? {
-            drugInteractionsVerified: true,
-            missedInteractions: verificationResults.missedInteractions || [],
-            riskFactorsValidated: true,
-            guidelinesChecked: reactResult.toolsUsed.filter((t) => t === "check_guideline_compliance"),
-          }
-        : undefined,
-      reactTrace: {
-        iterations: reactResult.iterations,
-        toolsUsed: reactResult.toolsUsed,
-        reasoningTrace: reactResult.reasoningTrace,
+      verificationResults: {
+        drugInteractionsVerified: true,
+        missedInteractions: verification.drugInteractions.missedInteractions,
+        riskFactorsValidated: true,
+        guidelinesChecked: [],
       },
     };
 
@@ -636,11 +408,15 @@ Steps:
         overall: evaluation.overall,
         safety_score: evaluation.safety.score,
         accuracy_score: evaluation.accuracy.score,
-        iterations: reactResult.iterations,
-        tools_used: reactResult.toolsUsed,
+        completeness_score: evaluation.completeness.score,
+        missed_interactions: verification.drugInteractions.missedInteractions.length,
+        missed_boxed_warnings: verification.boxedWarnings.missedInAssessment.length,
+        medication_coverage: verification.medicationCoverage.coveragePercent,
       },
     });
     trace?.end();
+
+    console.log(`[LLM Judge] Evaluation complete - overall: ${evaluation.overall}, safety: ${evaluation.safety.score}`);
 
     return evaluation;
   } catch (error) {
