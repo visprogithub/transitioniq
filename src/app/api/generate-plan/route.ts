@@ -16,7 +16,13 @@ import { getPatient } from "@/lib/data/demo-patients";
 import { setActiveModel, resetLLMProvider, getActiveModelId } from "@/lib/integrations/llm-provider";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import { getOpikClient, traceError } from "@/lib/integrations/opik";
-import { runReActLoop, createReActTool, type ReActTool } from "@/lib/agents/react-loop";
+import {
+  runReActLoop,
+  runReActLoopStreaming,
+  createReActSSEStream,
+  createReActTool,
+  type ReActTool,
+} from "@/lib/agents/react-loop";
 import { getPatientDrugInfo, checkMultipleDrugInteractions, searchKnowledgeBase } from "@/lib/knowledge-base";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import type { Patient } from "@/lib/types/patient";
@@ -282,18 +288,29 @@ function createPlanGeneratorTools(patient: Patient, analysis: DischargeAnalysis)
   ];
 }
 
+/**
+ * Generate discharge plan endpoint
+ * Supports both streaming (SSE) and non-streaming modes
+ *
+ * Query params:
+ * - stream=true: Return SSE stream showing reasoning in real-time
+ */
 export async function POST(request: NextRequest) {
   // Rate limit
   const blocked = applyRateLimit(request, "generate");
   if (blocked) return blocked;
 
+  // Check if streaming is requested
+  const useStreaming = request.nextUrl.searchParams.get("stream") === "true";
+
   const opik = getOpikClient();
   const trace = opik?.trace({
-    name: "discharge-plan-react",
+    name: useStreaming ? "discharge-plan-react-streaming" : "discharge-plan-react",
     metadata: {
       model: getActiveModelId(),
       agentic: true,
       react: true,
+      streaming: useStreaming,
     },
   });
 
@@ -356,8 +373,7 @@ Make sure to:
 
 Generate the final plan as a clear, formatted checklist that clinical staff and the patient can use.`;
 
-    // Run the ReAct loop
-    const reactResult = await runReActLoop(userMessage, {
+    const reactOptions = {
       systemPrompt: buildPlanGeneratorSystemPrompt(patient, analysis),
       tools,
       maxIterations: 10,
@@ -365,8 +381,31 @@ Generate the final plan as a clear, formatted checklist that clinical staff and 
       metadata: {
         patientId,
         purpose: "discharge-plan-generation",
+        streaming: useStreaming,
       },
-    });
+    };
+
+    // If streaming requested, return SSE stream
+    if (useStreaming) {
+      const generator = runReActLoopStreaming(userMessage, reactOptions);
+      const stream = createReActSSEStream(generator);
+
+      trace?.update({
+        output: { streaming: true },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "X-Patient-Id": patientId,
+        },
+      });
+    }
+
+    // Non-streaming path: Run the ReAct loop and return JSON
+    const reactResult = await runReActLoop(userMessage, reactOptions);
 
     trace?.update({
       output: {

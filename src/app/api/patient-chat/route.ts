@@ -15,7 +15,13 @@ import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import { getOpikClient, traceError } from "@/lib/integrations/opik";
 import { getPatient } from "@/lib/data/demo-patients";
-import { runReActLoop, createReActTool, type ReActTool } from "@/lib/agents/react-loop";
+import {
+  runReActLoop,
+  runReActLoopStreaming,
+  createReActSSEStream,
+  createReActTool,
+  type ReActTool,
+} from "@/lib/agents/react-loop";
 import {
   executePatientCoachTool,
   PATIENT_COACH_TOOLS,
@@ -191,11 +197,18 @@ function buildConversationContext(history: ChatMessage[], maxMessages: number): 
 
 /**
  * Main chat endpoint - uses ReAct agent for reasoning
+ * Supports both streaming (SSE) and non-streaming modes
+ *
+ * Query params:
+ * - stream=true: Return SSE stream showing reasoning in real-time
  */
 export async function POST(request: NextRequest) {
   // Session-wide demo rate limit
   const blocked = applyRateLimit(request, "chat");
   if (blocked) return blocked;
+
+  // Check if streaming is requested
+  const useStreaming = request.nextUrl.searchParams.get("stream") === "true";
 
   const opik = getOpikClient();
   const turnId = `turn-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -204,13 +217,14 @@ export async function POST(request: NextRequest) {
   let turnNumber = 0;
 
   const trace = opik?.trace({
-    name: "patient-chat-react",
+    name: useStreaming ? "patient-chat-react-streaming" : "patient-chat-react",
     metadata: {
       turn_id: turnId,
       model: getActiveModelId(),
       category: "patient-education",
       agentic: true,
       react: true,
+      streaming: useStreaming,
     },
   });
 
@@ -283,8 +297,7 @@ export async function POST(request: NextRequest) {
     // Create ReAct tools from patient coach tools
     const tools = createPatientCoachReActTools(patient, analysis || null, memorySessionId);
 
-    // Run the ReAct loop - LLM decides what tools to use
-    const reactResult = await runReActLoop(userMessage, {
+    const reactOptions = {
       systemPrompt: buildPatientCoachSystemPrompt(patient, analysis || null),
       tools,
       maxIterations: LIMITS.MAX_REACT_ITERATIONS,
@@ -293,8 +306,34 @@ export async function POST(request: NextRequest) {
         patientId,
         turnNumber,
         category: "patient-education",
+        streaming: useStreaming,
       },
-    });
+    };
+
+    // If streaming requested, return SSE stream
+    if (useStreaming) {
+      const generator = runReActLoopStreaming(userMessage, reactOptions);
+      const stream = createReActSSEStream(generator);
+
+      trace?.update({
+        output: { streaming: true },
+      });
+      // Note: trace will be ended when stream completes via generator
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "X-Conversation-Id": turnId,
+          "X-Turn-Number": String(turnNumber),
+          ...(limitWarning && { "X-Limit-Warning": limitWarning }),
+        },
+      });
+    }
+
+    // Non-streaming path: Run the ReAct loop and return JSON
+    const reactResult = await runReActLoop(userMessage, reactOptions);
 
     // Extract tools used
     const toolsUsed: Array<{ name: string; result: unknown }> = reactResult.steps

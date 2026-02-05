@@ -452,3 +452,318 @@ export function createReActTool(
 ): ReActTool {
   return { name, description, parameters, execute };
 }
+
+/**
+ * Streaming event types for ReAct loop
+ */
+export type ReActStreamEvent =
+  | { type: "thought"; iteration: number; thought: string; timestamp: string }
+  | { type: "action"; iteration: number; tool: string; args: Record<string, unknown>; timestamp: string }
+  | { type: "observation"; iteration: number; observation: string; timestamp: string }
+  | { type: "final"; answer: string; result: ReActResult }
+  | { type: "error"; error: string; partialResult?: Partial<ReActResult> };
+
+/**
+ * Run a streaming ReAct agent loop that yields events as they happen
+ *
+ * @param userMessage - The user's input message/question
+ * @param options - Configuration including system prompt and available tools
+ * @yields ReActStreamEvent - Events for each step of the reasoning process
+ */
+export async function* runReActLoopStreaming(
+  userMessage: string,
+  options: ReActOptions
+): AsyncGenerator<ReActStreamEvent, void, unknown> {
+  const startTime = Date.now();
+  const maxIterations = options.maxIterations || MAX_ITERATIONS;
+  const steps: ReActStep[] = [];
+  const toolsUsed: string[] = [];
+
+  // Aggregate token usage across all LLM calls
+  let totalPromptTokens = 0;
+  let totalCompletionTokens = 0;
+  let totalTokens = 0;
+
+  // Set up tracing
+  const opik = getOpikClient();
+  const trace = opik?.trace({
+    name: "react-agent-loop-streaming",
+    threadId: options.threadId,
+    metadata: {
+      ...options.metadata,
+      model: getActiveModelId(),
+      max_iterations: maxIterations,
+      tool_count: options.tools.length,
+      streaming: true,
+    },
+  });
+
+  try {
+    // Build the full system prompt with tool definitions
+    const systemPrompt = buildReActSystemPrompt(options.systemPrompt, options.tools);
+    const provider = createLLMProvider();
+
+    // Build conversation history for multi-turn reasoning
+    let conversationHistory = `User: ${userMessage}\n\n`;
+
+    for (let iteration = 1; iteration <= maxIterations; iteration++) {
+      const iterationSpan = trace?.span({
+        name: `iteration-${iteration}`,
+        type: "llm",
+        metadata: { iteration },
+      });
+
+      // Call LLM to get next thought/action
+      const prompt = `${conversationHistory}
+
+Now provide your next step as JSON:`;
+
+      const response = await provider.generate(prompt, {
+        spanName: `react-step-${iteration}`,
+        systemPrompt,
+        metadata: {
+          iteration,
+          history_length: conversationHistory.length,
+        },
+      });
+
+      // Aggregate token usage from this LLM call
+      if (response.tokenUsage) {
+        totalPromptTokens += response.tokenUsage.promptTokens;
+        totalCompletionTokens += response.tokenUsage.completionTokens;
+        totalTokens += response.tokenUsage.totalTokens;
+      }
+
+      // Parse the response
+      const { thought, action, finalAnswer } = parseReActResponse(response.content);
+      const timestamp = new Date().toISOString();
+
+      // Yield thought event
+      yield { type: "thought", iteration, thought, timestamp };
+
+      // Create step record
+      const step: ReActStep = {
+        iteration,
+        thought,
+        action,
+        observation: null,
+        isFinal: !!finalAnswer,
+        finalAnswer: finalAnswer || undefined,
+        timestamp,
+      };
+
+      // If we have a final answer, we're done
+      if (finalAnswer) {
+        steps.push(step);
+        iterationSpan?.update({
+          output: { thought, final_answer: finalAnswer },
+          metadata: { is_final: true },
+        });
+        iterationSpan?.end();
+
+        const endTime = Date.now();
+        const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
+
+        trace?.update({
+          output: {
+            answer: finalAnswer,
+            iterations: iteration,
+            tools_used: toolsUsed,
+          },
+          metadata: {
+            total_tokens: totalTokens,
+            prompt_tokens: totalPromptTokens,
+            completion_tokens: totalCompletionTokens,
+            estimated_cost_usd: estimatedCost,
+            total_latency_ms: endTime - startTime,
+          },
+        });
+        trace?.end();
+
+        const result: ReActResult = {
+          answer: finalAnswer,
+          steps,
+          toolsUsed: [...new Set(toolsUsed)],
+          iterations: iteration,
+          reasoningTrace: steps.map((s) => `[${s.iteration}] ${s.thought}`).join("\n"),
+          metadata: {
+            model: getActiveModelId(),
+            startTime: new Date(startTime).toISOString(),
+            endTime: new Date(endTime).toISOString(),
+            totalLatencyMs: endTime - startTime,
+            totalTokens: totalTokens || undefined,
+            promptTokens: totalPromptTokens || undefined,
+            completionTokens: totalCompletionTokens || undefined,
+            estimatedCostUsd: estimatedCost,
+          },
+        };
+
+        yield { type: "final", answer: finalAnswer, result };
+        return;
+      }
+
+      // If we have an action, yield action event then execute the tool
+      if (action) {
+        yield { type: "action", iteration, tool: action.tool, args: action.args, timestamp };
+
+        const tool = options.tools.find((t) => t.name === action.tool);
+
+        if (!tool) {
+          step.observation = `Error: Unknown tool "${action.tool}". Available tools: ${options.tools.map((t) => t.name).join(", ")}`;
+        } else {
+          const toolSpan = trace?.span({
+            name: `tool-${action.tool}`,
+            type: "tool",
+            metadata: {
+              tool: action.tool,
+              args: action.args,
+            },
+          });
+
+          try {
+            const result = await tool.execute(action.args);
+            step.observation = JSON.stringify(result, null, 2);
+            toolsUsed.push(action.tool);
+
+            toolSpan?.update({
+              output: { result },
+              metadata: { success: true },
+            });
+          } catch (error) {
+            step.observation = `Error executing ${action.tool}: ${error instanceof Error ? error.message : String(error)}`;
+            toolSpan?.update({
+              output: { error: step.observation },
+              metadata: { success: false },
+            });
+          }
+
+          toolSpan?.end();
+        }
+
+        // Yield observation event
+        yield { type: "observation", iteration, observation: step.observation, timestamp: new Date().toISOString() };
+      } else {
+        // No action and no final answer - shouldn't happen, but handle it
+        step.observation = "No action specified. Please provide either an action or a final_answer.";
+        yield { type: "observation", iteration, observation: step.observation, timestamp: new Date().toISOString() };
+      }
+
+      steps.push(step);
+
+      // Update conversation history with this step
+      conversationHistory += `Assistant: ${JSON.stringify({ thought, action }, null, 2)}\n`;
+      conversationHistory += `Observation: ${step.observation}\n\n`;
+
+      iterationSpan?.update({
+        output: { thought, action, observation: step.observation },
+        metadata: { is_final: false },
+      });
+      iterationSpan?.end();
+    }
+
+    // If we hit max iterations without a final answer, synthesize one
+    const fallbackAnswer = `I've gathered information through ${steps.length} steps but reached the iteration limit. Based on what I found: ${steps
+      .filter((s) => s.observation)
+      .map((s) => s.observation)
+      .slice(-3)
+      .join(" ")}`;
+
+    const endTime = Date.now();
+    const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
+
+    trace?.update({
+      output: {
+        answer: fallbackAnswer,
+        iterations: maxIterations,
+        tools_used: toolsUsed,
+        hit_max_iterations: true,
+      },
+      metadata: {
+        total_tokens: totalTokens,
+        prompt_tokens: totalPromptTokens,
+        completion_tokens: totalCompletionTokens,
+        estimated_cost_usd: estimatedCost,
+        total_latency_ms: endTime - startTime,
+      },
+    });
+    trace?.end();
+
+    const result: ReActResult = {
+      answer: fallbackAnswer,
+      steps,
+      toolsUsed: [...new Set(toolsUsed)],
+      iterations: maxIterations,
+      reasoningTrace: steps.map((s) => `[${s.iteration}] ${s.thought}`).join("\n"),
+      metadata: {
+        model: getActiveModelId(),
+        startTime: new Date(startTime).toISOString(),
+        endTime: new Date(endTime).toISOString(),
+        totalLatencyMs: endTime - startTime,
+        totalTokens: totalTokens || undefined,
+        promptTokens: totalPromptTokens || undefined,
+        completionTokens: totalCompletionTokens || undefined,
+        estimatedCostUsd: estimatedCost,
+      },
+    };
+
+    yield { type: "final", answer: fallbackAnswer, result };
+  } catch (error) {
+    const endTime = Date.now();
+    const estimatedCost = totalTokens > 0 ? (totalPromptTokens * 0.00015 + totalCompletionTokens * 0.0006) / 1000 : undefined;
+
+    console.error(`[ReAct Streaming] Error - Total tokens before failure: ${totalTokens}`);
+
+    trace?.update({
+      metadata: {
+        error: error instanceof Error ? error.message : String(error),
+        error_stack: error instanceof Error ? error.stack : undefined,
+        total_tokens: totalTokens,
+        prompt_tokens: totalPromptTokens,
+        completion_tokens: totalCompletionTokens,
+        estimated_cost_usd: estimatedCost,
+        total_latency_ms: endTime - startTime,
+      },
+    });
+    trace?.end();
+
+    yield {
+      type: "error",
+      error: error instanceof Error ? error.message : String(error),
+      partialResult: {
+        steps,
+        toolsUsed: [...new Set(toolsUsed)],
+        iterations: steps.length,
+        reasoningTrace: steps.map((s) => `[${s.iteration}] ${s.thought}`).join("\n"),
+      },
+    };
+  }
+}
+
+/**
+ * Create a ReadableStream from ReAct streaming events for SSE responses
+ */
+export function createReActSSEStream(
+  generator: AsyncGenerator<ReActStreamEvent, void, unknown>
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        for await (const event of generator) {
+          const data = `data: ${JSON.stringify(event)}\n\n`;
+          controller.enqueue(encoder.encode(data));
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      } catch (error) {
+        const errorEvent: ReActStreamEvent = {
+          type: "error",
+          error: error instanceof Error ? error.message : String(error),
+        };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
+        controller.close();
+      }
+    },
+  });
+}
