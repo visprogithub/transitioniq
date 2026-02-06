@@ -140,6 +140,15 @@ export function useProgressStream(options?: UseProgressStreamOptions) {
   }, []);
 
   /**
+   * Reset progress state (clear steps and errors)
+   */
+  const reset = useCallback(() => {
+    setSteps([]);
+    setError(null);
+    setIsActive(false);
+  }, []);
+
+  /**
    * Cleanup on unmount
    */
   useEffect(() => {
@@ -156,5 +165,6 @@ export function useProgressStream(options?: UseProgressStreamOptions) {
     error,
     startStream,
     cancelStream,
+    reset,
   };
 }

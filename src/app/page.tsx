@@ -492,6 +492,8 @@ export default function DashboardPage() {
                     setJudgeEvaluation(null);
                     setJudgeError(null);
                   }
+                  // Clear progress steps
+                  progressStream.reset();
                 }}
               />}
 

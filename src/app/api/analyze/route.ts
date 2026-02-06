@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
-import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/fda-client";
+import { checkDrugInteractionsEnhanced, type DrugInteraction } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
@@ -145,12 +145,7 @@ export async function POST(request: NextRequest) {
     // Run data gathering in parallel with Opik tracing
     const [drugInteractionsResult, careGapsResult] = await Promise.all([
       traceDataSourceCall("FDA", patientId, async () => {
-        try {
-          return await checkDrugInteractions(patient.medications);
-        } catch (error) {
-          console.error("FDA check failed:", error);
-          return getKnownInteractionsForPatient(patient);
-        }
+        return await checkDrugInteractionsEnhanced(patient.medications);
       }),
       traceDataSourceCall("Guidelines", patientId, async () => {
         return evaluateCareGaps(patient);
@@ -257,63 +252,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/**
- * Fallback function to get known drug interactions when FDA API fails
- */
-function getKnownInteractionsForPatient(patient: Patient): DrugInteraction[] {
-  const interactions: DrugInteraction[] = [];
-  const medNames = patient.medications.map((m) => m.name.toLowerCase());
-
-  // Check for warfarin + aspirin
-  if (medNames.some((m) => m.includes("warfarin")) && medNames.some((m) => m.includes("aspirin"))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Aspirin",
-      severity: "major",
-      description: "Concurrent use increases bleeding risk significantly. Monitor INR closely and watch for signs of bleeding.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Check for warfarin + eliquis (dual anticoagulation)
-  if (medNames.some((m) => m.includes("warfarin")) && medNames.some((m) => m.includes("eliquis"))) {
-    interactions.push({
-      drug1: "Warfarin",
-      drug2: "Eliquis (Apixaban)",
-      severity: "major",
-      description: "Dual anticoagulation therapy significantly increases bleeding risk. Generally contraindicated unless specific clinical indication.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Check for ACE inhibitor + potassium
-  if ((medNames.some((m) => m.includes("lisinopril")) || medNames.some((m) => m.includes("enalapril"))) &&
-      medNames.some((m) => m.includes("potassium"))) {
-    interactions.push({
-      drug1: "ACE Inhibitor",
-      drug2: "Potassium Chloride",
-      severity: "moderate",
-      description: "ACE inhibitors can increase potassium levels. Combined with potassium supplements, risk of hyperkalemia increases.",
-      source: "Clinical Guidelines",
-    });
-  }
-
-  // Check for digoxin presence (common interaction concerns)
-  if (medNames.some((m) => m.includes("digoxin"))) {
-    if (medNames.some((m) => m.includes("furosemide"))) {
-      interactions.push({
-        drug1: "Digoxin",
-        drug2: "Furosemide",
-        severity: "moderate",
-        description: "Loop diuretics can cause hypokalemia, increasing digoxin toxicity risk. Monitor potassium levels.",
-        source: "Clinical Guidelines",
-      });
-    }
-  }
-
-  return interactions;
-}
-
+// Note: Drug interactions now use RxNorm API + FAERS enrichment (fda-client.ts)
 // Note: Medication cost estimation now uses the CMS client (cms-client.ts)
 // which provides real Medicare Part D pricing data via CMS Open Data APIs
 
@@ -343,19 +282,14 @@ async function handleStreamingAnalysis(
         return;
       }
 
-      // Step 1: Check drug interactions (FDA)
+      // Step 1: Check drug interactions (FDA with FAERS enrichment)
       const drugInteractions = await withProgress(
         emitStep,
         "fda",
-        "Checking drug interactions (FDA)",
+        "Checking drug interactions (FDA + FAERS)",
         "data_source",
         async () => {
-          try {
-            return await checkDrugInteractions(patient.medications);
-          } catch (error) {
-            console.error("FDA check failed:", error);
-            return getKnownInteractionsForPatient(patient);
-          }
+          return await checkDrugInteractionsEnhanced(patient.medications);
         }
       );
 
