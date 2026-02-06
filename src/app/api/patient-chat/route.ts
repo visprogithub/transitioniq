@@ -26,6 +26,7 @@ import {
   storeToolResult,
   buildContextForLLM,
 } from "@/lib/agents/memory";
+import { createProgressStream, withProgress } from "@/lib/utils/sse-helpers";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
@@ -503,6 +504,15 @@ export async function POST(request: NextRequest) {
   const blocked = applyRateLimit(request, "chat");
   if (blocked) return blocked;
 
+  const body = await request.json();
+  const { stream = false } = body;
+
+  // If streaming requested, use SSE
+  if (stream) {
+    return handleStreamingChat(request, body);
+  }
+
+  // Otherwise, use regular JSON response
   const opik = getOpikClient();
   const turnId = `turn-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
@@ -521,9 +531,9 @@ export async function POST(request: NextRequest) {
   });
 
   try {
-    const body: PatientChatRequest = await request.json();
-    const { message, conversationHistory, analysis } = body;
-    patientId = body.patientId;
+    const chatRequest: PatientChatRequest = body;
+    const { message, conversationHistory, analysis } = chatRequest;
+    patientId = chatRequest.patientId;
 
     // Now that we have patientId, update trace with thread grouping
     const threadId = `chat-${patientId}`;
@@ -991,4 +1001,144 @@ Coach:`;
       { status: 500 }
     );
   }
+}
+
+/**
+ * Handle streaming patient chat with SSE progress updates for tool calls
+ */
+async function handleStreamingChat(
+  request: NextRequest,
+  chatRequest: PatientChatRequest & { stream?: boolean }
+) {
+  const { stream: sseStream, emitStep, emitResult, emitError, complete } = createProgressStream();
+  const { patientId, message, conversationHistory, analysis } = chatRequest;
+
+  // Start async work that emits progress events
+  (async () => {
+    try {
+      // Get patient
+      const patient = getPatient(patientId);
+      if (!patient) {
+        emitError("Patient not found");
+        complete();
+        return;
+      }
+
+      // Check if message is on-topic
+      if (!isOnTopic(message)) {
+        emitResult({
+          response: getOffTopicResponse(),
+          toolsUsed: [],
+        });
+        complete();
+        return;
+      }
+
+      // Detect which tool to use
+      const toolToUse = detectRequiredTool(message);
+      const toolsUsed: Array<{ name: string; result: unknown }> = [];
+
+      if (toolToUse) {
+        // Emit progress for tool execution
+        const toolResult = await withProgress(
+          emitStep,
+          toolToUse.name,
+          getToolProgressLabel(toolToUse.name),
+          "tool",
+          async () => {
+            return await executePatientCoachTool(
+              toolToUse.name,
+              toolToUse.arguments,
+              patient,
+              analysis || undefined
+            );
+          }
+        );
+
+        toolsUsed.push({
+          name: toolToUse.name,
+          result: toolResult.success ? toolResult.data : { error: toolResult.error },
+        });
+      }
+
+      // Emit progress for LLM response generation
+      const response = await withProgress(
+        emitStep,
+        "llm-response",
+        "Generating response",
+        "llm",
+        async () => {
+          // Build system prompt
+          const systemPrompt = buildSystemPrompt(patient, analysis || null);
+
+          // Build conversation context
+          const messages = [
+            { role: "system" as const, content: systemPrompt },
+            ...conversationHistory.slice(-LIMITS.MAX_HISTORY_MESSAGES),
+            { role: "user" as const, content: message },
+          ];
+
+          // Add tool results if any
+          if (toolsUsed.length > 0) {
+            const toolContext = toolsUsed
+              .map((t) => `[Tool: ${t.name}]\n${JSON.stringify(t.result, null, 2)}`)
+              .join("\n\n");
+            messages.push({
+              role: "system" as const,
+              content: `Tool results:\n${toolContext}\n\nIncorporate this information naturally into your response.`,
+            });
+          }
+
+          const provider = createLLMProvider();
+          const llmResponse = await provider.generate(
+            messages.map((m) => m.content).join("\n\n"),
+            {
+              spanName: "patient-chat-response",
+              metadata: { patientId, turn: conversationHistory.length + 1 },
+            }
+          );
+
+          return llmResponse.content;
+        }
+      );
+
+      // Send final result
+      emitResult({
+        response,
+        toolsUsed,
+        conversationId: patientId,
+        turnNumber: Math.floor(conversationHistory.length / 2) + 1,
+      });
+
+      complete();
+    } catch (error) {
+      console.error("[Patient Chat Streaming] Error:", error);
+      emitError(error instanceof Error ? error.message : "Chat failed");
+      complete();
+    }
+  })();
+
+  // Return SSE stream immediately
+  return new Response(sseStream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    },
+  });
+}
+
+/**
+ * Get user-friendly label for tool progress
+ */
+function getToolProgressLabel(toolName: string): string {
+  const labels: Record<string, string> = {
+    lookupMedication: "Looking up medication information",
+    checkSymptom: "Checking symptom severity",
+    explainMedicalTerm: "Explaining medical term",
+    getFollowUpGuidance: "Getting follow-up guidance",
+    getDietaryGuidance: "Looking up dietary recommendations",
+    getActivityGuidance: "Checking activity restrictions",
+  };
+  return labels[toolName] || `Executing ${toolName}`;
 }
