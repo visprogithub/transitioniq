@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
-import { checkDrugInteractionsEnhanced, type DrugInteraction } from "@/lib/integrations/fda-client";
+import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
@@ -145,7 +145,7 @@ export async function POST(request: NextRequest) {
     // Run data gathering in parallel with Opik tracing
     const [drugInteractionsResult, careGapsResult] = await Promise.all([
       traceDataSourceCall("FDA", patientId, async () => {
-        return await checkDrugInteractionsEnhanced(patient.medications);
+        return await checkDrugInteractions(patient.medications);
       }),
       traceDataSourceCall("Guidelines", patientId, async () => {
         return evaluateCareGaps(patient);
@@ -252,7 +252,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Note: Drug interactions now use RxNorm API + FAERS enrichment (fda-client.ts)
+// Note: Drug interactions now use OpenFDA Drug Label API (fda-client.ts)
 // Note: Medication cost estimation now uses the CMS client (cms-client.ts)
 // which provides real Medicare Part D pricing data via CMS Open Data APIs
 
@@ -282,14 +282,14 @@ async function handleStreamingAnalysis(
         return;
       }
 
-      // Step 1: Check drug interactions (FDA with FAERS enrichment)
+      // Step 1: Check drug interactions (FDA Drug Labels)
       const drugInteractions = await withProgress(
         emitStep,
         "fda",
-        "Checking drug interactions (FDA + FAERS)",
+        "Checking drug interactions (FDA)",
         "data_source",
         async () => {
-          return await checkDrugInteractionsEnhanced(patient.medications);
+          return await checkDrugInteractions(patient.medications);
         }
       );
 
