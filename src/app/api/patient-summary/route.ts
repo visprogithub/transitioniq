@@ -211,9 +211,24 @@ function sanitizeSummary(
 
   // Ensure arrays exist and have reasonable lengths
   summary.whatYouNeedToKnow = (summary.whatYouNeedToKnow || []).slice(0, 4);
-  summary.medicationReminders = (summary.medicationReminders || []).slice(0, 15);
   summary.questionsForDoctor = (summary.questionsForDoctor || []).slice(0, 5);
   summary.nextSteps = (summary.nextSteps || []).slice(0, 6);
+
+  // Backfill any medications the LLM missed — every patient medication must appear
+  const llmMedNames = new Set(
+    (summary.medicationReminders || []).map((m) => m.medication.toLowerCase())
+  );
+  const importantDrugs = ["warfarin", "insulin", "eliquis", "metformin", "digoxin", "lithium"];
+  for (const med of patient.medications) {
+    if (!llmMedNames.has(med.name.toLowerCase())) {
+      summary.medicationReminders.push({
+        medication: med.name,
+        instruction: `Take ${med.dose} ${med.frequency}`,
+        important: importantDrugs.some((d) => med.name.toLowerCase().includes(d)),
+      });
+    }
+  }
+  summary.medicationReminders = summary.medicationReminders.slice(0, 20);
 
   // Ensure all nextSteps have completed: false
   summary.nextSteps = summary.nextSteps.map((step) => ({
