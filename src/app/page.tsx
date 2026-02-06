@@ -14,6 +14,8 @@ import { DischargePlan } from "@/components/DischargePlan";
 import { Tooltip } from "@/components/Tooltip";
 import { JudgeScoreBadge, type JudgeEvaluation } from "@/components/JudgeScoreBadge";
 import { SimpleProgressSteps, ANALYSIS_STEPS, PLAN_GENERATION_STEPS } from "@/components/SimpleProgressSteps";
+import { ProgressSteps } from "@/components/ProgressSteps";
+import { useProgressStream } from "@/hooks/useProgressStream";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor, ClinicianEdits } from "@/lib/types/analysis";
 
@@ -161,6 +163,39 @@ export default function DashboardPage() {
     dismissedItemKeys: [],
   });
 
+  // Progress streaming hook for real-time analysis updates
+  const progressStream = useProgressStream({
+    onComplete: (result) => {
+      const data = result as AnalysisWithModel;
+      setAnalysis(data);
+      setPatientSummary(null);
+
+      // Auto-expand high-severity risk factors
+      const highRiskIds = new Set<string>(
+        data.riskFactors
+          ?.filter((rf: RiskFactor) => rf.severity === "high")
+          .map((rf: RiskFactor) => rf.id) || []
+      );
+      setExpandedRiskFactors(highRiskIds);
+
+      // Cache the analysis
+      if (patient) {
+        cacheAnalysis(patient.id, currentModel, data);
+      }
+
+      setIsAnalyzing(false);
+
+      // Run judge evaluation
+      if (patient) {
+        runJudgeEvaluation(patient.id, data);
+      }
+    },
+    onError: (error) => {
+      setError(error);
+      setIsAnalyzing(false);
+    },
+  });
+
   // Initialize session cookie on first visit (for server-side rate limiting)
   useEffect(() => {
     if (!document.cookie.includes("tiq_session=")) {
@@ -252,57 +287,12 @@ export default function DashboardPage() {
       return;
     }
 
-    try {
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patientId: patient.id, modelId: currentModel || undefined }),
-      });
-
-      const data = await response.json();
-
-      // Check for demo rate limit (429 without suggestModelSwitch)
-      if (response.status === 429 && !data.suggestModelSwitch) {
-        throw new Error(data.message || "Demo rate limit reached. Please try again in a few minutes.");
-      }
-
-      // Check for model provider rate limit / usage limit error
-      if (response.status === 429 && data.suggestModelSwitch) {
-        setModelLimitError({
-          modelId: data.modelId,
-          provider: data.provider,
-          availableModels: data.availableModels || [],
-        });
-        setIsAnalyzing(false);
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(data.error || "Analysis failed");
-      }
-
-      // Cache the fresh analysis in sessionStorage
-      cacheAnalysis(patient.id, currentModel, data);
-
-      setAnalysis(data);
-      // Clear cached patient summary since analysis changed
-      setPatientSummary(null);
-
-      // Auto-expand high-severity risk factors
-      const highRiskIds = new Set<string>(
-        data.riskFactors
-          .filter((rf: RiskFactor) => rf.severity === "high")
-          .map((rf: RiskFactor) => rf.id)
-      );
-      setExpandedRiskFactors(highRiskIds);
-
-      // Auto-trigger LLM-as-Judge evaluation (in background)
-      runJudgeEvaluation(patient.id, data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Analysis failed");
-    } finally {
-      setIsAnalyzing(false);
-    }
+    // Start SSE stream for real-time progress updates
+    progressStream.startStream("/api/analyze", {
+      patientId: patient.id,
+      modelId: currentModel || undefined,
+      stream: true,
+    });
   }
 
   // Run LLM-as-Judge evaluation on the analysis
@@ -902,8 +892,13 @@ export default function DashboardPage() {
                     </div>
                   )}
 
-                  {isAnalyzing && (
-                    <SimpleProgressSteps steps={ANALYSIS_STEPS} isActive={isAnalyzing} />
+                  {(isAnalyzing || progressStream.steps.length > 0) && (
+                    <ProgressSteps
+                      steps={progressStream.steps}
+                      isActive={progressStream.isActive}
+                      error={progressStream.error}
+                      title="Analyzing Patient"
+                    />
                   )}
 
                   {analysis && (

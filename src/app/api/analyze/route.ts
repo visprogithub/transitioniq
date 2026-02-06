@@ -17,6 +17,15 @@ export async function POST(request: NextRequest) {
   const blocked = applyRateLimit(request, "analyze");
   if (blocked) return blocked;
 
+  const body = await request.json();
+  const { patientId, useAgent = true, sessionId, modelId, stream = false } = body;
+
+  // If streaming requested, use SSE
+  if (stream) {
+    return handleStreamingAnalysis(request, patientId, modelId);
+  }
+
+  // Otherwise, use regular JSON response
   const opik = getOpikClient();
   const trace = opik?.trace({
     name: "discharge-analysis",
@@ -27,8 +36,6 @@ export async function POST(request: NextRequest) {
   });
 
   try {
-    const body = await request.json();
-    const { patientId, useAgent = true, sessionId, modelId } = body;
 
     // Pin the model for this request if explicitly provided
     pinModelForRequest(modelId, "Analyze");
@@ -309,4 +316,123 @@ function getKnownInteractionsForPatient(patient: Patient): DrugInteraction[] {
 
 // Note: Medication cost estimation now uses the CMS client (cms-client.ts)
 // which provides real Medicare Part D pricing data via CMS Open Data APIs
+
+/**
+ * Handle streaming analysis with SSE progress updates
+ */
+async function handleStreamingAnalysis(
+  request: NextRequest,
+  patientId: string,
+  modelId?: string
+) {
+  const { stream, emitStep, emitResult, emitError, complete } = createProgressStream();
+
+  // Start async work that emits progress events
+  (async () => {
+    try {
+      // Pin model if provided
+      if (modelId) {
+        pinModelForRequest(modelId, "Analyze-Stream");
+      }
+
+      // Get patient
+      const patient = getPatient(patientId);
+      if (!patient) {
+        emitError("Patient not found");
+        complete();
+        return;
+      }
+
+      // Step 1: Check drug interactions (FDA)
+      const drugInteractions = await withProgress(
+        emitStep,
+        "fda",
+        "Checking drug interactions (FDA)",
+        "data_source",
+        async () => {
+          try {
+            return await checkDrugInteractions(patient.medications);
+          } catch (error) {
+            console.error("FDA check failed:", error);
+            return getKnownInteractionsForPatient(patient);
+          }
+        }
+      );
+
+      // Step 2: Evaluate care gaps
+      const careGaps = await withProgress(
+        emitStep,
+        "guidelines",
+        "Evaluating care gaps",
+        "data_source",
+        async () => {
+          return evaluateCareGaps(patient);
+        }
+      );
+
+      const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
+
+      // Step 3: Estimate medication costs (CMS)
+      const costEstimates = await withProgress(
+        emitStep,
+        "cms",
+        "Estimating medication costs (CMS)",
+        "data_source",
+        async () => {
+          const estimates = await estimateCMSMedicationCosts(patient.medications);
+          return estimates.map((e) => ({
+            medication: e.drugName,
+            monthlyOOP: e.estimatedMonthlyOOP,
+            covered: e.coveredByMedicarePartD,
+          }));
+        }
+      );
+
+      // Step 4: Run LLM analysis
+      const analysis = await withProgress(
+        emitStep,
+        "llm",
+        "Analyzing discharge readiness",
+        "llm",
+        async () => {
+          return analyzeDischargeReadiness(
+            patient,
+            drugInteractions,
+            unmetCareGaps.map((g) => ({
+              guideline: g.guideline,
+              recommendation: g.recommendation,
+              grade: g.grade,
+              status: g.status,
+            })),
+            costEstimates
+          );
+        }
+      );
+
+      // Send final result
+      emitResult({
+        ...analysis,
+        modelUsed: analysis.modelUsed || getActiveModelId(),
+        modelRequested: getActiveModelId(),
+        agentUsed: false,
+      });
+
+      // Close stream
+      complete();
+    } catch (error) {
+      console.error("Streaming analysis error:", error);
+      emitError(error instanceof Error ? error.message : "Analysis failed");
+      complete();
+    }
+  })();
+
+  // Return SSE stream immediately
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    },
+  });
+}
 
