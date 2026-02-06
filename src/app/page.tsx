@@ -13,6 +13,7 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { DischargePlan } from "@/components/DischargePlan";
 import { Tooltip } from "@/components/Tooltip";
 import { JudgeScoreBadge, type JudgeEvaluation } from "@/components/JudgeScoreBadge";
+import { SimpleProgressSteps, ANALYSIS_STEPS, PLAN_GENERATION_STEPS } from "@/components/SimpleProgressSteps";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor, ClinicianEdits } from "@/lib/types/analysis";
 
@@ -886,14 +887,9 @@ export default function DashboardPage() {
                   )}
 
                   {isGeneratingPlan && (
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="mt-6 text-center"
-                    >
-                      <RefreshCw className="w-6 h-6 text-emerald-500 animate-spin mx-auto mb-2" />
-                      <p className="text-sm text-gray-500">Generating transition plan...</p>
-                    </motion.div>
+                    <div className="mt-6">
+                      <SimpleProgressSteps steps={PLAN_GENERATION_STEPS} isActive={isGeneratingPlan} />
+                    </div>
                   )}
                 </div>
 
@@ -908,11 +904,7 @@ export default function DashboardPage() {
                   )}
 
                   {isAnalyzing && (
-                    <div className="space-y-3">
-                      {[1, 2, 3].map((i) => (
-                        <div key={i} className="h-20 bg-gray-100 rounded-lg animate-pulse" />
-                      ))}
-                    </div>
+                    <SimpleProgressSteps steps={ANALYSIS_STEPS} isActive={isAnalyzing} />
                   )}
 
                   {analysis && (
