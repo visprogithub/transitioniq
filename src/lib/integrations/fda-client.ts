@@ -136,15 +136,20 @@ export async function checkDrugInteractions(
   const interactions: DrugInteraction[] = [];
   const medNames = medications.map((m) => extractGenericName(m.name).toLowerCase());
 
+  console.log(`[FDA] Checking interactions for ${medications.length} medications:`, medNames);
+
   // Fetch FDA drug labels for each medication to check their interaction sections
   const interactionPromises = medications.map(async (med) => {
     const genericName = extractGenericName(med.name);
+    console.log(`[FDA] Fetching label for ${genericName} to check against:`, medNames.filter(m => m !== genericName.toLowerCase()));
     return fetchFDADrugInteractions(genericName, medNames);
   });
 
   try {
     const results = await Promise.all(interactionPromises);
+    console.log(`[FDA] Got ${results.length} label results`);
     for (const result of results) {
+      console.log(`[FDA] Processing ${result.length} interactions from one label`);
       for (const interaction of result) {
         // Avoid duplicates (same pair may be found from both drug labels)
         const exists = interactions.some(
@@ -184,6 +189,9 @@ export async function checkDrugInteractions(
       }
     }
   }
+
+  console.log(`[FDA] Total interactions found: ${interactions.length}`);
+  interactions.forEach((i) => console.log(`[FDA]   - ${i.drug1} + ${i.drug2}: ${i.severity}`));
 
   setCache(interactionsCache, cacheKey, interactions, CACHE_TTL.INTERACTIONS);
   return interactions;
