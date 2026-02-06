@@ -321,27 +321,18 @@ async function handleStreamingAnalysis(
         }
       );
 
-      // Step 3: Check for drug recalls (for high-risk meds)
-      const highRiskMeds = patient.medications.filter(m =>
-        m.name.toLowerCase().includes("warfarin") ||
-        m.name.toLowerCase().includes("insulin") ||
-        m.name.toLowerCase().includes("digoxin")
+      // Step 3: Check for drug recalls (check all medications)
+      const recalls = await withProgress(
+        emitStep,
+        "fda-recalls",
+        `Checking FDA recalls for ${patient.medications.length} medications`,
+        "data_source",
+        async () => {
+          const recallPromises = patient.medications.map(m => checkDrugRecalls(m.name));
+          const results = await Promise.all(recallPromises);
+          return results.flat();
+        }
       );
-
-      let recalls: Awaited<ReturnType<typeof checkDrugRecalls>>[] = [];
-      if (highRiskMeds.length > 0) {
-        recalls = await withProgress(
-          emitStep,
-          "fda-recalls",
-          "Checking FDA recalls for high-risk medications",
-          "data_source",
-          async () => {
-            const recallPromises = highRiskMeds.map(m => checkDrugRecalls(m.name));
-            const results = await Promise.all(recallPromises);
-            return results.flat();
-          }
-        );
-      }
 
       // Step 4: Evaluate care gaps
       const careGaps = await withProgress(
