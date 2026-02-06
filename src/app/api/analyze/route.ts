@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/fda-client";
-import { checkMultipleDrugInteractions as getKnownInteractions } from "@/lib/knowledge-base";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
@@ -133,134 +132,9 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Check if streaming is requested
-    const url = new URL(request.url);
-    const shouldStream = url.searchParams.get("stream") === "true";
-
     // Fallback: Direct LLM implementation (single-turn)
     console.log("[Analyze] Using direct LLM (single-turn)");
 
-    // REQUIRED: Check if any LLM API key is configured
-    const hasLLMKey = process.env.GEMINI_API_KEY ||
-                      process.env.OPENAI_API_KEY ||
-                      process.env.ANTHROPIC_API_KEY ||
-                      process.env.HF_API_KEY;
-    if (!hasLLMKey) {
-      return NextResponse.json(
-        { error: "No LLM API key configured. Set GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or HF_API_KEY." },
-        { status: 500 }
-      );
-    }
-
-    // STREAMING PATH: Emit progress events
-    if (shouldStream) {
-      const stream = createProgressStream(async (emitStep, emitResult, emitError) => {
-        try {
-          // Step 1: Check drug interactions
-          const drugInteractions = await withProgress(
-            emitStep,
-            "drug-interactions",
-            "Checking drug interactions",
-            "data_source",
-            async () => {
-              const result = await traceDataSourceCall("FDA", patientId, async () => {
-                try {
-                  return await checkDrugInteractions(patient.medications);
-                } catch (error) {
-                  console.error("FDA check failed:", error);
-                  return getKnownInteractions(patient.medications.map(m => m.name));
-                }
-              });
-              return result.result;
-            },
-            `FDA RxNorm API • ${patient.medications.length} medications`
-          );
-
-          // Step 2: Evaluate care gaps
-          const careGaps = await withProgress(
-            emitStep,
-            "care-gaps",
-            "Evaluating care gaps",
-            "data_source",
-            async () => {
-              const result = await traceDataSourceCall("Guidelines", patientId, async () => {
-                return evaluateCareGaps(patient);
-              });
-              return result.result;
-            },
-            "Clinical guidelines"
-          );
-
-          const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
-
-          // Step 3: Estimate medication costs
-          const costEstimates = await withProgress(
-            emitStep,
-            "medication-costs",
-            "Estimating medication costs",
-            "data_source",
-            async () => {
-              const result = await traceDataSourceCall("CMS", patientId, async () => {
-                const estimates = await estimateCMSMedicationCosts(patient.medications);
-                return estimates.map((e) => ({
-                  medication: e.drugName,
-                  monthlyOOP: e.estimatedMonthlyOOP,
-                  covered: e.coveredByMedicarePartD,
-                }));
-              });
-              return result.result;
-            },
-            "CMS Medicare pricing"
-          );
-
-          // Step 4: LLM analysis
-          const analysis = await withProgress(
-            emitStep,
-            "llm-analysis",
-            "Analyzing discharge readiness",
-            "llm",
-            async () => {
-              return await analyzeDischargeReadiness(
-                patient,
-                drugInteractions,
-                unmetCareGaps.map((g) => ({
-                  guideline: g.guideline,
-                  recommendation: g.recommendation,
-                  grade: g.grade,
-                  status: g.status,
-                })),
-                costEstimates
-              );
-            },
-            `${getActiveModelId()}`
-          );
-
-          // Emit final result
-          emitResult({
-            ...analysis,
-            modelUsed: analysis.modelUsed || getActiveModelId(),
-            modelRequested: getActiveModelId(),
-            agentUsed: false,
-            agentFallbackUsed: agentFallbackOccurred,
-            agentFallbackReason: agentFallbackError,
-          });
-        } catch (error) {
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          emitError(errorMsg);
-          throw error; // Re-throw to let createProgressStream handle cleanup
-        }
-      });
-
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
-    }
-
-    // NON-STREAMING PATH: Original behavior
     // Run data gathering in parallel with Opik tracing
     const [drugInteractionsResult, careGapsResult] = await Promise.all([
       traceDataSourceCall("FDA", patientId, async () => {
@@ -268,7 +142,7 @@ export async function POST(request: NextRequest) {
           return await checkDrugInteractions(patient.medications);
         } catch (error) {
           console.error("FDA check failed:", error);
-          return getKnownInteractions(patient.medications.map(m => m.name));
+          return getKnownInteractionsForPatient(patient);
         }
       }),
       traceDataSourceCall("Guidelines", patientId, async () => {
@@ -292,6 +166,19 @@ export async function POST(request: NextRequest) {
       }));
     });
     const costEstimates = costEstimatesResult.result;
+
+    // REQUIRED: Use real LLM for analysis - no fallback
+    // Check if any LLM API key is configured (supports multiple providers)
+    const hasLLMKey = process.env.GEMINI_API_KEY ||
+                      process.env.OPENAI_API_KEY ||
+                      process.env.ANTHROPIC_API_KEY ||
+                      process.env.HF_API_KEY;
+    if (!hasLLMKey) {
+      return NextResponse.json(
+        { error: "No LLM API key configured. Set GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or HF_API_KEY." },
+        { status: 500 }
+      );
+    }
 
     // Run LLM analysis (uses the active model via LLMProvider)
     const analysis = await analyzeDischargeReadiness(

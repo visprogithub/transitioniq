@@ -4,8 +4,6 @@ import { generateDischargePlan } from "@/lib/integrations/analysis";
 import { getOpikClient, traceAnalysis, traceError, flushTraces } from "@/lib/integrations/opik";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import { pinModelForRequest, logErrorTrace } from "@/lib/utils/api-helpers";
-import { createProgressStream, withProgress } from "@/lib/utils/sse-helpers";
-import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 export async function POST(request: NextRequest) {
@@ -41,40 +39,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Patient not found" }, { status: 404 });
     }
 
-    // Check if streaming is requested
-    const url = new URL(request.url);
-    const shouldStream = url.searchParams.get("stream") === "true";
-
-    // STREAMING PATH: Emit progress events
-    if (shouldStream && process.env.GEMINI_API_KEY) {
-      const stream = createProgressStream(async (emitStep, emitResult, emitError) => {
-        const plan = await withProgress(
-          emitStep,
-          "generate-plan",
-          "Generating discharge checklist",
-          "llm",
-          async () => {
-            const planResult = await traceAnalysis("generate-plan", { patientId, category: "plan_generation" }, async () => {
-              return await generateDischargePlan(patient, analysis);
-            });
-            return planResult.result;
-          },
-          `${getActiveModelId()} • ${analysis.riskFactors.length} risk factors`
-        );
-
-        emitResult({ plan, tracingId: trace?.traceId });
-      });
-
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
-    }
-
-    // NON-STREAMING PATH: Original behavior
     // Try Gemini if API key is available, fall back to computed plan
     if (process.env.GEMINI_API_KEY) {
       try {
