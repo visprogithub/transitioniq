@@ -13,6 +13,8 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { DischargePlan } from "@/components/DischargePlan";
 import { Tooltip } from "@/components/Tooltip";
 import { JudgeScoreBadge, type JudgeEvaluation } from "@/components/JudgeScoreBadge";
+import { ProgressSteps, type ProgressStep } from "@/components/ProgressSteps";
+import { useProgressStream } from "@/hooks/useProgressStream";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis, RiskFactor, ClinicianEdits } from "@/lib/types/analysis";
 
@@ -160,6 +162,42 @@ export default function DashboardPage() {
     dismissedItemKeys: [],
   });
 
+  // Progress streams for real-time API operation visibility
+  const analysisProgress = useProgressStream({
+    onComplete: (result: any) => {
+      // Cache the fresh analysis in sessionStorage
+      if (patient) {
+        cacheAnalysis(patient.id, currentModel, result);
+      }
+
+      setAnalysis(result);
+      setPatientSummary(null); // Clear cached summary
+      // Auto-expand high-severity risk factors
+      const highRiskIds = new Set<string>(
+        result.riskFactors?.filter((rf: RiskFactor) => rf.severity === "high").map((rf: RiskFactor) => rf.id) || []
+      );
+      setExpandedRiskFactors(highRiskIds);
+      setIsAnalyzing(false);
+      // Trigger judge evaluation
+      runJudgeEvaluation(patient?.id || "", result);
+    },
+    onError: (error: string) => {
+      setError(error);
+      setIsAnalyzing(false);
+    },
+  });
+
+  const planProgress = useProgressStream({
+    onComplete: (result: any) => {
+      setDischargePlan(result.plan);
+      setIsGeneratingPlan(false);
+    },
+    onError: (error: string) => {
+      setError(error);
+      setIsGeneratingPlan(false);
+    },
+  });
+
   // Initialize session cookie on first visit (for server-side rate limiting)
   useEffect(() => {
     if (!document.cookie.includes("tiq_session=")) {
@@ -252,57 +290,11 @@ export default function DashboardPage() {
       return;
     }
 
-    try {
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patientId: patient.id, modelId: currentModel || undefined }),
-      });
-
-      const data = await response.json();
-
-      // Check for demo rate limit (429 without suggestModelSwitch)
-      if (response.status === 429 && !data.suggestModelSwitch) {
-        throw new Error(data.message || "Demo rate limit reached. Please try again in a few minutes.");
-      }
-
-      // Check for model provider rate limit / usage limit error
-      if (response.status === 429 && data.suggestModelSwitch) {
-        setModelLimitError({
-          modelId: data.modelId,
-          provider: data.provider,
-          availableModels: data.availableModels || [],
-        });
-        setIsAnalyzing(false);
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(data.error || "Analysis failed");
-      }
-
-      // Cache the fresh analysis in sessionStorage
-      cacheAnalysis(patient.id, currentModel, data);
-
-      setAnalysis(data);
-      // Clear cached patient summary since analysis changed
-      setPatientSummary(null);
-
-      // Auto-expand high-severity risk factors
-      const highRiskIds = new Set<string>(
-        data.riskFactors
-          .filter((rf: RiskFactor) => rf.severity === "high")
-          .map((rf: RiskFactor) => rf.id)
-      );
-      setExpandedRiskFactors(highRiskIds);
-
-      // Auto-trigger LLM-as-Judge evaluation (in background)
-      runJudgeEvaluation(patient.id, data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Analysis failed");
-    } finally {
-      setIsAnalyzing(false);
-    }
+    // Use streaming API to show real-time progress
+    analysisProgress.startStream("/api/analyze?stream=true", {
+      patientId: patient.id,
+      modelId: currentModel || undefined,
+    });
   }
 
   // Run LLM-as-Judge evaluation on the analysis
@@ -343,30 +335,12 @@ export default function DashboardPage() {
     setError(null);
     setPlanRateLimitReset(null);
 
-    try {
-      const response = await fetch("/api/generate-plan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patientId: patient.id, analysis, modelId: currentModel || undefined }),
-      });
-
-      const data = await response.json();
-
-      // Demo rate limit — show amber countdown instead of red error
-      if (response.status === 429) {
-        const resetTime = Date.now() + (data.retryAfterMs || 60000);
-        setPlanRateLimitReset(resetTime);
-        setIsGeneratingPlan(false);
-        return;
-      }
-
-      if (!response.ok) throw new Error(data.error || "Plan generation failed");
-      setDischargePlan(data.plan);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Plan generation failed");
-    } finally {
-      setIsGeneratingPlan(false);
-    }
+    // Use streaming API to show real-time progress
+    planProgress.startStream("/api/generate-plan?stream=true", {
+      patientId: patient.id,
+      analysis,
+      modelId: currentModel || undefined,
+    });
   }
 
   // Clinician edit handlers
@@ -886,14 +860,14 @@ export default function DashboardPage() {
                   )}
 
                   {isGeneratingPlan && (
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="mt-6 text-center"
-                    >
-                      <RefreshCw className="w-6 h-6 text-emerald-500 animate-spin mx-auto mb-2" />
-                      <p className="text-sm text-gray-500">Generating transition plan...</p>
-                    </motion.div>
+                    <div className="mt-6">
+                      <ProgressSteps
+                        steps={planProgress.steps}
+                        isActive={planProgress.isActive}
+                        error={planProgress.error}
+                        title="Generating Discharge Plan"
+                      />
+                    </div>
                   )}
                 </div>
 
@@ -908,11 +882,12 @@ export default function DashboardPage() {
                   )}
 
                   {isAnalyzing && (
-                    <div className="space-y-3">
-                      {[1, 2, 3].map((i) => (
-                        <div key={i} className="h-20 bg-gray-100 rounded-lg animate-pulse" />
-                      ))}
-                    </div>
+                    <ProgressSteps
+                      steps={analysisProgress.steps}
+                      isActive={analysisProgress.isActive}
+                      error={analysisProgress.error}
+                      title="Analyzing Patient"
+                    />
                   )}
 
                   {analysis && (
