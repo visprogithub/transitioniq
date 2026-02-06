@@ -244,7 +244,7 @@ Copy `.env.example` to `.env.local` and fill in your keys:
 ```bash
 cp .env.example .env.local
 ```
-
+ 
 ### Required
 
 | Variable | Where to get it | What it does |
