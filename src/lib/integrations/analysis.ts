@@ -101,7 +101,9 @@ export async function analyzeDischargeReadiness(
   patient: Patient,
   drugInteractions: DrugInteraction[],
   careGaps: CareGap[],
-  costEstimates: CostEstimate[]
+  costEstimates: CostEstimate[],
+  boxedWarnings?: Array<{ drug: string; warning: string }>,
+  recalls?: Array<{ drugName: string; reason: string; classification: string }>
 ): Promise<DischargeAnalysis> {
   // Note: API key validation is handled by LLMProvider for the active model
 
@@ -113,6 +115,21 @@ export async function analyzeDischargeReadiness(
   // Get prompt from Opik Prompt Library
   const { template, commit, fromOpik } = await getDischargeAnalysisPrompt();
 
+  // Build FDA safety warnings section
+  let fdaSafetySection = "";
+  if (boxedWarnings && boxedWarnings.length > 0) {
+    fdaSafetySection += "\n\n**FDA BLACK BOX WARNINGS (Most Serious):**\n";
+    fdaSafetySection += boxedWarnings
+      .map((w) => `  - ${w.drug}: ${w.warning.substring(0, 200)}...`)
+      .join("\n");
+  }
+  if (recalls && recalls.length > 0) {
+    fdaSafetySection += "\n\n**FDA RECALLS:**\n";
+    fdaSafetySection += recalls
+      .map((r) => `  - ${r.drugName} (${r.classification}): ${r.reason.substring(0, 150)}...`)
+      .join("\n");
+  }
+
   // Format prompt with patient data
   const prompt = formatDischargePrompt(template, {
     patient_name: patient.name,
@@ -123,7 +140,7 @@ export async function analyzeDischargeReadiness(
     medication_count: patient.medications.length,
     medications: patient.medications
       .map((m) => `  - ${m.name} ${m.dose} ${m.frequency}`)
-      .join("\n"),
+      .join("\n") + fdaSafetySection,
     allergies: patient.allergies.length > 0 ? patient.allergies.join(", ") : "None documented",
     drug_interactions:
       drugInteractions.length > 0

@@ -197,7 +197,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Run LLM analysis (uses the active model via LLMProvider)
+    // Run LLM analysis with all FDA safety data (uses the active model via LLMProvider)
     const analysis = await analyzeDischargeReadiness(
       patient,
       drugInteractions,
@@ -207,7 +207,9 @@ export async function POST(request: NextRequest) {
         grade: g.grade,
         status: g.status,
       })),
-      costEstimates
+      costEstimates,
+      boxedWarnings,
+      undefined // No recalls in non-streaming path for now
     );
 
     // End route-level trace on success (direct LLM path)
@@ -379,7 +381,7 @@ async function handleStreamingAnalysis(
         }
       );
 
-      // Step 6: Run LLM analysis
+      // Step 6: Run LLM analysis with all FDA safety data
       const analysis = await withProgress(
         emitStep,
         "llm",
@@ -395,7 +397,9 @@ async function handleStreamingAnalysis(
               grade: g.grade,
               status: g.status,
             })),
-            costEstimates
+            costEstimates,
+            boxedWarnings,
+            recalls
           );
         }
       );
