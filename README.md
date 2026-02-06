@@ -8,7 +8,7 @@ This project is not open source. Clinical decision-support tools require rigorou
 
 ## Overview
 
-TransitionIQ is an AI-powered discharge readiness assessment tool that helps healthcare providers evaluate whether patients are safe to leave the hospital. It uses a multi-agent orchestrator that fuses data from multiple clinical sources, reasons over them with LLMs, and presents both a clinician-facing assessment and a patient-friendly preparation guide.
+TransitionIQ is an AI-powered discharge readiness assessment tool that helps healthcare providers evaluate whether patients are safe to leave the hospital. It uses a **deterministic clinical pipeline** that gathers structured data from multiple clinical sources (FDA, CMS, clinical guidelines), then feeds that complete context into an LLM for synthesis and scoring. The system also provides a patient-facing Recovery Coach — a tool-augmented conversational AI that helps patients understand their medications, symptoms, and discharge instructions.
 
 ### Data Sources
 
@@ -38,16 +38,16 @@ This is a hackathon prototype built under time, cost, and infrastructure constra
 - **Patient data** — Hardcoded demo patients with synthetic FHIR-like records. Production would integrate with real FHIR servers (Epic, Cerner). The FDA and CMS data source clients make real API calls (openFDA, RxNorm, data.cms.gov), but CMS uses a static tier lookup for common drugs before hitting the API. Clinical guidelines are coded implementations of real published standards (ACC/AHA, ADA, GOLD, USPSTF) — accurate rules, but not fetched from a live guideline API.
 - **Authentication** — There is none. No login, no RBAC, no HIPAA-compliant access controls. The cookie-based session is purely for rate limit tracking.
 - **Model selection** — Constrained to models available on free or cheap tiers (GPT-4o Mini, HuggingFace Qwen3, Gemini Flash). Model routing is manual (user picks from a dropdown). Production would likely use a single validated model with proper eval benchmarks, or an intelligent router.
-- **Agent architecture** — Uses a custom prompt-chaining ReAct implementation where the LLM outputs JSON with `thought`, `action`, and `final_answer` fields. This **explicit reasoning trace is intentional for observability** — seeing the agent's thought process is valuable for clinical audit trails. However, the JSON-based tool calling is a workaround for older/cheaper models that lack native tool-calling. **Newer reasoning models** (5.2, Claude with extended thinking, Gemini with native reasoning) have built-in chain-of-thought that could replace or augment this pattern. A production system could:
-  - Use native tool schemas from models like GPT-5.2 or Claude Opus 4.5 for more reliable tool calling
-  - Leverage built-in reasoning tokens while still capturing the trace for observability
-  - Adopt a proper agent framework (LangGraph, AutoGen, CrewAI) with state machines and automatic retries
-  The current implementation is a good proof-of-concept that prioritizes transparency, but would need hardening for clinical reliability.
+- **Agent architecture** — The system intentionally avoids agentic loops where the LLM controls tool selection. In a clinical decision-support tool, every data source must be consulted on every assessment — there's no valid reason for the AI to "decide" to skip checking drug interactions. The current deterministic pipeline is the correct architecture for this domain. What would change in production:
+  - The hardcoded tool plan could become configurable per clinical workflow (e.g., surgical discharge vs. medical discharge vs. behavioral health)
+  - Tool data sources would be replaced with production APIs (DrugBank, Surescripts, real FHIR servers) or exposed as MCP (Model Context Protocol) servers
+  - The LLM synthesis step would use a single validated, benchmarked model with structured output guarantees
+  - The Patient Coach's keyword-based tool detection would be augmented with a proper intent classifier, native function calling from a production-grade model, or MCP (Model Context Protocol) servers exposing clinical tools as standardized endpoints
 - **Voice** — STT uses the browser's built-in Web Speech API (free, no server cost, but inconsistent across browsers). TTS uses OpenAI `tts-1` which is cheap but adds latency. A production mobile app would likely use a dedicated speech pipeline (Whisper for STT, streaming TTS) with proper audio handling.
 - **Hosting** — Vercel free tier has a 60-second function timeout, 100K monthly invocations, and no persistent storage. The multi-model evaluation endpoint (`/api/evaluate/models`) can push against that timeout when testing many models. Production would need proper infrastructure sizing.
 - **Opik flush strategy** — Traces are flushed asynchronously with a 5-second timeout and auto-disable after 3 consecutive failures. This ensures the app never crashes due to Opik service outages — tracing is "execute first, trace later" (the critical LLM/tool call runs before any Opik operations). Production would use async trace shipping or a collector sidecar with proper retry queues.
 
-None of this diminishes what the prototype demonstrates — the clinical reasoning pipeline, multi-agent orchestration, observability integration, and evaluation framework are all real. The shortcuts above are just the plumbing that would get specced out properly with time and budget.
+None of this diminishes what the prototype demonstrates — the clinical data pipeline, deterministic orchestration, LLM-powered synthesis, observability integration, and evaluation framework are all real. The AI architecture (deterministic pipeline + LLM synthesis, not agentic loops) is the same architecture that would ship in production. The shortcuts above are the data sources and infrastructure plumbing that would get replaced with production-grade equivalents.
 
 ### External API Rate Limits
 
@@ -72,7 +72,7 @@ For a production clinical deployment, these free APIs would be replaced with val
 |----------------------|----------------------|-----|
 | **OpenFDA drug interactions** | DrugBank, FDB, or Lexicomp | FDA data is raw adverse events, not curated clinical decision support. Commercial databases provide severity ratings, clinical recommendations, and evidence grading. |
 | **Rule-based guidelines** | UpToDate, DynaMed, or AHRQ | Hand-coded guideline rules may become outdated. Subscription services provide continuously updated, peer-reviewed recommendations. |
-| **Keyword-based knowledge base** | Pinecone/Weaviate + medical embeddings | Current TF-IDF/keyword search works for exact matches but misses semantic similarity. Production would use medical-trained embeddings (BioGPT-Large, MedCPT, or Gemini embedding-001) with vector databases for semantic search. Modern serverless options: Pinecone (free tier 1M vectors), Weaviate Cloud (14-day free), Voyage AI medical embeddings. |
+| **Keyword-based knowledge base** | Knowledge graph (Neo4j) + vector DB with medical embeddings | Current TF-IDF/keyword search works for exact matches but misses both semantic similarity and *relational reasoning*. A **knowledge graph** (Neo4j, Amazon Neptune) would model drugs, conditions, symptoms, and guidelines as interconnected nodes — enabling queries like "what are all the downstream risks for a patient on warfarin with a new AFib diagnosis and a recent fall?" that flat document retrieval fundamentally cannot answer. Drug-drug interactions, contraindications, guideline applicability, and care pathway dependencies are inherently graph problems. Vector databases (Pinecone, Weaviate, pgvector) with medical-trained embeddings (PubMedBERT, MedCPT, BioGPT-Large) would handle semantic similarity for unstructured clinical text. The ideal production architecture is **hybrid: knowledge graph for structured relational queries + vector search for unstructured retrieval**, with the deterministic pipeline querying both. |
 | **CMS static tier lookup** | Real-time pharmacy benefit check | Static pricing estimates miss actual insurance coverage. Production would integrate with PBMs via Surescripts or NCPDP for real-time copay information. |
 | **In-memory food-drug database** | FDB or Lexicomp food interactions | Our ~50 food-drug pairs cover common cases but commercial databases have thousands of validated interactions with clinical significance ratings. |
 | **Local symptom triage KB** | ApiMedic, Infermedica, or Isabel | Our Schmitt-Thompson style triage covers ~10 critical symptoms. Commercial symptom checkers provide AI-powered differential diagnosis, structured intake, and evidence-based triage across thousands of conditions. Free tiers: ApiMedic (100 tx/mo), EndlessMedical (developer access). |
@@ -93,11 +93,11 @@ This ensures production reliability — tracing is valuable but never critical p
 
 - **Frontend**: Next.js 16 with App Router, TypeScript, Tailwind CSS, Framer Motion
 - **LLM**: Multi-provider support (OpenAI, HuggingFace, Gemini) via abstracted LLM provider
-- **Agent Framework**: TRUE ReAct (Reasoning and Acting) loop - LLM dynamically decides tool calls, no hardcoded pipelines
-- **Streaming**: SSE (Server-Sent Events) for real-time reasoning trace visualization
+- **Orchestration**: Deterministic clinical pipeline with dependency-aware parallel execution and LLM synthesis — no agentic loops
+- **Streaming**: SSE (Server-Sent Events) for real-time pipeline progress visualization
 - **Observability**: Opik (Comet) for tracing, prompt versioning, evaluation, error tracking, and cost tracking
-- **Grounding**: Pattern-based and LLM-based verification to catch hallucinated facts
-- **Knowledge Base**: Zero-dependency TF-IDF vector search with medical NLP (synonym expansion, stemming)
+- **Guardrails**: PII/PHI detection on all LLM-calling endpoints (input sanitization + output sanitization), off-topic filtering (patient chat), post-LLM score calibration
+- **Knowledge Base**: Zero-dependency TF-IDF vector search with medical NLP (synonym expansion, stemming) — production would use a knowledge graph (Neo4j) for relational clinical queries + vector embeddings for semantic search
 - **External APIs**: FDA RxNorm, OpenFDA (FAERS, Labels, Enforcement), CMS, DailyMed, MedlinePlus - with caching
 - **Memory**: In-memory session management with conversation history compaction
 - **Hosting**: Vercel
@@ -132,7 +132,7 @@ Open [http://localhost:3000](http://localhost:3000) — select a patient from th
 
 ### Clinical View
 - **Multi-Model Support** - Switch between OpenAI GPT-4o Mini, HuggingFace (Qwen3 8B, Qwen3 30B), and Gemini (2.5 Flash, 2.5 Flash Lite)
-- **TRUE ReAct Agent** - LLM dynamically decides which tools to call and in what order (not a hardcoded pipeline)
+- **Deterministic Clinical Pipeline** - All FDA, CMS, guideline, and knowledge sources consulted on every run with dependency-aware parallel execution. LLM synthesizes the complete clinical picture into a scored assessment.
 - **Real FDA Data** - Drug interactions from RxNorm, boxed warnings from OpenFDA labels, FAERS adverse event counts, recall data
 - **Animated Discharge Score** - Visual gauge (0-100) with status indicators and collapsible methodology explanation
 - **Risk Factor Cards** - Expandable cards with severity levels (high/moderate/low) and data source attribution (FDA, CMS, Guidelines, FHIR, RAG)
@@ -142,9 +142,8 @@ Open [http://localhost:3000](http://localhost:3000) — select a patient from th
 
 ### Patient View
 - **Preparation Tracker** - Patient-friendly framing focused on going-home preparation (not readiness judgment)
-- **Recovery Coach** - Multi-turn ReAct conversational AI with tool use (medication lookup, symptom checking, term explanation, dietary/activity guidance)
-- **SSE Streaming** - Real-time reasoning trace showing Thought→Action→Observation as it happens
-- **Grounding Verification** - Quick pattern-based checks to catch hallucinated dosages, times, and percentages
+- **Recovery Coach** - Tool-augmented conversational AI with proactive tool detection, multi-turn memory, and adaptive communication style based on patient age (medication lookup, symptom checking, term explanation, dietary/activity guidance)
+- **SSE Streaming** - Real-time progress streaming as tools execute and the LLM synthesizes responses
 - **Prioritized Checklist** - Separated into "Must Do Before Leaving" and "Helpful For Your Recovery" sections
 - **Suggested Questions** - Pre-built question cards for common patient concerns
 - **Data Source Fallbacks** - Local KB → External API → LLM fallback chain for reliability
@@ -157,46 +156,67 @@ Open [http://localhost:3000](http://localhost:3000) — select a patient from th
 - **Rate Limiting** - TTS and STT are independently rate-limited to control API costs during the demo. Countdown banners appear when limits are reached.
 
 ### Observability & Evaluation
-- **Real-time Opik Tracing** - Token usage aggregation, cost estimates, and latency tracking across all ReAct iterations
-- **LLM-as-Judge** - Agentic judge that uses FDA APIs to verify assessment accuracy (Safety, Accuracy, Actionability, Completeness)
+- **Real-time Opik Tracing** - Token usage aggregation, cost estimates, and latency tracking across pipeline steps and LLM calls
+- **LLM-as-Judge with FDA Cross-Verification** - Automatic quality evaluation after every discharge assessment, scoring on Safety (40%), Accuracy (25%), Actionability (20%), and Completeness (15%). The judge independently calls FDA APIs (drug interactions, Black Box Warnings) to cross-check whether the assessment caught all real risks — not just reviewing what the assessment claims. Requires `OPENAI_API_KEY`.
+- **Model Comparison** - Run all demo patients through multiple LLM providers, measuring latency, score accuracy, status match, and risk factor coverage to determine which model performs best
+- **Opik Experiments** - Predefined test cases tracked via Opik SDK for experiment tracking and regression detection
 - **Error Tracing** - All API route errors logged to Opik with source identification and stack traces
 - **Thread Grouping** - Multi-turn conversations grouped by threadId for debugging
-- **Prompt Library** - 8 prompts versioned and managed via Opik Prompt Library with local fallbacks
-- **Model Comparison** - A/B testing and evaluation dashboard for comparing model outputs
-- **ReAct Trace Logging** - Full Thought→Action→Observation trace captured for every agent run
+- **Prompt Library** - 8 prompts versioned and managed via Opik Prompt Library with 30-minute cache and local fallbacks
+- **Pipeline Trace Logging** - Full tool execution trace (inputs, outputs, durations, success/failure) captured for every assessment run
 
-## Agent Architecture
+## AI Architecture: Safety-Constrained Clinical AI
 
-TransitionIQ implements a **TRUE ReAct (Reasoning and Acting)** agent architecture where the LLM dynamically decides which tools to call, in what order, and when to stop—no hardcoded pipelines.
+TransitionIQ is a hybrid system: a **deterministic clinical orchestration pipeline** with **LLM-powered synthesis and reasoning**, plus a **partially-agentic patient-facing conversational AI**. This is a deliberate design choice for healthcare — not a compromise.
 
-### ReAct Loop (Thought → Action → Observation)
+### Why Constrained Orchestration Over Autonomous Agents?
+
+In most AI agent demos, the LLM decides what tools to call and in what order. That works for coding assistants and research bots where skipping a step means a slightly worse answer. In clinical decision support, skipping a step means missing a drug interaction or a Black Box Warning on a patient's medication. The failure modes are different:
+
+1. **Non-determinism is a clinical liability** — The same patient data could produce different tool-calling sequences on different runs. A ReAct agent might check drug interactions on one run and skip them on another because the LLM "reasoned" it wasn't needed. In a clinical tool, every safety-relevant data source must be consulted every time.
+
+2. **Brittle loops break silently** — Agentic loops depend on the LLM correctly formatting JSON tool calls, deciding when to stop, and not hallucinating tool names. When parsing fails (and it does — see the regex fallback chain in the Patient Coach), the loop breaks. In a clinical tool, a broken loop means a patient doesn't get assessed.
+
+3. **Auditable execution matters** — When an LLM decides its own tool-calling sequence, explaining *why* a particular risk factor was or wasn't caught becomes "the model chose not to look." A fixed pipeline is fully auditable — and this is where **Opik observability becomes critical**: every tool call, every LLM response, every evaluation score is traced and verifiable.
+
+### Where the AI Adds Value
+
+The system uses AI in three distinct roles:
+
+**1. LLM as Synthesizer** (Discharge Assessment) — The deterministic pipeline gathers all clinical data (FDA interactions, warnings, recalls, guideline compliance, costs, knowledge base), then the LLM synthesizes the complete picture into a scored assessment with risk factors and recommendations. The LLM reasons over complex multi-source data — it just doesn't decide *which* data to look at. Post-LLM calibration rules then constrain the score based on objective criteria (e.g., 2+ high-severity risk factors → score capped at 35).
+
+**2. LLM as Conversational Agent** (Patient Coach) — The Recovery Coach has genuine agentic properties: multi-turn memory, adaptive communication based on patient age, and an LLM fallback path where the model decides which tool to call when deterministic keyword matching doesn't apply. The primary tool-routing path is keyword-based (reliable, fast), with the LLM as a fallback decision-maker for edge cases.
+
+**3. LLM as Evaluator** (LLM-as-Judge with FDA Cross-Verification) — A separate evaluation system that independently fetches FDA safety data (drug interactions, Black Box Warnings) and compares it against what the discharge assessment found. The judge scores on Safety (40%), Accuracy (25%), Actionability (20%), and Completeness (15%). If the pipeline reported 3 drug interactions but FDA actually has 5, the judge catches the gap and penalizes the Safety and Accuracy scores. This is grounded evaluation — the judge doesn't just review the assessment's claims, it verifies them against the same real data sources.
+
+### Discharge Assessment Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    ReAct Loop (max 10 iterations)          │
-│                                                             │
-│   ┌──────────┐    ┌──────────┐    ┌─────────────┐          │
-│   │ THOUGHT  │ → │  ACTION  │ → │ OBSERVATION │ ──┐       │
-│   │ (LLM)    │    │ (Tool)   │    │ (Result)    │   │       │
-│   └──────────┘    └──────────┘    └─────────────┘   │       │
-│        ↑                                            │       │
-│        └────────────────────────────────────────────┘       │
-│                         ↓                                   │
-│                  ┌─────────────┐                            │
-│                  │FINAL_ANSWER │ (when LLM decides done)    │
-│                  └─────────────┘                            │
-└─────────────────────────────────────────────────────────────┘
+Step 1: Fetch Patient Data (FHIR)              [always runs, required]
+   ├── Step 2: Check Drug Interactions (FDA)    [parallel, required]
+   ├── Step 3: Check Black Box Warnings (FDA)   [parallel, graceful fail]
+   ├── Step 4: Check Drug Recalls (FDA)         [parallel, graceful fail]
+   ├── Step 5: Evaluate Care Gaps (Guidelines)  [parallel, required]
+   ├── Step 6: Estimate Costs (CMS)             [parallel, graceful fail]
+   └── Step 7: Retrieve Knowledge (TF-IDF RAG)  [parallel, graceful fail]
+       ↑ Production: replace with knowledge graph (Neo4j) + vector DB
+Step 8: LLM Synthesis → Score + Risk Factors    [after all above complete, required]
+   └── Post-LLM Calibration (deterministic)     [safety constraint layer]
 ```
 
-### LLM Response Format
+### Patient Recovery Coach
 
-```json
-// For tool calls:
-{"thought": "I need patient data first", "action": {"tool": "fetch_patient", "args": {"patientId": "P001"}}}
+The Recovery Coach is a **tool-augmented conversational AI** with a hybrid routing architecture:
 
-// For final answer:
-{"thought": "I have all the info needed", "final_answer": "The patient's readiness score is 75..."}
-```
+**Layer 1 — Deterministic Tool Detection** (primary path): Keyword matching on the patient's message decides which tool to call before the LLM is ever invoked. "What are the side effects of warfarin?" triggers `lookupMedication("warfarin")` via regex, not via LLM reasoning. This is intentional — regex-based tool detection is 100% reliable, whereas asking a cheap LLM to output structured JSON tool calls is not (especially open models on free-tier inference).
+
+**Layer 2 — LLM Tool Selection** (fallback path): When keywords don't match, the LLM decides whether to respond directly or request a tool via JSON. This is genuine agentic behavior — the model is making a routing decision based on its understanding of the patient's question. It handles edge cases where the patient phrases something unexpectedly.
+
+**Data source fallback chains**: Each tool tries local knowledge base first (instant, offline), then external APIs (FDA DailyMed, MedlinePlus), then LLM generation as a last resort — prioritizing verified data over generated text.
+
+**Adaptive communication**: The coach automatically adjusts its language and tone based on patient age — simple words and encouragement for children, clear professional language for adults, patient-focused explanations with caregiver involvement prompts for elderly patients. This is driven by the system prompt, not separate models.
+
+**Why not native function calling for all routing?** The models used in this prototype (GPT-4o Mini, Qwen3, Gemini Flash) have varying levels of function-calling reliability, especially at the free/cheap tier. Proactive keyword detection eliminates the most common failure mode (malformed JSON from the LLM) for the most common queries. In production, native function calling with a validated model (GPT-4o, Claude Sonnet) and structured output guarantees would replace the keyword layer. The clinical tools could be exposed as MCP (Model Context Protocol) servers — standardized endpoints that any MCP-compatible model can discover and invoke, decoupling tool implementation from the routing layer and making it trivial to add new data sources without changing coach code. The local knowledge base (TF-IDF over ~400 documents) would be replaced with a knowledge graph (Neo4j) for relational clinical queries (drug-condition-symptom relationships) and vector embeddings for semantic retrieval.
 
 ### Clinical Assessment Tools
 
@@ -228,14 +248,16 @@ TransitionIQ implements a **TRUE ReAct (Reasoning and Acting)** agent architectu
 
 ### Design Philosophy
 
-- **Tools Return DATA Only**: Data tools (FDA, CMS, guidelines, RAG) return raw structured data. The ReAct agent does ALL reasoning and synthesis.
-- **LLM Decides Tool Order**: No hardcoded pipelines. The LLM reasons about what information it needs and calls tools dynamically.
-- **Auto-Fetch Missing Prerequisites**: If the LLM tries to call `analyze_readiness` before gathering required data (drug interactions, care gaps), the tool automatically fetches the missing data instead of failing. This makes the agent robust against LLM tool-ordering mistakes.
-- **Grounding Verification**: Optional verification that final answers are supported by tool observations (quick pattern-based or full LLM-based).
-- **LLM-Based Retry**: If JSON parsing fails, the agent asks the LLM to fix the format (no regex fallbacks).
+- **Deterministic Data Gathering, AI-Powered Synthesis**: All clinical data sources are always consulted. The LLM's job is synthesis and reasoning over complete data — not deciding what data to look at.
+- **Dependency-Aware Parallel Execution**: Steps 2-7 fan out in parallel after Step 1 completes, with Step 8 waiting for all to finish. `Promise.allSettled()` provides ~2-3x speedup over sequential execution.
+- **Post-LLM Calibration**: Deterministic rules constrain the LLM's output (score capping based on high-risk factor count) to prevent the model from underweighting critical safety signals.
+- **Graceful Degradation**: Non-required tools (warnings, recalls, costs, knowledge) can fail without blocking the assessment. Required tools (patient data, drug interactions, care gaps, final analysis) must succeed.
+- **Proactive Tool Detection**: The Patient Coach uses keyword-based tool detection rather than LLM-decided tool calling, eliminating JSON parsing failures as a failure mode.
+- **Data Source Fallback Chains**: Patient Coach tools try local knowledge base first (fast, offline), then external APIs (FDA DailyMed, MedlinePlus), then LLM generation as a last resort — prioritizing verified data over generated text.
 - **FDA Caching**: API results cached (RxCUI: 7d, interactions: 24h, labels: 24h, recalls: 12h) to reduce latency and API calls.
+- **PII/PHI Guardrails**: Input sanitization before LLM calls and output sanitization after, with critical PII (SSN, credit cards) blocking the request entirely. Applied to all LLM-calling endpoints: discharge analysis, plan generation, patient chat, patient summary, patient coach tool fallbacks, and LLM-as-Judge evaluation.
 - **Prompt Versioning**: All prompts stored in Opik Prompt Library with local fallbacks for offline/testing.
-- **Error Resilience**: Agent failures trigger fallback to direct LLM. All errors traced to Opik.
+- **Error Resilience**: Tool failures are traced to Opik with full context. Non-required tool failures degrade gracefully; required tool failures return clear error messages.
 
 ## Environment Variables
 
@@ -410,16 +432,19 @@ npm run start        # Start production server (after build)
                +--------------+--------------+
                v              v              v
 +------------------+   +---------------+   +---------------+
-|  ReAct Agent     |   |  Data Sources |   |     Opik      |
-|  Loop            |   |   (Cached)    |   |  Observability|
+|  Orchestrator    |   |  Data Sources |   |     Opik      |
+|  (Deterministic  |   |   (Cached)    |   |  Observability|
+|   Pipeline)      |   |               |   |               |
+|                  |   | * FDA/RxNorm  |   | * Traces      |
+|  Plan (fixed)    |   | * FDA Labels  |   | * Prompts     |
+|  → Parallel      |   | * FDA FAERS   |   | * Token/Cost  |
+|    Tool Exec     |   | * CMS Costs   |   | * Errors      |
+|  → LLM Synthesis |   | * Guidelines  |   | * Eval        |
+|  → Calibration   |   | * TF-IDF RAG  |   |               |
 |                  |   |               |   |               |
-|  Thought→Action  |   | * FDA/RxNorm  |   | * Traces      |
-|  →Observation    |   | * FDA Labels  |   | * Prompts     |
-|  →Final Answer   |   | * FDA FAERS   |   | * Token/Cost  |
-|                  |   | * CMS Costs   |   | * Errors      |
-|  + Memory        |   | * Guidelines  |   | * Grounding   |
-|  + Grounding     |   | * TF-IDF RAG  |   |               |
-+------------------+   +---------------+   +---------------+
+|  + Memory        |   +---------------+   +---------------+
+|  + Guardrails    |
++------------------+
         |
         v
 +------------------+
@@ -438,20 +463,29 @@ npm run start        # Start production server (after build)
 ### Clinical View Flow
 
 ```
-POST /api/analyze { patientId }
+POST /api/agent { patientId }
          ↓
   orchestrator.runAgent()
          ↓
-  ReAct Loop (LLM decides tool order dynamically):
-    Iteration 1: fetch_patient → patient demographics
-    Iteration 2: check_drug_interactions → FDA RxNorm (cached)
-    Iteration 3: check_boxed_warnings → FDA Labels (cached)
-    Iteration 4: evaluate_care_gaps → rule-based guidelines
-    Iteration 5: estimate_costs → CMS data
-    Iteration 6: analyze_readiness → LLM synthesis
-    Iteration 7: final_answer → complete assessment
+  Phase 1 — Plan (deterministic, fixed DAG):
+    createPlan() → 8 steps with dependency ordering
          ↓
-  Response: { score, status, riskFactors, agentGraph, reactTrace }
+  Phase 2 — Parallel Tool Execution:
+    Batch 1: fetch_patient (Step 1)
+    Batch 2 (parallel after Step 1):
+      ├─ check_drug_interactions → FDA RxNorm
+      ├─ check_boxed_warnings → FDA Labels
+      ├─ check_drug_recalls → FDA Enforcement
+      ├─ evaluate_care_gaps → Rule-based guidelines
+      ├─ estimate_costs → CMS data
+      └─ retrieve_knowledge → TF-IDF RAG
+    Batch 3: analyze_readiness → LLM synthesis (after all above)
+         ↓
+  Phase 3 — Post-LLM Calibration:
+    Score capping based on high-risk factor count
+    Inject missed cost barriers
+         ↓
+  Response: { score, status, riskFactors, agentGraph, toolsUsed }
 ```
 
 ### Patient Chat Flow
@@ -459,32 +493,41 @@ POST /api/analyze { patientId }
 ```
 POST /api/patient-chat { patientId, message }
          ↓
-  Memory session retrieved/created
+  Guardrails: off-topic check (70+ health keywords + regex patterns)
          ↓
-  ReAct Loop (max 6 iterations):
-    Thought: "Patient asking about Lisinopril"
-    Action: lookupMedication("Lisinopril")
-    Observation: { purpose, sideEffects, warnings }
-    final_answer: "Lisinopril helps control your blood pressure..."
+  Memory: retrieve/create session, compact conversation history
          ↓
-  Quick grounding check (pattern-based)
+  Tool Detection (Layer 1 — Deterministic):
+    detectRequiredTool(message) → keyword regex matching
+    Example: "side effects of lisinopril" → lookupMedication("lisinopril")
          ↓
-  Response with patient-friendly language
+  If tool detected:
+    Execute tool directly (KB → API → LLM fallback chain)
+    → LLM call: generate response using tool results
+         ↓
+  If no tool detected (Layer 2 — LLM Fallback):
+    LLM call: respond directly OR output JSON tool request
+    → If tool requested: execute tool, second LLM call with results
+         ↓
+  Cleanup: strip thinking tokens, JSON artifacts, stray syntax
+         ↓
+  Response with patient-friendly, age-adapted language
 ```
 
 ## Key Files
 
-### Agent Core
+### Pipeline Core
 
 | File | Purpose |
 |------|---------|
-| `src/lib/agents/react-loop.ts` | TRUE ReAct loop engine (Thought→Action→Observation), streaming support, grounding verification |
-| `src/lib/agents/orchestrator.ts` | Session management, agent entry point, tool registry integration |
-| `src/lib/agents/tools.ts` | Clinical tool implementations (FDA, CMS, guidelines, RAG) - return DATA only |
-| `src/lib/agents/patient-coach-tools.ts` | Patient-facing tools (medication lookup, symptom triage, term explanation) |
-| `src/lib/agents/memory.ts` | Session memory management for multi-turn conversations |
+| `src/lib/agents/orchestrator.ts` | Deterministic pipeline orchestrator — fixed DAG plan, dependency-aware parallel execution, session management |
+| `src/lib/agents/tools.ts` | Clinical tool implementations (FDA, CMS, guidelines, RAG) — return structured data only |
+| `src/lib/agents/patient-coach-tools.ts` | Patient-facing tools with fallback chains (KB → API → LLM) — medication lookup, symptom triage, term explanation, dietary/activity guidance |
+| `src/lib/agents/memory.ts` | Session memory management, conversation history compaction, assessment history |
+| `src/lib/agents/tracing.ts` | Opik trace integration for tool calls and agent execution |
+| `src/lib/agents/evaluation.ts` | Tool correctness evaluation (fire-and-forget after each tool call) |
 | `src/lib/agents/types.ts` | Type definitions for tools, contexts, and agent state |
-| `src/lib/verification/grounding.ts` | Grounding verification (quick pattern-based + full LLM-based) |
+| `src/lib/guardrails/pii-detector.ts` | PII/PHI detection and sanitization for LLM inputs and outputs |
 | `src/lib/utils/llm-json.ts` | LLM JSON parsing utilities (handles thinking tokens, truncation, trailing commas) |
 
 ### External Data Sources
@@ -546,16 +589,39 @@ All prompts are stored and versioned in Opik's Prompt Library with local fallbac
 
 ### Tracing
 - **LLM Spans**: Every LLM call tracked with model, provider, token usage, and cost
-- **Data Source Spans**: FDA, Guidelines, CMS, and RAG calls traced separately
-- **Agent Trajectories**: Step-by-step decision logging for the orchestrator pipeline
+- **Tool Spans**: Each tool execution traced with inputs, outputs, duration, and success/failure status
+- **Pipeline Traces**: Full execution graph of the deterministic pipeline (plan → parallel tools → synthesis → calibration)
 - **Error Traces**: All API route errors logged as `error-{source}` traces with stack traces
 - **Thread Grouping**: Multi-turn conversations grouped by `threadId` metadata
 
-### Evaluation
-- **Model Comparison**: A/B testing via Opik experiments
-- **Tool Correctness**: Per-tool accuracy evaluation
-- **Task Completion**: Automated checks for score, status, risk factors, and recommendations
-- **Conversation Metrics**: Turn count, tool usage, and task completion tracking
+### Evaluation Tab
+
+The Evaluation tab provides three evaluation capabilities:
+
+**1. LLM-as-Judge with FDA Cross-Verification** (automatic after every assessment):
+- Independently fetches FDA drug interaction and Black Box Warning data for the patient's medications
+- Compares what the assessment found vs what FDA actually reports — catches missed risks
+- Scores on 4 weighted criteria: Safety (40%), Accuracy (25%), Actionability (20%), Completeness (15%)
+- Pass threshold: >= 0.7 overall. Below 0.7 flags for review.
+- The judge is grounded in real data: if the pipeline missed a drug interaction that FDA reports, the Safety and Accuracy scores are penalized
+- FDA cross-verification call is traced separately in Opik (interaction count, warning count, any API errors)
+- Requires `OPENAI_API_KEY` (always uses OpenAI regardless of active model)
+
+**2. Model Comparison** (manual):
+- Runs all demo patients through selected LLM providers
+- Measures per-model: latency, discharge score accuracy vs expected range, status match, risk factor coverage
+- Determines winner by weighted scoring: success rate (40%) + confidence (30%) + speed (30%)
+
+**3. Opik Experiments** (manual):
+- Runs predefined test cases through Opik SDK experiment framework
+- Tracks score consistency, status correctness, and risk coverage across prompt versions
+- Results stored in Opik for regression tracking
+
+### Known Limitations
+
+These are gaps in the current prototype that would need to be addressed before production:
+
+- **Demo data**: All 5 patients are synthetic FHIR data. FDA API calls are real but patient data is not.
 
 ## Source Code Viewer (Was hoping to bypass public github repo requirement this is depreciated and wouldn't ship with actual product)
 
