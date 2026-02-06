@@ -7,6 +7,8 @@
  * API Documentation: https://dailymed.nlm.nih.gov/dailymed/webservices-help/v2/spls_api.cfm
  */
 
+import { traceError } from "@/lib/integrations/opik";
+
 const DAILYMED_BASE = "https://dailymed.nlm.nih.gov/dailymed/services/v2";
 
 export interface DrugLabelInfo {
@@ -64,14 +66,13 @@ export async function searchDrugLabels(drugName: string): Promise<DailyMedSearch
     });
 
     if (!response.ok) {
-      console.error(`[DailyMed] Search failed: ${response.status}`);
       return [];
     }
 
     const data = await response.json();
     return data.data || [];
   } catch (error) {
-    console.error("[DailyMed] Search error:", error);
+    traceError("dailymed-search", error, { dataSource: "DailyMed" });
     return [];
   }
 }
@@ -87,13 +88,12 @@ async function getSPLDocument(setId: string): Promise<Record<string, unknown> | 
     });
 
     if (!response.ok) {
-      console.error(`[DailyMed] SPL fetch failed: ${response.status}`);
       return null;
     }
 
     return await response.json();
   } catch (error) {
-    console.error("[DailyMed] SPL fetch error:", error);
+    traceError("dailymed-spl-fetch", error, { dataSource: "DailyMed" });
     return null;
   }
 }
@@ -121,7 +121,7 @@ function extractSectionText(spl: Record<string, unknown>, loincCode: string): st
 
     return "";
   } catch (error) {
-    console.error(`[DailyMed] Section extraction error for ${loincCode}:`, error);
+    traceError("dailymed-section-extract", error, { dataSource: "DailyMed" });
     return "";
   }
 }
@@ -251,7 +251,7 @@ export async function getDrugLabel(drugName: string): Promise<DrugLabelInfo | nu
       source: "FDA_DAILYMED",
     };
   } catch (error) {
-    console.error("[DailyMed] getDrugLabel error:", error);
+    traceError("dailymed-get-label", error, { dataSource: "DailyMed" });
     return null;
   }
 }

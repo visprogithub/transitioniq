@@ -8,6 +8,8 @@
  * With API key: Higher limits available
  */
 
+import { traceError } from "@/lib/integrations/opik";
+
 // Simple in-memory cache for nutrition data
 const nutritionCache = new Map<string, { data: unknown; timestamp: number }>();
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours - USDA updates quarterly
@@ -85,7 +87,6 @@ export async function searchFoods(query: string, pageSize = 5): Promise<FDCFood[
     });
 
     if (!response.ok) {
-      console.error(`[USDA] Search failed: ${response.status}`);
       return [];
     }
 
@@ -93,7 +94,7 @@ export async function searchFoods(query: string, pageSize = 5): Promise<FDCFood[
     nutritionCache.set(cacheKey, { data: data.foods, timestamp: Date.now() });
     return data.foods;
   } catch (error) {
-    console.error("[USDA] Search error:", error);
+    traceError("usda-search", error, { dataSource: "USDA" });
     return [];
   }
 }
@@ -116,7 +117,6 @@ export async function getFoodNutrition(fdcId: number): Promise<FDCFood | null> {
     });
 
     if (!response.ok) {
-      console.error(`[USDA] Get food failed: ${response.status}`);
       return null;
     }
 
@@ -124,7 +124,7 @@ export async function getFoodNutrition(fdcId: number): Promise<FDCFood | null> {
     nutritionCache.set(cacheKey, { data, timestamp: Date.now() });
     return data;
   } catch (error) {
-    console.error("[USDA] Get food error:", error);
+    traceError("usda-get-food", error, { dataSource: "USDA" });
     return null;
   }
 }

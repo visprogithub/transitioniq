@@ -6,7 +6,7 @@
  */
 
 import { createLLMProvider, getActiveModelId, getAvailableModels } from "@/lib/integrations/llm-provider";
-import { getOpikClient } from "@/lib/integrations/opik";
+import { getOpikClient, traceError } from "@/lib/integrations/opik";
 import { getLLMJudgePrompt } from "@/lib/integrations/opik-prompts";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
@@ -198,8 +198,7 @@ export async function evaluateWithLLMJudge(
         summary: (parsed.summary as string) || "Evaluation completed",
       };
     } catch (parseError) {
-      const rawPreview = response.content.slice(0, 300);
-      console.error(`[LLM Judge] JSON parse failed, using 50% fallback defaults. Raw: ${rawPreview}`);
+      traceError("llm-judge-parse", parseError);
       // Provide reasonable 50% defaults if parsing fails (better than 0% or crashing)
       judgeResult = {
         safety: { score: 0.5, reasoning: "Unable to evaluate safety - JSON parse error" },
@@ -272,7 +271,7 @@ export async function evaluateWithLLMJudge(
     return evaluation;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`[LLM Judge] Evaluation failed for patient ${patient.id}: ${errorMessage}`, error);
+    traceError("llm-judge-evaluation", error, { patientId: patient.id });
 
     trace?.update({ metadata: { error: errorMessage } });
     trace?.end();

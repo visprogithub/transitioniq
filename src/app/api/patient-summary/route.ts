@@ -174,7 +174,7 @@ function generateFallbackSummary(
       description: rf.description.slice(0, 150),
       icon: "alert" as const,
     })),
-    medicationReminders: patient.medications.slice(0, 5).map((med) => ({
+    medicationReminders: patient.medications.map((med) => ({
       medication: med.name,
       instruction: `Take ${med.dose} ${med.frequency}`,
       important: ["warfarin", "insulin", "eliquis", "metformin"].some((name) =>
@@ -211,7 +211,7 @@ function sanitizeSummary(
 
   // Ensure arrays exist and have reasonable lengths
   summary.whatYouNeedToKnow = (summary.whatYouNeedToKnow || []).slice(0, 4);
-  summary.medicationReminders = (summary.medicationReminders || []).slice(0, 6);
+  summary.medicationReminders = (summary.medicationReminders || []).slice(0, 15);
   summary.questionsForDoctor = (summary.questionsForDoctor || []).slice(0, 5);
   summary.nextSteps = (summary.nextSteps || []).slice(0, 6);
 

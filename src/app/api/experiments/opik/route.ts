@@ -17,6 +17,7 @@ import {
 } from "@/lib/integrations/opik-experiments";
 import { getAvailableModels } from "@/lib/integrations/llm-provider";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
+import { traceError } from "@/lib/integrations/opik";
 
 const EVALUATION_DISABLED = process.env.NEXT_PUBLIC_DISABLE_EVALUATION === "true";
 const DISABLED_RESPONSE = { error: "Evaluation is currently disabled" };
@@ -73,7 +74,7 @@ export async function POST(request: NextRequest) {
       try {
         await getOrCreateOpikDataset(undefined, CORE_DATASET);
       } catch (error) {
-        console.warn("[Opik] Failed to create dataset:", error);
+        traceError("api-opik-create-dataset", error);
       }
     }
 
@@ -137,7 +138,7 @@ export async function POST(request: NextRequest) {
       });
     }
   } catch (error) {
-    console.error("[Opik Experiment API] Error:", error);
+    await traceError("api-opik-experiment", error);
     return NextResponse.json(
       {
         error: "Experiment failed",
@@ -191,7 +192,7 @@ export async function PUT() {
       },
     });
   } catch (error) {
-    console.error("[Opik Dataset API] Error:", error);
+    await traceError("api-opik-dataset", error);
     return NextResponse.json(
       {
         error: "Failed to push dataset",

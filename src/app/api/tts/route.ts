@@ -105,7 +105,7 @@ export async function POST(request: NextRequest) {
 
     if (!ttsResponse.ok) {
       const errText = await ttsResponse.text();
-      console.error("[TTS] OpenAI error:", ttsResponse.status, errText);
+      traceError("api-tts-openai", new Error(`OpenAI TTS ${ttsResponse.status}: ${errText.slice(0, 200)}`));
 
       apiSpan?.update({
         metadata: {
@@ -191,7 +191,7 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     const totalLatencyMs = Date.now() - startTime;
-    console.error("[TTS] Error:", error);
+    traceError("api-tts", error);
 
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorInfo = {

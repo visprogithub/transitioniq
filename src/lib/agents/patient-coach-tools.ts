@@ -13,6 +13,7 @@
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import { createLLMProvider } from "@/lib/integrations/llm-provider";
+import { traceError } from "@/lib/integrations/opik";
 import { executeWithFallback, type ToolCallResult, type FallbackStrategy } from "@/lib/utils/tool-helpers";
 
 // Import knowledge base modules
@@ -475,7 +476,7 @@ async function executeCheckSymptom(
       };
     }
   } catch (error) {
-    console.error("[Patient Coach] MedlinePlus lookup failed:", error);
+    traceError("patient-coach-medlineplus", error, { dataSource: "MedlinePlus" });
   }
 
   // STEP 3: Use LLM as final fallback
@@ -539,7 +540,7 @@ Respond ONLY with the JSON object.`;
       success: true,
     };
   } catch (error) {
-    console.error("[Patient Coach] LLM symptom check failed:", error);
+    traceError("patient-coach-symptom-check", error);
   }
 
   // Final fallback if everything fails
@@ -622,7 +623,7 @@ Respond with ONLY the explanation, no other text.`;
       success: true,
     };
   } catch (error) {
-    console.error("[Patient Coach] LLM term explanation failed:", error);
+    traceError("patient-coach-term-explanation", error);
   }
 
   // Final fallback if LLM fails

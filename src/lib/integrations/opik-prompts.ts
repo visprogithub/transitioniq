@@ -157,7 +157,7 @@ Rules:
    - Use "heart" icon for vital signs / lab issues
    - Use "calendar" icon for follow-up / scheduling
    - Use "alert" icon for general warnings
-4. medicationReminders: Simple instructions for each medication (max 5)
+4. medicationReminders: Simple instructions for EVERY medication the patient is taking (include ALL medications)
    - Mark blood thinners, insulin, and heart medications as "important"
    - For children: frame instructions for parent/child together ("Your parent will help you take...")
    - For elderly: emphasize timing cues and caregiver reminders

@@ -266,7 +266,7 @@ export function PatientRecoveryCoach({
     ];
 
     // Generate medication reminders from patient data
-    const medicationReminders = patient.medications.slice(0, 5).map((med) => ({
+    const medicationReminders = patient.medications.map((med) => ({
       medication: med.name,
       instruction: `Take ${med.dose} ${med.frequency}`,
       important: ["Warfarin", "Insulin", "Eliquis", "Metformin"].some((name) =>

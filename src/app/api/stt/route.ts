@@ -113,7 +113,7 @@ export async function POST(request: NextRequest) {
 
     if (!whisperResponse.ok) {
       const errText = await whisperResponse.text();
-      console.error("[STT] Whisper error:", whisperResponse.status, errText);
+      traceError("api-stt-whisper", new Error(`Whisper ${whisperResponse.status}: ${errText.slice(0, 200)}`));
 
       apiSpan?.update({
         metadata: {
@@ -166,7 +166,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ transcript });
   } catch (error) {
     const totalLatencyMs = Date.now() - startTime;
-    console.error("[STT] Error:", error);
+    traceError("api-stt", error);
 
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorInfo = {

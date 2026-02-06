@@ -3,6 +3,8 @@
  * Reduces duplication in patient-coach-tools.ts (3 tools, ~500 lines)
  */
 
+import { traceError } from "@/lib/integrations/opik";
+
 export interface ToolCallResult {
   toolName: string;
   result: unknown;
@@ -143,7 +145,7 @@ export async function executeWithFallback<T>(
       console.log(`[${toolName}] ${strategy.name} returned null, trying next...`);
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      console.error(`[${toolName}] ${strategy.name} failed (${durationMs}ms):`, error);
+      traceError(`tool-${toolName}-${strategy.name}`, error);
       // Continue to next strategy
     }
   }

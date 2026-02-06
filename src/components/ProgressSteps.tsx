@@ -144,7 +144,7 @@ export function ProgressSteps({
                   <span className="text-sm text-gray-700 font-medium">
                     {step.label}
                   </span>
-                  {step.timestamp && (
+                  {step.timestamp != null && step.timestamp > 0 && (
                     <span className="text-xs text-gray-400 flex items-center gap-1">
                       <Clock className="w-3 h-3" />
                       {formatDuration(step.timestamp)}

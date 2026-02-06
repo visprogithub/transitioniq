@@ -15,6 +15,7 @@ import {
   getModelConfig,
 } from "@/lib/integrations/llm-provider";
 import { resetLLMProvider } from "@/lib/integrations/analysis";
+import { traceError } from "@/lib/integrations/opik";
 
 export async function POST(request: NextRequest) {
   try {
@@ -65,7 +66,7 @@ export async function POST(request: NextRequest) {
       message: `Switched to ${newActiveModel}`,
     });
   } catch (error) {
-    console.error("Model switch error:", error);
+    await traceError("api-model-switch", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to switch model" },
       { status: 500 }

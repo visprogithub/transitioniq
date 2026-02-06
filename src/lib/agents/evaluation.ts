@@ -9,6 +9,7 @@
  */
 
 import { Opik } from "opik";
+import { traceError } from "@/lib/integrations/opik";
 import { getPatient } from "@/lib/data/demo-patients";
 import { checkDrugInteractions } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
@@ -402,7 +403,7 @@ export async function createEvaluationDataset(): Promise<void> {
     await opik.flush();
     console.log("Dataset created/updated successfully");
   } catch (error) {
-    console.error("Failed to create dataset:", error);
+    traceError("evaluation-create-dataset", error);
   }
 }
 
