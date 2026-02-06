@@ -248,8 +248,7 @@ export default function DashboardPage() {
       );
       setExpandedRiskFactors(highRiskIds);
       setIsAnalyzing(false);
-      // Still trigger judge in background for cached analysis
-      runJudgeEvaluation(patient.id, cached);
+      // Don't run judge for cached results - it was already run when fresh
       return;
     }
 

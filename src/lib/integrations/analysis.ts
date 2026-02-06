@@ -16,7 +16,6 @@ import {
   getDischargePlanPrompt,
   formatDischargePlanPrompt,
   logPromptUsage,
-  initializeOpikPrompts,
   warmAllPrompts,
 } from "./opik-prompts";
 import { createLLMProvider, getActiveModelId, type LLMProvider } from "./llm-provider";
@@ -52,8 +51,7 @@ function estimateTokenCost(
   return (usage.promptTokens * p.input + usage.completionTokens * p.output) / 1000;
 }
 
-// Initialize Opik prompts on first use
-let promptsInitialized = false;
+// Opik prompts are fetched lazily and cached for 30min (see opik-prompts.ts)
 
 /**
  * Get LLM provider for the current active model
@@ -107,13 +105,10 @@ export async function analyzeDischargeReadiness(
 ): Promise<DischargeAnalysis> {
   // Note: API key validation is handled by LLMProvider for the active model
 
-  // Initialize Opik prompts if not done, then warm all prompts in parallel
-  if (!promptsInitialized) {
-    await initializeOpikPrompts();
-    promptsInitialized = true;
-    // Fire-and-forget: warm remaining prompts so subsequent tools get cache hits
-    warmAllPrompts().catch(() => {});
-  }
+  // Warm all prompts in parallel on first use (fire-and-forget after first call)
+  // This fetches prompts from Opik without storing/creating new ones
+  // Prompts are cached for 30min to avoid repeated Opik API calls
+  warmAllPrompts().catch(() => {});
 
   // Get prompt from Opik Prompt Library
   const { template, commit, fromOpik } = await getDischargeAnalysisPrompt();

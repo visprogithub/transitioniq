@@ -7,15 +7,13 @@
  * Much simpler than SSE streaming - just for visual feedback!
  */
 
-import { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { Database, Brain, Loader2, CheckCircle } from "lucide-react";
 
 interface Step {
   id: string;
   label: string;
   icon: "data" | "llm";
-  estimatedMs: number; // Rough timing to show realistic progress
 }
 
 interface SimpleProgressStepsProps {
@@ -24,42 +22,9 @@ interface SimpleProgressStepsProps {
 }
 
 export function SimpleProgressSteps({ steps, isActive }: SimpleProgressStepsProps) {
-  const [completedSteps, setCompletedSteps] = useState<Set<string>>(new Set());
-  const [currentStep, setCurrentStep] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!isActive) {
-      setCompletedSteps(new Set());
-      setCurrentStep(null);
-      return;
-    }
-
-    // Animate through steps with realistic timing
-    let timeouts: NodeJS.Timeout[] = [];
-    let elapsed = 0;
-
-    steps.forEach((step, index) => {
-      // Start this step
-      const startTimeout = setTimeout(() => {
-        setCurrentStep(step.id);
-      }, elapsed);
-      timeouts.push(startTimeout);
-
-      // Complete this step
-      elapsed += step.estimatedMs;
-      const completeTimeout = setTimeout(() => {
-        setCompletedSteps(prev => new Set([...prev, step.id]));
-        if (index === steps.length - 1) {
-          setCurrentStep(null); // All done
-        }
-      }, elapsed);
-      timeouts.push(completeTimeout);
-    });
-
-    return () => {
-      timeouts.forEach(clearTimeout);
-    };
-  }, [isActive, steps]);
+  // Show all steps as in-progress while active, completed when done
+  // No timers - just reflects the overall analysis state
+  const completedSteps = isActive ? new Set<string>() : new Set(steps.map(s => s.id));
 
   if (!isActive && completedSteps.size === 0) {
     return null;
@@ -67,14 +32,15 @@ export function SimpleProgressSteps({ steps, isActive }: SimpleProgressStepsProp
 
   const getStepIcon = (step: Step) => {
     const isCompleted = completedSteps.has(step.id);
-    const isCurrent = currentStep === step.id;
 
     if (isCompleted) {
       return <CheckCircle className="w-4 h-4 text-green-500" />;
     }
-    if (isCurrent) {
+    // Show as in-progress while active
+    if (isActive) {
       return <Loader2 className="w-4 h-4 animate-spin text-blue-500" />;
     }
+    // Show type icon otherwise
     return step.icon === "data" ? (
       <Database className="w-4 h-4 text-gray-400" />
     ) : (
@@ -84,10 +50,9 @@ export function SimpleProgressSteps({ steps, isActive }: SimpleProgressStepsProp
 
   const getStepBgColor = (step: Step) => {
     const isCompleted = completedSteps.has(step.id);
-    const isCurrent = currentStep === step.id;
 
     if (isCompleted) return "bg-green-50 border-green-200";
-    if (isCurrent) return "bg-blue-50 border-blue-200";
+    if (isActive) return "bg-blue-50 border-blue-200"; // In progress
     return "bg-gray-50 border-gray-200";
   };
 
@@ -115,31 +80,17 @@ export function SimpleProgressSteps({ steps, isActive }: SimpleProgressStepsProp
         </span>
       </div>
 
-      {/* Steps */}
+      {/* Steps - show all at once, no animation */}
       <div className="p-3 space-y-2">
-        <AnimatePresence mode="popLayout">
-          {steps.map((step) => {
-            const isCompleted = completedSteps.has(step.id);
-            const isCurrent = currentStep === step.id;
-            const isVisible = isCompleted || isCurrent;
-
-            if (!isVisible) return null;
-
-            return (
-              <motion.div
-                key={step.id}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: 20 }}
-                transition={{ duration: 0.2 }}
-                className={`flex items-center gap-2 p-2 rounded border ${getStepBgColor(step)}`}
-              >
-                <div className="flex-shrink-0">{getStepIcon(step)}</div>
-                <span className="text-sm text-gray-700">{step.label}</span>
-              </motion.div>
-            );
-          })}
-        </AnimatePresence>
+        {steps.map((step) => (
+          <div
+            key={step.id}
+            className={`flex items-center gap-2 p-2 rounded border ${getStepBgColor(step)}`}
+          >
+            <div className="flex-shrink-0">{getStepIcon(step)}</div>
+            <span className="text-sm text-gray-700">{step.label}</span>
+          </div>
+        ))}
       </div>
     </motion.div>
   );
@@ -147,14 +98,21 @@ export function SimpleProgressSteps({ steps, isActive }: SimpleProgressStepsProp
 
 /**
  * Predefined step sequences for different operations
+ * These mirror the actual server-side operations in the console logs
  */
 export const ANALYSIS_STEPS: Step[] = [
-  { id: "fda", label: "Checking drug interactions (FDA)", icon: "data", estimatedMs: 1200 },
-  { id: "guidelines", label: "Evaluating care gaps", icon: "data", estimatedMs: 800 },
-  { id: "cms", label: "Estimating medication costs (CMS)", icon: "data", estimatedMs: 1500 },
-  { id: "llm", label: "Analyzing discharge readiness", icon: "llm", estimatedMs: 3000 },
+  { id: "fda", label: "Checking drug interactions (FDA)", icon: "data" },
+  { id: "guidelines", label: "Evaluating care gaps", icon: "data" },
+  { id: "cms", label: "Estimating medication costs (CMS)", icon: "data" },
+  { id: "llm", label: "Analyzing discharge readiness", icon: "llm" },
 ];
 
 export const PLAN_GENERATION_STEPS: Step[] = [
-  { id: "generate", label: "Generating discharge checklist", icon: "llm", estimatedMs: 2800 },
+  { id: "generate", label: "Generating discharge checklist", icon: "llm" },
+];
+
+export const PATIENT_CHAT_STEPS: Step[] = [
+  { id: "detect", label: "Understanding your question", icon: "llm" },
+  { id: "execute", label: "Looking up information", icon: "data" },
+  { id: "respond", label: "Preparing response", icon: "llm" },
 ];
