@@ -13,6 +13,7 @@
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import { createLLMProvider } from "@/lib/integrations/llm-provider";
+import { executeWithFallback, type ToolCallResult, type FallbackStrategy } from "@/lib/utils/tool-helpers";
 
 // Import knowledge base modules
 import {
@@ -41,12 +42,7 @@ export interface PatientCoachToolDefinition {
   };
 }
 
-export interface ToolCallResult {
-  toolName: string;
-  result: unknown;
-  success: boolean;
-  error?: string;
-}
+// ToolCallResult now imported from @/lib/utils/tool-helpers
 
 /**
  * Tool definitions for the patient coach agent
@@ -228,7 +224,7 @@ export async function executePatientCoachTool(
 }
 
 /**
- * Look up medication information
+ * Look up medication information (REFACTORED with executeWithFallback)
  * Priority order:
  * 1. Local knowledge base (FDB-style, fast, always available)
  * 2. FDA DailyMed API (real drug labels)
@@ -247,72 +243,62 @@ async function executeLookupMedication(
       normalizedName.includes(m.name.toLowerCase())
   );
 
-  // STEP 1: Try local knowledge base first (fastest, no network)
-  const kbInfo = getPatientDrugInfo(normalizedName);
-  if (kbInfo) {
-    console.log(`[Patient Coach] Found ${medicationName} in local knowledge base`);
+  // Helper to build medication result
+  const buildMedResult = (info: {
+    purpose: string;
+    sideEffects: string[];
+    warnings: string[];
+    patientTips: string[];
+    interactions?: unknown;
+  }) => ({
+    medicationName,
+    isPatientMedication: !!patientMed,
+    patientDose: patientMed?.dose,
+    patientFrequency: patientMed?.frequency,
+    ...info,
+  });
 
-    // Also check for drug interactions with patient's other medications
-    const allMeds = [
-      normalizedName,
-      ...patient.medications
-        .filter((m) => m.name.toLowerCase() !== normalizedName)
-        .map((m) => m.name),
-    ];
-    const interactions = checkMultipleDrugInteractions(allMeds);
-    const interactionWarnings = interactions.map((i) => getPatientFriendlyInteraction(i));
+  // Define fallback strategies
+  const strategies: FallbackStrategy<ReturnType<typeof buildMedResult>>[] = [
+    {
+      name: "KNOWLEDGE_BASE",
+      execute: async () => {
+        const kbInfo = getPatientDrugInfo(normalizedName);
+        if (!kbInfo) return null;
 
-    return {
-      toolName: "lookupMedication",
-      result: {
-        medicationName,
-        isPatientMedication: !!patientMed,
-        patientDose: patientMed?.dose,
-        patientFrequency: patientMed?.frequency,
-        purpose: kbInfo.purpose,
-        sideEffects: kbInfo.sideEffects,
-        warnings: [
-          ...kbInfo.warnings,
-          ...interactionWarnings.map((iw) => `${iw.severity}: ${iw.message}`),
-        ],
-        patientTips: kbInfo.patientTips,
-        interactions: interactionWarnings.length > 0 ? interactionWarnings : undefined,
-        source: "KNOWLEDGE_BASE",
+        // Check for drug interactions with patient's other medications
+        const allMeds = [normalizedName, ...patient.medications.filter((m) => m.name.toLowerCase() !== normalizedName).map((m) => m.name)];
+        const interactions = checkMultipleDrugInteractions(allMeds);
+        const interactionWarnings = interactions.map((i) => getPatientFriendlyInteraction(i));
+
+        return buildMedResult({
+          purpose: kbInfo.purpose,
+          sideEffects: kbInfo.sideEffects,
+          warnings: [...kbInfo.warnings, ...interactionWarnings.map((iw) => `${iw.severity}: ${iw.message}`)],
+          patientTips: kbInfo.patientTips,
+          interactions: interactionWarnings.length > 0 ? interactionWarnings : undefined,
+        });
       },
-      success: true,
-    };
-  }
+    },
+    {
+      name: "FDA_DAILYMED",
+      execute: async () => {
+        const fdaInfo = await getDailyMedDrugInfo(medicationName);
+        if (!fdaInfo) return null;
 
-  // STEP 2: Try FDA DailyMed API
-  try {
-    console.log(`[Patient Coach] Trying FDA DailyMed for ${medicationName}`);
-    const fdaInfo = await getDailyMedDrugInfo(medicationName);
-    if (fdaInfo) {
-      return {
-        toolName: "lookupMedication",
-        result: {
-          medicationName,
-          isPatientMedication: !!patientMed,
-          patientDose: patientMed?.dose,
-          patientFrequency: patientMed?.frequency,
+        return buildMedResult({
           purpose: fdaInfo.purpose,
-          sideEffects: fdaInfo.sideEffects.slice(0, 5), // Limit to top 5
+          sideEffects: fdaInfo.sideEffects.slice(0, 5),
           warnings: fdaInfo.warnings.slice(0, 3).map((w) => `⚠️ ${w}`),
           patientTips: fdaInfo.patientTips,
-          source: "FDA_DAILYMED",
-        },
-        success: true,
-      };
-    }
-  } catch (error) {
-    console.error("[Patient Coach] FDA DailyMed lookup failed:", error);
-  }
-
-  // STEP 3: Use LLM as final fallback
-  try {
-    console.log(`[Patient Coach] Using LLM fallback for ${medicationName}`);
-    const provider = createLLMProvider();
-    const prompt = `You are a helpful pharmacist assistant. Provide patient-friendly information about the medication "${medicationName}".
+        });
+      },
+    },
+    {
+      name: "LLM_GENERATED",
+      execute: async () => {
+        const provider = createLLMProvider();
+        const prompt = `You are a helpful pharmacist assistant. Provide patient-friendly information about the medication "${medicationName}".
 
 Respond ONLY with a valid JSON object (no other text):
 {
@@ -325,81 +311,46 @@ Respond ONLY with a valid JSON object (no other text):
 Use simple, patient-friendly language. If this is not a real medication, respond with:
 {"error": "unknown medication"}`;
 
-    const response = await provider.generate(prompt, {
-      spanName: "medication-lookup-llm",
-      metadata: { medication: medicationName, fallback: true },
-    });
+        const response = await provider.generate(prompt, {
+          spanName: "medication-lookup-llm",
+          metadata: { medication: medicationName, fallback: true },
+        });
 
-    const parsed = extractJsonObject<{
-      error?: string;
-      purpose?: string;
-      sideEffects?: string[];
-      warnings?: string[];
-      patientTips?: string[];
-    }>(response.content);
+        const parsed = extractJsonObject<{
+          error?: string;
+          purpose?: string;
+          sideEffects?: string[];
+          warnings?: string[];
+          patientTips?: string[];
+        }>(response.content);
 
-    if (parsed.error) {
-      return {
-        toolName: "lookupMedication",
-        result: {
-          medicationName,
-          isPatientMedication: !!patientMed,
-          patientDose: patientMed?.dose,
-          patientFrequency: patientMed?.frequency,
-          purpose: "I don't have specific information about this medication. Please ask your pharmacist or doctor for details.",
-          sideEffects: ["Ask your pharmacist about potential side effects"],
-          warnings: ["⚠️ Always take medications exactly as prescribed"],
-          patientTips: [
-            "Read the information that came with your prescription",
-            "Ask your pharmacist if you have questions",
-          ],
-          source: "FALLBACK",
-        },
-        success: true,
-      };
-    }
+        if (parsed.error) return null; // Will trigger final fallback
 
-    return {
-      toolName: "lookupMedication",
-      result: {
-        medicationName,
-        isPatientMedication: !!patientMed,
-        patientDose: patientMed?.dose,
-        patientFrequency: patientMed?.frequency,
-        purpose: parsed.purpose || "This medication was prescribed by your doctor.",
-        sideEffects: parsed.sideEffects || ["Ask your pharmacist about side effects"],
-        warnings: (parsed.warnings || ["Take exactly as prescribed"]).map((w: string) =>
-          w.startsWith("⚠️") ? w : `⚠️ ${w}`
-        ),
-        patientTips: parsed.patientTips || ["Follow your doctor's instructions"],
-        source: "LLM_GENERATED",
+        return buildMedResult({
+          purpose: parsed.purpose || "This medication was prescribed by your doctor.",
+          sideEffects: parsed.sideEffects || ["Ask your pharmacist about side effects"],
+          warnings: (parsed.warnings || ["Take exactly as prescribed"]).map((w: string) =>
+            w.startsWith("⚠️") ? w : `⚠️ ${w}`
+          ),
+          patientTips: parsed.patientTips || ["Follow your doctor's instructions"],
+        });
       },
-      success: true,
-    };
-  } catch (error) {
-    console.error("[Patient Coach] LLM medication lookup failed:", error);
-  }
-
-  // Final fallback if everything fails
-  return {
-    toolName: "lookupMedication",
-    result: {
-      medicationName,
-      isPatientMedication: !!patientMed,
-      patientDose: patientMed?.dose,
-      patientFrequency: patientMed?.frequency,
-      purpose: "This medication was prescribed by your doctor for your specific condition.",
-      sideEffects: ["Side effects vary - ask your pharmacist or doctor about common ones"],
-      warnings: ["⚠️ Take exactly as prescribed", "⚠️ Don't stop taking without talking to your doctor first"],
-      patientTips: [
-        "Read the information that came with your prescription",
-        "Ask your pharmacist if you have questions",
-        "Keep a list of all your medications to show your doctors",
-      ],
-      source: "FALLBACK",
     },
-    success: true,
-  };
+  ];
+
+  // Final fallback if all strategies fail
+  const finalFallback = buildMedResult({
+    purpose: "This medication was prescribed by your doctor for your specific condition.",
+    sideEffects: ["Side effects vary - ask your pharmacist or doctor about common ones"],
+    warnings: ["⚠️ Take exactly as prescribed", "⚠️ Don't stop taking without talking to your doctor first"],
+    patientTips: [
+      "Read the information that came with your prescription",
+      "Ask your pharmacist if you have questions",
+      "Keep a list of all your medications to show your doctors",
+    ],
+  });
+
+  return executeWithFallback("lookupMedication", strategies, finalFallback);
 }
 
 /**
