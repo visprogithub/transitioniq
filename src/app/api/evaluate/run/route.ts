@@ -11,6 +11,7 @@ import {
   createEvaluationDataset,
   EVALUATION_DATASET,
 } from "@/lib/agents/evaluation";
+import { traceError } from "@/lib/integrations/opik";
 
 /**
  * GET /api/evaluate/run
@@ -53,7 +54,7 @@ export async function GET() {
       opikDashboard: "https://www.comet.com/opik",
     });
   } catch (error) {
-    console.error("Evaluation error:", error);
+    await traceError("api-evaluate-run-get", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Evaluation failed" },
       { status: 500 }
@@ -97,7 +98,7 @@ export async function POST(request: NextRequest) {
       summary: result.summary,
     });
   } catch (error) {
-    console.error("Evaluation error:", error);
+    await traceError("api-evaluate-run-post", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Evaluation failed" },
       { status: 500 }

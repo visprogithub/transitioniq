@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { evaluateWithLLMJudge, batchEvaluateWithJudge } from "@/lib/evaluation/llm-judge";
 import { getPatient } from "@/lib/data/demo-patients";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
+import { traceError } from "@/lib/integrations/opik";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 const EVALUATION_DISABLED = process.env.NEXT_PUBLIC_DISABLE_EVALUATION === "true";
@@ -127,7 +128,7 @@ export async function POST(request: NextRequest) {
       });
     }
   } catch (error) {
-    console.error("[Judge API] Error:", error);
+    await traceError("api-evaluate-judge", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Evaluation failed" },
       { status: 500 }

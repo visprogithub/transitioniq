@@ -7,6 +7,8 @@
  * API Documentation: https://medlineplus.gov/about/developers/webservices/
  */
 
+import { traceError } from "@/lib/integrations/opik";
+
 const MEDLINEPLUS_BASE = "https://connect.medlineplus.gov/service";
 
 export interface HealthTopicInfo {
@@ -67,7 +69,7 @@ export async function searchHealthTopics(query: string): Promise<HealthTopicInfo
       source: "MEDLINEPLUS" as const,
     }));
   } catch (error) {
-    console.error("[MedlinePlus] Search error:", error);
+    traceError("medlineplus-search", error, { dataSource: "MedlinePlus" });
     return [];
   }
 }
@@ -136,7 +138,7 @@ export async function getSymptomInfo(symptom: string): Promise<SymptomInfo | nul
       source: "MEDLINEPLUS",
     };
   } catch (error) {
-    console.error("[MedlinePlus] getSymptomInfo error:", error);
+    traceError("medlineplus-symptom-info", error, { dataSource: "MedlinePlus" });
     return null;
   }
 }

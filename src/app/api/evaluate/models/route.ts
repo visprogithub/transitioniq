@@ -22,6 +22,7 @@ import {
 } from "@/lib/integrations/llm-provider";
 import { analyzeDischargeReadiness, resetLLMProvider } from "@/lib/integrations/analysis";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
+import { traceError } from "@/lib/integrations/opik";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 const EVALUATION_DISABLED = process.env.NEXT_PUBLIC_DISABLE_EVALUATION === "true";
@@ -170,7 +171,7 @@ export async function POST(request: NextRequest) {
       setActiveModel(modelId);
       resetLLMProvider(); // Reset to pick up new model
     } catch (e) {
-      console.error(`Failed to set model ${modelId}:`, e);
+      traceError("eval-set-model", e, { model: modelId });
       continue;
     }
 
@@ -346,7 +347,7 @@ export async function POST(request: NextRequest) {
         new Promise((_, reject) => setTimeout(() => reject(new Error("Opik flush timeout")), 5000)),
       ]);
     } catch (e) {
-      console.error("[Eval] Opik flush failed (non-fatal):", e instanceof Error ? e.message : e);
+      traceError("eval-opik-flush", e);
     }
   }
 

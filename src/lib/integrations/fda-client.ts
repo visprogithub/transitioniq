@@ -10,6 +10,8 @@
  * doesn't change frequently (labels updated monthly, interactions are stable)
  */
 
+import { traceError } from "@/lib/integrations/opik";
+
 const OPENFDA_BASE = "https://api.fda.gov/drug";
 
 /**
@@ -136,20 +138,15 @@ export async function checkDrugInteractions(
   const interactions: DrugInteraction[] = [];
   const medNames = medications.map((m) => extractGenericName(m.name).toLowerCase());
 
-  console.log(`[FDA] Checking interactions for ${medications.length} medications:`, medNames);
-
   // Fetch FDA drug labels for each medication to check their interaction sections
   const interactionPromises = medications.map(async (med) => {
     const genericName = extractGenericName(med.name);
-    console.log(`[FDA] Fetching label for ${genericName} to check against:`, medNames.filter(m => m !== genericName.toLowerCase()));
     return fetchFDADrugInteractions(genericName, medNames);
   });
 
   try {
     const results = await Promise.all(interactionPromises);
-    console.log(`[FDA] Got ${results.length} label results`);
     for (const result of results) {
-      console.log(`[FDA] Processing ${result.length} interactions from one label`);
       for (const interaction of result) {
         // Avoid duplicates (same pair may be found from both drug labels)
         const exists = interactions.some(
@@ -165,7 +162,7 @@ export async function checkDrugInteractions(
       }
     }
   } catch (error) {
-    console.error("FDA drug interaction check failed:", error);
+    traceError("fda-drug-interactions", error, { dataSource: "FDA-Interactions" });
   }
 
   // Fallback to known high-risk combinations if API didn't find anything
@@ -189,9 +186,6 @@ export async function checkDrugInteractions(
       }
     }
   }
-
-  console.log(`[FDA] Total interactions found: ${interactions.length}`);
-  interactions.forEach((i) => console.log(`[FDA]   - ${i.drug1} + ${i.drug2}: ${i.severity}`));
 
   setCache(interactionsCache, cacheKey, interactions, CACHE_TTL.INTERACTIONS);
   return interactions;
@@ -238,7 +232,7 @@ async function fetchFDADrugInteractions(
     const data = await response.json();
     return parseFDAInteractions(drugName, data, allMedNames);
   } catch (error) {
-    console.error(`FDA label lookup failed for ${drugName}:`, error);
+    traceError("fda-label-lookup", error, { dataSource: "FDA", drug: drugName });
     return interactions;
   }
 }
@@ -566,7 +560,7 @@ export async function getFAERSCount(drugName: string): Promise<number> {
     setCache(faersCache, cacheKey, count, CACHE_TTL.FAERS_COUNT);
     return count;
   } catch (error) {
-    console.error(`FAERS lookup failed for ${drugName}:`, error);
+    traceError("fda-faers-lookup", error, { dataSource: "FDA", drug: drugName });
     return 0;
   }
 }
@@ -619,7 +613,7 @@ export async function getDrugSafetyInfo(drugName: string): Promise<DrugSafetyInf
     setCache(drugLabelCache, cacheKey, result, CACHE_TTL.DRUG_LABEL);
     return result;
   } catch (error) {
-    console.error(`FDA label lookup failed for ${drugName}:`, error);
+    traceError("fda-safety-info", error, { dataSource: "FDA", drug: drugName });
     return null;
   }
 }
@@ -702,7 +696,7 @@ export async function checkDrugRecalls(
     setCache(recallsCache, cacheKey, results, CACHE_TTL.RECALLS);
     return results;
   } catch (error) {
-    console.error(`Drug recall check failed for ${drugName}:`, error);
+    traceError("fda-recall-check", error, { dataSource: "FDA-Recalls", drug: drugName });
     return [];
   }
 }
@@ -736,7 +730,7 @@ export async function getCoReportedAdverseEvents(
       date: "Recent", // Could parse actual dates if needed
     }));
   } catch (error) {
-    console.error(`Co-reported events check failed:`, error);
+    traceError("fda-coreported-events", error, { dataSource: "FDA", drug1, drug2 });
     return [];
   }
 }

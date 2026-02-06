@@ -102,7 +102,9 @@ export function SimpleProgressSteps({ steps, isActive }: SimpleProgressStepsProp
  */
 export const ANALYSIS_STEPS: Step[] = [
   { id: "fda", label: "Checking drug interactions (FDA)", icon: "data" },
-  { id: "guidelines", label: "Evaluating care gaps", icon: "data" },
+  { id: "fda-boxed", label: "Checking FDA Black Box Warnings", icon: "data" },
+  { id: "fda-recalls", label: "Checking FDA drug recalls", icon: "data" },
+  { id: "guidelines", label: "Evaluating care gaps (Guidelines + MyHealthfinder)", icon: "data" },
   { id: "cms", label: "Estimating medication costs (CMS)", icon: "data" },
   { id: "llm", label: "Analyzing discharge readiness", icon: "llm" },
 ];
@@ -115,4 +117,10 @@ export const PATIENT_CHAT_STEPS: Step[] = [
   { id: "detect", label: "Understanding your question", icon: "llm" },
   { id: "execute", label: "Looking up information", icon: "data" },
   { id: "respond", label: "Preparing response", icon: "llm" },
+];
+
+export const JUDGE_EVALUATION_STEPS: Step[] = [
+  { id: "prepare", label: "Preparing evaluation criteria", icon: "data" },
+  { id: "judge", label: "Running LLM-as-Judge assessment", icon: "llm" },
+  { id: "score", label: "Computing quality scores", icon: "llm" },
 ];

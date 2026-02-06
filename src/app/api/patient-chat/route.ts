@@ -959,7 +959,7 @@ Coach:`;
 
     return NextResponse.json(responseData);
   } catch (error) {
-    console.error("[Patient Chat] Error:", error);
+    traceError("api-patient-chat", error);
 
     // Build errorInfo so Opik dashboard counts this as an error trace
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1050,14 +1050,14 @@ async function handleStreamingChat(
               toolToUse.name,
               toolToUse.arguments,
               patient,
-              analysis || undefined
+              analysis || null
             );
           }
         );
 
         toolsUsed.push({
           name: toolToUse.name,
-          result: toolResult.success ? toolResult.data : { error: toolResult.error },
+          result: toolResult.success ? toolResult.result : { error: toolResult.error },
         });
       }
 
@@ -1112,7 +1112,7 @@ async function handleStreamingChat(
 
       complete();
     } catch (error) {
-      console.error("[Patient Chat Streaming] Error:", error);
+      traceError("api-patient-chat-stream", error);
       emitError(error instanceof Error ? error.message : "Chat failed");
       complete();
     }

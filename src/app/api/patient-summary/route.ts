@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createLLMProvider } from "@/lib/integrations/llm-provider";
-import { getOpikClient } from "@/lib/integrations/opik";
+import { getOpikClient, traceError } from "@/lib/integrations/opik";
 import { getPatientSummaryPrompt, formatPatientSummaryPrompt } from "@/lib/integrations/opik-prompts";
 import { getPatient } from "@/lib/data/demo-patients";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
@@ -108,7 +108,7 @@ export async function POST(request: NextRequest) {
     try {
       summary = extractJsonObject<PatientSummary>(response.content);
     } catch (parseError) {
-      console.error("[Patient Summary] Failed to parse LLM response:", parseError);
+      traceError("api-patient-summary-parse", parseError);
       // Generate fallback summary
       summary = generateFallbackSummary(patient, analysis);
     }
@@ -135,7 +135,7 @@ export async function POST(request: NextRequest) {
       generatedAt: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("[Patient Summary] Error:", error);
+    await traceError("api-patient-summary", error);
     trace?.update({ metadata: { error: String(error) } });
     trace?.end();
 

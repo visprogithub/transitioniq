@@ -1,23 +1,61 @@
 /**
  * MyHealthfinder API Client
  *
- * Free API from the Office of Disease Prevention and Health Promotion (ODPHP)
- * that provides consumer-friendly preventive service recommendations.
+ * Integrates with the ODPHP MyHealthfinder API v4 to fetch
+ * USPSTF-based preventive care recommendations by age and sex.
  *
- * API Documentation: https://health.gov/our-work/national-health-initiatives/health-literacy/consumer-health-content/free-web-content/apis-developers
- * Base URL: https://health.gov/myhealthfinder/api/v3
+ * API: https://odphp.health.gov/myhealthfinder/api/v4/
+ * Free, no API key required. Returns consumer-friendly preventive
+ * service recommendations based on USPSTF guidelines.
  *
- * This API is free, requires no API key, and provides USPSTF-based preventive care recommendations.
+ * Used alongside rule-based guidelines-client.ts to identify
+ * preventive care gaps from an evidence-based external source.
  */
 
 import type { Patient } from "../types/patient";
+import { traceError } from "@/lib/integrations/opik";
+import type { CareGap } from "./guidelines-client";
 
-const MYHEALTHFINDER_BASE = "https://health.gov/myhealthfinder/api/v3";
+const BASE_URL = "https://odphp.health.gov/myhealthfinder/api/v4";
 
-// Cache for API responses (24 hours - recommendations don't change frequently)
-const recommendationCache = new Map<string, { data: PreventiveRecommendation[]; expiresAt: number }>();
-const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+// ---------------------------------------------------------------------------
+// API types
+// ---------------------------------------------------------------------------
 
+interface MyHealthfinderResponse {
+  Result: {
+    Error: string;
+    Total: number;
+    Query: Record<string, string>;
+    Language: string;
+    Resources?: {
+      Resource?: MyHealthfinderTopic[];
+    };
+  };
+}
+
+interface MyHealthfinderTopic {
+  Type: string;
+  Id: string;
+  Title: string;
+  TranslationId: string;
+  Categories: string;
+  MyHFTitle: string;
+  MyHFCategory: string;
+  MyHFCategoryHeading: string;
+  LastUpdate: string;
+  ImageUrl: string;
+  ImageAlt: string;
+  AccessibleVersion: string;
+  Sections?: {
+    section?: Array<{
+      Title: string;
+      Content: string;
+    }>;
+  };
+}
+
+/** Public type for preventive recommendations */
 export interface PreventiveRecommendation {
   id: string;
   title: string;
@@ -30,374 +68,90 @@ export interface PreventiveRecommendation {
   actionUrl?: string;
 }
 
-interface MyHealthfinderResource {
-  Id: string;
-  Title: string;
-  Categories?: string;
-  Sections?: {
-    Title?: string;
-    Content?: string;
-    Description?: string;
-  }[];
-  AccessibleVersion?: string;
-  RelatedItems?: {
-    Resources?: { Id: string; Title: string; Url: string }[];
-  };
-}
-
-interface MyHealthfinderResponse {
-  Result?: {
-    Resources?: {
-      Resource?: MyHealthfinderResource[];
-    };
-    Total?: number;
-  };
-}
+// ---------------------------------------------------------------------------
+// Condition-to-keyword mapping
+// ---------------------------------------------------------------------------
 
 /**
- * Get preventive care recommendations for a patient based on demographics
+ * Maps ICD-10 code prefixes and condition names to MyHealthfinder keywords
  */
-export async function getPreventiveRecommendations(
-  patient: Patient
-): Promise<PreventiveRecommendation[]> {
-  // Create cache key based on age and gender
-  const cacheKey = `${patient.age}-${patient.gender}`;
-  const cached = recommendationCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiresAt) {
+const CONDITION_KEYWORDS: Record<string, string[]> = {
+  E11: ["diabetes"],
+  E10: ["diabetes"],
+  I10: ["blood pressure", "heart"],
+  I50: ["heart"],
+  I48: ["heart"],
+  J44: ["lung"],
+  E66: ["weight"],
+  N18: ["kidney"],
+};
+
+/** Extra keywords by age */
+function getAgeBasedKeywords(age: number): string[] {
+  const kw: string[] = [];
+  if (age >= 45) kw.push("colorectal cancer");
+  if (age >= 50) kw.push("lung cancer");
+  if (age >= 65) kw.push("fall", "osteoporosis");
+  return kw;
+}
+
+// ---------------------------------------------------------------------------
+// Simple in-memory cache
+// ---------------------------------------------------------------------------
+
+const topicCache = new Map<string, { data: MyHealthfinderTopic[]; ts: number }>();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+// ---------------------------------------------------------------------------
+// API fetch
+// ---------------------------------------------------------------------------
+
+async function fetchTopics(
+  age: number,
+  sex: "male" | "female",
+  keyword?: string
+): Promise<MyHealthfinderTopic[]> {
+  const params = new URLSearchParams({ age: String(age), sex });
+  if (keyword) params.set("keyword", keyword);
+
+  const cacheKey = params.toString();
+  const cached = topicCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
     return cached.data;
   }
 
-  const recommendations: PreventiveRecommendation[] = [];
+  const url = `${BASE_URL}/topicsearch.json?${params}`;
 
   try {
-    // Build query parameters based on patient demographics
-    const params = new URLSearchParams({
-      age: patient.age.toString(),
-      sex: patient.gender === "M" ? "male" : "female",
-      lang: "en",
-    });
-
-    // Optionally add pregnancy status if female
-    if (patient.gender === "F") {
-      const isPregnant = patient.diagnoses.some(
-        (d) =>
-          d.code.startsWith("O") || // ICD-10 pregnancy codes
-          d.display.toLowerCase().includes("pregnant") ||
-          d.display.toLowerCase().includes("pregnancy")
-      );
-      if (isPregnant) {
-        params.set("pregnant", "true");
-      }
-    }
-
-    // Note: Could add tobacco/sexual history parameters if Patient type is extended
-    // For now, the API returns appropriate recommendations based on age and sex
-
-    const url = `${MYHEALTHFINDER_BASE}/myhealthfinder.json?${params.toString()}`;
-    console.log(`[MyHealthfinder] Fetching recommendations: ${url}`);
-
     const response = await fetch(url, {
       headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
     });
 
     if (!response.ok) {
-      console.error(`[MyHealthfinder] API error: ${response.status}`);
-      return getDefaultPreventiveRecommendations(patient);
-    }
-
-    const data: MyHealthfinderResponse = await response.json();
-    const resources = data.Result?.Resources?.Resource || [];
-
-    for (const resource of resources) {
-      // Extract description from sections
-      let description = "";
-      if (resource.Sections && resource.Sections.length > 0) {
-        // Get first section with content, strip HTML
-        const section = resource.Sections.find((s) => s.Content || s.Description);
-        if (section) {
-          description = stripHtml(section.Content || section.Description || "");
-        }
-      }
-
-      recommendations.push({
-        id: resource.Id,
-        title: resource.Title,
-        category: resource.Categories || "Preventive Care",
-        description: description.substring(0, 500) + (description.length > 500 ? "..." : ""),
-        source: "MyHealthfinder (ODPHP)",
-        actionUrl: resource.AccessibleVersion || undefined,
-      });
-    }
-
-    // Cache the results
-    recommendationCache.set(cacheKey, {
-      data: recommendations,
-      expiresAt: Date.now() + CACHE_TTL,
-    });
-
-    return recommendations;
-  } catch (error) {
-    console.error("[MyHealthfinder] Fetch error:", error);
-    return getDefaultPreventiveRecommendations(patient);
-  }
-}
-
-/**
- * Get topic-specific recommendations
- */
-export async function getTopicRecommendations(
-  topicId: string
-): Promise<PreventiveRecommendation | null> {
-  try {
-    const url = `${MYHEALTHFINDER_BASE}/topicsearch.json?topicId=${encodeURIComponent(topicId)}`;
-    const response = await fetch(url, {
-      headers: { Accept: "application/json" },
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const data: MyHealthfinderResponse = await response.json();
-    const resource = data.Result?.Resources?.Resource?.[0];
-
-    if (!resource) return null;
-
-    let description = "";
-    if (resource.Sections && resource.Sections.length > 0) {
-      const section = resource.Sections.find((s) => s.Content || s.Description);
-      if (section) {
-        description = stripHtml(section.Content || section.Description || "");
-      }
-    }
-
-    return {
-      id: resource.Id,
-      title: resource.Title,
-      category: resource.Categories || "Preventive Care",
-      description: description.substring(0, 500) + (description.length > 500 ? "..." : ""),
-      source: "MyHealthfinder (ODPHP)",
-      actionUrl: resource.AccessibleVersion || undefined,
-    };
-  } catch (error) {
-    console.error("[MyHealthfinder] Topic fetch error:", error);
-    return null;
-  }
-}
-
-/**
- * Search for health topics
- */
-export async function searchHealthTopics(
-  keyword: string
-): Promise<PreventiveRecommendation[]> {
-  try {
-    const url = `${MYHEALTHFINDER_BASE}/itemlist.json?type=topic&keyword=${encodeURIComponent(keyword)}`;
-    const response = await fetch(url, {
-      headers: { Accept: "application/json" },
-    });
-
-    if (!response.ok) {
+      console.warn(`[MyHealthfinder] API returned ${response.status} for keyword=${keyword || "(none)"}`);
       return [];
     }
 
-    const data: MyHealthfinderResponse = await response.json();
-    const resources = data.Result?.Resources?.Resource || [];
+    const json: MyHealthfinderResponse = await response.json();
 
-    return resources.map((r) => ({
-      id: r.Id,
-      title: r.Title,
-      category: r.Categories || "Health Information",
-      description: "",
-      source: "MyHealthfinder (ODPHP)",
-      actionUrl: r.AccessibleVersion || undefined,
-    }));
+    if (json.Result.Error === "True" || !json.Result.Resources?.Resource) {
+      return [];
+    }
+
+    const topics = json.Result.Resources.Resource;
+    topicCache.set(cacheKey, { data: topics, ts: Date.now() });
+    return topics;
   } catch (error) {
-    console.error("[MyHealthfinder] Search error:", error);
+    traceError("myhealthfinder-api", error, { dataSource: "MyHealthfinder" });
     return [];
   }
 }
 
-/**
- * Compare MyHealthfinder recommendations against what's documented in patient record
- * Returns recommendations that appear to be care gaps (not documented as completed)
- */
-export async function identifyPreventiveCareGaps(
-  patient: Patient
-): Promise<{
-  recommendation: PreventiveRecommendation;
-  status: "likely_gap" | "may_be_due" | "check_with_provider";
-  reason: string;
-}[]> {
-  const recommendations = await getPreventiveRecommendations(patient);
-  const gaps: {
-    recommendation: PreventiveRecommendation;
-    status: "likely_gap" | "may_be_due" | "check_with_provider";
-    reason: string;
-  }[] = [];
+// ---------------------------------------------------------------------------
+// Strip HTML to plain text
+// ---------------------------------------------------------------------------
 
-  // Extract patient's documented conditions and labs for comparison
-  // Note: Full procedure/immunization history would require extending Patient type
-  const patientHistory = [
-    ...patient.diagnoses.map((d) => d.display.toLowerCase()),
-    ...patient.recentLabs?.map((l) => l.name.toLowerCase()) || [],
-  ].join(" ");
-
-  // If API returned empty results, use default recommendations to check for gaps
-  const recsToCheck = recommendations.length > 0
-    ? recommendations
-    : getDefaultPreventiveRecommendations(patient);
-
-  console.log(`[MyHealthfinder] Checking ${recsToCheck.length} recommendations for gaps (API returned ${recommendations.length})`);
-
-  for (const rec of recsToCheck) {
-    const titleLower = rec.title.toLowerCase();
-
-    // Check for common preventive screenings
-    if (titleLower.includes("colonoscopy") || titleLower.includes("colon cancer")) {
-      if (!patientHistory.includes("colonoscopy") && patient.age >= 45) {
-        gaps.push({
-          recommendation: rec,
-          status: "may_be_due",
-          reason: "Colonoscopy is recommended for adults 45-75. Not documented in record.",
-        });
-      }
-    } else if (titleLower.includes("mammogram") || titleLower.includes("breast cancer")) {
-      if (patient.gender === "F" && patient.age >= 40 && !patientHistory.includes("mammogram")) {
-        gaps.push({
-          recommendation: rec,
-          status: "may_be_due",
-          reason: "Mammogram recommended for women 40+. Not documented in record.",
-        });
-      }
-    } else if (titleLower.includes("flu") || titleLower.includes("influenza")) {
-      if (!patientHistory.includes("flu") && !patientHistory.includes("influenza")) {
-        gaps.push({
-          recommendation: rec,
-          status: "check_with_provider",
-          reason: "Annual flu vaccine recommended. Check if received this season.",
-        });
-      }
-    } else if (titleLower.includes("blood pressure")) {
-      if (!patient.vitalSigns?.bloodPressure) {
-        gaps.push({
-          recommendation: rec,
-          status: "check_with_provider",
-          reason: "Blood pressure monitoring recommended. Should be checked at visits.",
-        });
-      }
-    } else if (titleLower.includes("cholesterol") || titleLower.includes("lipid")) {
-      const hasLipidLab = patient.recentLabs?.some(
-        (l) => l.name.toLowerCase().includes("cholesterol") || l.name.toLowerCase().includes("lipid")
-      );
-      if (!hasLipidLab && patient.age >= 20) {
-        gaps.push({
-          recommendation: rec,
-          status: "may_be_due",
-          reason: "Lipid screening recommended. Not found in recent labs.",
-        });
-      }
-    } else if (titleLower.includes("diabetes") && titleLower.includes("screen")) {
-      const hasDiabetesScreen = patient.recentLabs?.some(
-        (l) => l.name.toLowerCase().includes("glucose") || l.name.toLowerCase().includes("a1c")
-      );
-      if (!hasDiabetesScreen && patient.age >= 35) {
-        gaps.push({
-          recommendation: rec,
-          status: "check_with_provider",
-          reason: "Diabetes screening recommended for adults 35-70 with overweight/obesity.",
-        });
-      }
-    }
-  }
-
-  return gaps;
-}
-
-/**
- * Default preventive recommendations when API is unavailable
- */
-function getDefaultPreventiveRecommendations(patient: Patient): PreventiveRecommendation[] {
-  const recommendations: PreventiveRecommendation[] = [];
-
-  // Age-based screening recommendations (USPSTF)
-  if (patient.age >= 45 && patient.age <= 75) {
-    recommendations.push({
-      id: "colorectal-screening",
-      title: "Colorectal Cancer Screening",
-      category: "Cancer Screening",
-      description: "Adults ages 45-75 should be screened for colorectal cancer. Options include colonoscopy every 10 years, or stool-based tests more frequently.",
-      ageRange: "45-75",
-      frequency: "Every 10 years (colonoscopy) or 1-3 years (stool tests)",
-      uspstfGrade: "A",
-      source: "USPSTF",
-    });
-  }
-
-  if (patient.gender === "F" && patient.age >= 40) {
-    recommendations.push({
-      id: "breast-screening",
-      title: "Breast Cancer Screening (Mammogram)",
-      category: "Cancer Screening",
-      description: "Women should discuss breast cancer screening with their provider. Mammograms are recommended every 1-2 years starting between ages 40-50.",
-      ageRange: "40-74",
-      frequency: "Every 1-2 years",
-      uspstfGrade: "B",
-      source: "USPSTF",
-    });
-  }
-
-  if (patient.gender === "F" && patient.age >= 21 && patient.age <= 65) {
-    recommendations.push({
-      id: "cervical-screening",
-      title: "Cervical Cancer Screening",
-      category: "Cancer Screening",
-      description: "Women ages 21-65 should be screened for cervical cancer with Pap smear every 3 years or Pap + HPV testing every 5 years (ages 30-65).",
-      ageRange: "21-65",
-      frequency: "Every 3-5 years",
-      uspstfGrade: "A",
-      source: "USPSTF",
-    });
-  }
-
-  // Everyone
-  recommendations.push({
-    id: "flu-vaccine",
-    title: "Annual Flu Vaccine",
-    category: "Immunizations",
-    description: "Everyone 6 months and older should get a flu vaccine every year, ideally by the end of October.",
-    frequency: "Annually",
-    source: "CDC/ACIP",
-  });
-
-  if (patient.age >= 65) {
-    recommendations.push({
-      id: "pneumonia-vaccine",
-      title: "Pneumonia Vaccine",
-      category: "Immunizations",
-      description: "Adults 65 and older should receive pneumococcal vaccines (PCV15 or PCV20).",
-      ageRange: "65+",
-      source: "CDC/ACIP",
-    });
-  }
-
-  if (patient.age >= 50) {
-    recommendations.push({
-      id: "shingles-vaccine",
-      title: "Shingles Vaccine (Shingrix)",
-      category: "Immunizations",
-      description: "Adults 50 and older should receive 2 doses of the Shingrix vaccine to prevent shingles.",
-      ageRange: "50+",
-      source: "CDC/ACIP",
-    });
-  }
-
-  return recommendations;
-}
-
-/**
- * Strip HTML tags from text
- */
 function stripHtml(html: string): string {
   return html
     .replace(/<[^>]*>/g, " ")
@@ -405,6 +159,327 @@ function stripHtml(html: string): string {
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// ---------------------------------------------------------------------------
+// Filtering irrelevant topics
+// ---------------------------------------------------------------------------
+
+const SKIP_TITLE_PATTERNS = [
+  "baby", "child", "children", "kid",
+  "pregnancy", "pregnant", "breastfeed", "breastfeeding",
+  "preeclampsia", "gestational",
+  "teen", "adolescent",
+  "infant", "newborn", "toddler",
+];
+
+function isRelevantTopic(topic: MyHealthfinderTopic): boolean {
+  const title = topic.Title.toLowerCase();
+  return !SKIP_TITLE_PATTERNS.some((p) => title.includes(p));
+}
+
+// ---------------------------------------------------------------------------
+// Lab-based screening checks
+// ---------------------------------------------------------------------------
+
+interface ScreeningCheck {
+  titleKeywords: string[];
+  labKeywords: string[];
+  conditionCodes?: string[];
+  minAge?: number;
+  genderOnly?: "M" | "F";
+}
+
+const SCREENING_CHECKS: ScreeningCheck[] = [
+  {
+    titleKeywords: ["a1c", "blood sugar", "diabetes"],
+    labKeywords: ["a1c", "hba1c", "glucose"],
+    conditionCodes: ["E11", "E10"],
+  },
+  {
+    titleKeywords: ["cholesterol", "lipid"],
+    labKeywords: ["cholesterol", "ldl", "hdl", "lipid"],
+    minAge: 20,
+  },
+  {
+    titleKeywords: ["blood pressure"],
+    labKeywords: [], // checked via vitalSigns
+  },
+  {
+    titleKeywords: ["colorectal", "colon cancer"],
+    labKeywords: ["colonoscopy", "fit", "fobt", "cologuard"],
+    minAge: 45,
+  },
+  {
+    titleKeywords: ["lung cancer"],
+    labKeywords: ["ldct", "lung ct"],
+    minAge: 50,
+  },
+  {
+    titleKeywords: ["bone density", "osteoporosis"],
+    labKeywords: ["dexa", "bone density"],
+    minAge: 65,
+  },
+  {
+    titleKeywords: ["mammogram", "breast cancer"],
+    labKeywords: ["mammogram", "mammography"],
+    minAge: 40,
+    genderOnly: "F",
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Topic → CareGap conversion
+// ---------------------------------------------------------------------------
+
+function topicToCareGap(
+  topic: MyHealthfinderTopic,
+  patient: Patient,
+  matchedKeyword: string
+): CareGap | null {
+  if (!isRelevantTopic(topic)) return null;
+
+  const title = topic.Title.toLowerCase();
+
+  // Extract recommendation text from first 2 sections
+  const sections = topic.Sections?.section || [];
+  const recText = sections
+    .slice(0, 2)
+    .map((s) => stripHtml(s.Content))
+    .join(" ")
+    .substring(0, 400);
+
+  if (!recText) return null;
+
+  // Determine met/unmet status by checking labs and vitals
+  let status: CareGap["status"] = "unmet";
+
+  for (const check of SCREENING_CHECKS) {
+    const matchesTitle = check.titleKeywords.some((kw) => title.includes(kw));
+    if (!matchesTitle) continue;
+
+    // Enforce age/gender filters
+    if (check.minAge && patient.age < check.minAge) return null;
+    if (check.genderOnly && patient.gender !== check.genderOnly) return null;
+
+    // Condition-specific: skip if patient doesn't have the condition
+    if (check.conditionCodes) {
+      const hasCondition = patient.diagnoses.some((d) =>
+        check.conditionCodes!.some((code) => d.code.startsWith(code))
+      );
+      if (!hasCondition) return null;
+    }
+
+    // Blood pressure check via vitals
+    if (check.titleKeywords.includes("blood pressure")) {
+      if (patient.vitalSigns?.bloodPressure) {
+        status = "met";
+      }
+      break;
+    }
+
+    // Lab-based check
+    if (check.labKeywords.length > 0 && patient.recentLabs) {
+      const hasLab = patient.recentLabs.some((lab) =>
+        check.labKeywords.some((kw) => lab.name.toLowerCase().includes(kw))
+      );
+      if (hasLab) {
+        status = "met";
+      }
+    }
+    break; // matched a check, stop looking
+  }
+
+  return {
+    id: `mhf-${topic.Id}`,
+    guideline: topic.Title,
+    organization: "USPSTF/MyHealthfinder",
+    recommendation: recText,
+    grade: "B", // MyHealthfinder topics are generally USPSTF Grade A or B
+    status,
+    evidence: `Source: MyHealthfinder (${topic.Categories || matchedKeyword}). ${topic.AccessibleVersion || ""}`.trim(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch preventive care recommendations from MyHealthfinder API
+ * based on patient demographics and conditions, then compare against
+ * patient clinical data to identify care gaps.
+ *
+ * Returns CareGap[] matching the same interface as guidelines-client.ts
+ * so both sources can be merged seamlessly.
+ */
+export async function getMyHealthfinderCareGaps(
+  patient: Patient
+): Promise<CareGap[]> {
+  const sex = patient.gender === "F" ? "female" : "male";
+  const age = patient.age;
+
+  // Collect keywords from patient conditions
+  const keywords = new Set<string>();
+
+  for (const diagnosis of patient.diagnoses) {
+    const codePrefix = diagnosis.code.substring(0, 3);
+    const kws = CONDITION_KEYWORDS[codePrefix];
+    if (kws) kws.forEach((kw) => keywords.add(kw));
+  }
+
+  // Add age-based screening keywords
+  getAgeBasedKeywords(age).forEach((kw) => keywords.add(kw));
+
+  // Always include general screening
+  keywords.add("screening");
+
+  console.log(
+    `[MyHealthfinder] Fetching for ${age}yo ${sex}, keywords: [${[...keywords].join(", ")}]`
+  );
+
+  // Fetch topics for each keyword in parallel
+  const keywordArray = [...keywords];
+  const results = await Promise.all(
+    keywordArray.map((kw) =>
+      fetchTopics(age, sex, kw).then((topics) => ({ keyword: kw, topics }))
+    )
+  );
+
+  // Deduplicate topics by ID and convert to CareGap
+  const seenIds = new Set<string>();
+  const careGaps: CareGap[] = [];
+
+  for (const { keyword, topics } of results) {
+    for (const topic of topics) {
+      if (seenIds.has(topic.Id)) continue;
+      seenIds.add(topic.Id);
+
+      const gap = topicToCareGap(topic, patient, keyword);
+      if (gap) careGaps.push(gap);
+    }
+  }
+
+  // If the API returned nothing useful, fall back to hardcoded defaults
+  if (careGaps.length === 0) {
+    console.warn("[MyHealthfinder] API returned no useful gaps, using defaults");
+    return getDefaultCareGaps(patient);
+  }
+
+  const unmetCount = careGaps.filter((g) => g.status === "unmet").length;
+  console.log(`[MyHealthfinder] Found ${careGaps.length} gaps (${unmetCount} unmet)`);
+
+  return careGaps;
+}
+
+/**
+ * Get only unmet care gaps from MyHealthfinder
+ */
+export async function getUnmetMyHealthfinderGaps(
+  patient: Patient
+): Promise<CareGap[]> {
+  const gaps = await getMyHealthfinderCareGaps(patient);
+  return gaps.filter((g) => g.status === "unmet");
+}
+
+/**
+ * Also export the old function name for backwards compatibility
+ * (used in identifyPreventiveCareGaps pattern)
+ */
+export async function getPreventiveRecommendations(
+  patient: Patient
+): Promise<PreventiveRecommendation[]> {
+  const sex = patient.gender === "F" ? "female" : "male";
+  const topics = await fetchTopics(patient.age, sex);
+  return topics.filter(isRelevantTopic).map((t) => ({
+    id: t.Id,
+    title: t.Title,
+    category: t.Categories || "Preventive Care",
+    description: (t.Sections?.section || [])
+      .slice(0, 1)
+      .map((s) => stripHtml(s.Content))
+      .join(" ")
+      .substring(0, 500),
+    source: "MyHealthfinder (ODPHP)",
+    actionUrl: t.AccessibleVersion || undefined,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Fallback defaults when API is unavailable
+// ---------------------------------------------------------------------------
+
+function getDefaultCareGaps(patient: Patient): CareGap[] {
+  const gaps: CareGap[] = [];
+
+  if (patient.age >= 45 && patient.age <= 75) {
+    const hasColonoscopy = patient.recentLabs?.some((l) =>
+      ["colonoscopy", "fit", "fobt"].some((kw) => l.name.toLowerCase().includes(kw))
+    );
+    if (!hasColonoscopy) {
+      gaps.push({
+        id: "mhf-colorectal",
+        guideline: "Colorectal Cancer Screening",
+        organization: "USPSTF/MyHealthfinder",
+        recommendation:
+          "Adults ages 45-75 should be screened for colorectal cancer. Options include colonoscopy every 10 years, or stool-based tests more frequently.",
+        grade: "A",
+        status: "unmet",
+        evidence: "USPSTF Grade A recommendation",
+      });
+    }
+  }
+
+  if (patient.gender === "F" && patient.age >= 40) {
+    const hasMammo = patient.recentLabs?.some((l) =>
+      l.name.toLowerCase().includes("mammogram")
+    );
+    if (!hasMammo) {
+      gaps.push({
+        id: "mhf-breast",
+        guideline: "Breast Cancer Screening (Mammogram)",
+        organization: "USPSTF/MyHealthfinder",
+        recommendation:
+          "Women should discuss breast cancer screening with their provider. Biennial screening mammography is recommended for women ages 50-74.",
+        grade: "B",
+        status: "unmet",
+        evidence: "USPSTF Grade B recommendation",
+      });
+    }
+  }
+
+  if (patient.age >= 65) {
+    gaps.push({
+      id: "mhf-fall-risk",
+      guideline: "Fall Prevention for Older Adults",
+      organization: "USPSTF/MyHealthfinder",
+      recommendation:
+        "Adults 65+ should be assessed for fall risk. Exercise interventions to prevent falls are recommended.",
+      grade: "B",
+      status: "unmet",
+      evidence: "USPSTF Grade B recommendation",
+    });
+  }
+
+  // Lipid screening for adults with cardiovascular risk
+  const hasLipid = patient.recentLabs?.some((l) =>
+    ["cholesterol", "ldl", "hdl", "lipid"].some((kw) => l.name.toLowerCase().includes(kw))
+  );
+  if (!hasLipid && patient.age >= 40) {
+    gaps.push({
+      id: "mhf-lipid",
+      guideline: "Lipid Screening",
+      organization: "USPSTF/MyHealthfinder",
+      recommendation:
+        "Adults at increased risk for cardiovascular disease should have lipid levels checked. Statin therapy may be indicated.",
+      grade: "B",
+      status: "unmet",
+      evidence: "USPSTF Grade B recommendation",
+    });
+  }
+
+  return gaps;
 }

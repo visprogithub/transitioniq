@@ -7,6 +7,7 @@
  * environment, this client would connect to a real FHIR R4 endpoint.
  */
 import type { Patient, Diagnosis, Medication, LabResult } from "../types/patient";
+import { traceError } from "@/lib/integrations/opik";
 
 const FHIR_BASE_URL = process.env.FHIR_BASE_URL || "https://launch.smarthealthit.org/v/r4/fhir";
 
@@ -300,7 +301,7 @@ export async function fetchPatientFromFHIR(patientId: string): Promise<Patient |
       vitalSigns,
     };
   } catch (error) {
-    console.error("FHIR fetch error:", error);
+    traceError("fhir-fetch", error, { dataSource: "FHIR" });
     return null;
   }
 }
@@ -326,7 +327,7 @@ export async function fetchAllergiesFromFHIR(patientId: string): Promise<string[
       }) || []
     );
   } catch (error) {
-    console.error("Failed to fetch allergies:", error);
+    traceError("fhir-fetch-allergies", error, { dataSource: "FHIR" });
     return [];
   }
 }

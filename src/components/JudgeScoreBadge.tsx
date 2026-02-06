@@ -15,6 +15,7 @@ import {
   CheckCircle,
   XCircle,
 } from "lucide-react";
+import { SimpleProgressSteps, JUDGE_EVALUATION_STEPS } from "@/components/SimpleProgressSteps";
 
 export interface JudgeEvaluation {
   safety: { score: number; reasoning: string };
@@ -55,10 +56,7 @@ export function JudgeScoreBadge({
 
   if (isLoading) {
     return (
-      <div className="flex items-center gap-2 px-3 py-2 bg-gray-100 rounded-lg">
-        <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
-        <span className="text-sm text-gray-600">Running quality check...</span>
-      </div>
+      <SimpleProgressSteps steps={JUDGE_EVALUATION_STEPS} isActive={true} />
     );
   }
 

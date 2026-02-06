@@ -449,6 +449,12 @@ const DISCHARGE_ANALYSIS_PROMPT = `You are a clinical decision support system an
 ## Drug Interaction Analysis (FDA)
 {{drug_interactions}}
 
+## FDA Black Box Warnings (Most Serious Safety Warnings)
+{{fda_black_box_warnings}}
+
+## FDA Drug Recalls
+{{fda_recalls}}
+
 ## Care Gap Analysis (Clinical Guidelines)
 {{care_gaps}}
 
@@ -1138,6 +1144,8 @@ export function formatDischargePrompt(
     medications: string;
     allergies: string;
     drug_interactions: string;
+    fda_black_box_warnings: string;
+    fda_recalls: string;
     care_gaps: string;
     cost_barriers: string;
     lab_results: string;

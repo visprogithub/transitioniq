@@ -87,7 +87,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(response);
   } catch (error) {
-    console.error("Agent error:", error);
     await traceError("api-agent", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Agent execution failed" },

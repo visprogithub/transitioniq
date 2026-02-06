@@ -11,6 +11,8 @@
  * Production usage would require CMS data.cms.gov API registration.
  */
 
+import { traceError } from "@/lib/integrations/opik";
+
 const CMS_DATA_BASE = "https://data.cms.gov/data-api/v1/dataset";
 const NDC_DIRECTORY_ID = "9cbc-g8cz"; // NDC Directory dataset
 
@@ -128,7 +130,7 @@ export async function estimateSingleDrugCost(
       };
     }
   } catch (error) {
-    console.log(`[CMS] API lookup failed for ${drugName}, using estimate:`, error);
+    traceError("cms-api-lookup", error, { dataSource: "CMS", drug: drugName });
   }
 
   // Fall back to tier-based estimation
@@ -183,7 +185,7 @@ async function fetchCMSDrugCost(
 
     return null;
   } catch (error) {
-    console.error(`[CMS] NDC lookup failed:`, error);
+    traceError("cms-ndc-lookup", error, { dataSource: "CMS", drug: drugName });
     return null;
   }
 }

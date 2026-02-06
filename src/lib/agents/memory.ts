@@ -22,6 +22,7 @@
  */
 
 import { Opik } from "opik";
+import { traceError } from "@/lib/integrations/opik";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 import type { Patient } from "@/lib/types/patient";
 
@@ -612,6 +613,6 @@ export function importLongTermMemory(json: string): void {
 
     console.log("[Memory] Long-term memory imported successfully");
   } catch (error) {
-    console.error("[Memory] Failed to import long-term memory:", error);
+    traceError("memory-import", error);
   }
 }

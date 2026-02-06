@@ -6,7 +6,12 @@
  */
 
 import { getPatient } from "@/lib/data/demo-patients";
-import { checkDrugInteractions } from "@/lib/integrations/fda-client";
+import {
+  checkDrugInteractions,
+  checkBoxedWarnings,
+  checkDrugRecalls,
+  getComprehensiveDrugSafety,
+} from "@/lib/integrations/fda-client";
 import {
   analyzeDischargeReadiness as llmAnalyzeReadiness,
   generateDischargePlan as llmGeneratePlan,
@@ -14,6 +19,7 @@ import {
 import { getActiveModelId } from "@/lib/integrations/llm-provider";
 import { estimateMedicationCosts } from "@/lib/integrations/cms-client";
 import { evaluateCareGaps as ruleBasedCareGaps } from "@/lib/integrations/guidelines-client";
+import { getMyHealthfinderCareGaps } from "@/lib/integrations/myhealthfinder-client";
 import {
   getCareGapEvaluationPrompt,
   formatCareGapEvaluationPrompt,
@@ -25,8 +31,19 @@ import {
 import { retrieveKnowledge, getIndexStats } from "@/lib/knowledge-base/knowledge-index";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
-import type { ToolResult, ToolName, PatientContext, DrugInteractionContext, CareGapContext, CostContext } from "./types";
+import type {
+  ToolResult,
+  ToolName,
+  PatientContext,
+  DrugInteractionContext,
+  BoxedWarningContext,
+  DrugRecallContext,
+  ComprehensiveDrugSafetyContext,
+  CareGapContext,
+  CostContext,
+} from "./types";
 import { extractJsonArray } from "@/lib/utils/llm-json";
+import { traceError } from "@/lib/integrations/opik";
 
 /**
  * Tool Registry - Maps tool names to their implementations
@@ -43,6 +60,18 @@ export const TOOLS: Record<ToolName, ToolDefinition> = {
     description: "Check for drug-drug interactions using FDA RxNorm database",
     parameters: ["medications"],
     execute: checkDrugInteractionsTool,
+  },
+  check_boxed_warnings: {
+    name: "check_boxed_warnings",
+    description: "Check for FDA Black Box Warnings (most serious safety warnings) on patient medications",
+    parameters: ["medications"],
+    execute: checkBoxedWarningsTool,
+  },
+  check_drug_recalls: {
+    name: "check_drug_recalls",
+    description: "Check for recent FDA drug recalls on all patient medications",
+    parameters: ["medications"],
+    execute: checkDrugRecallsBatchTool,
   },
   evaluate_care_gaps: {
     name: "evaluate_care_gaps",
@@ -65,7 +94,7 @@ export const TOOLS: Record<ToolName, ToolDefinition> = {
   analyze_readiness: {
     name: "analyze_readiness",
     description: "Analyze all gathered data using selected LLM to compute discharge readiness score and risk factors",
-    parameters: ["patient", "drugInteractions", "careGaps", "costs"],
+    parameters: ["patient", "drugInteractions", "careGaps", "costs", "boxedWarnings", "recalls"],
     execute: analyzeReadinessTool,
   },
   generate_plan: {
@@ -143,10 +172,158 @@ async function checkDrugInteractionsTool(input: Record<string, unknown>): Promis
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] FDA drug interaction check failed:", error);
+    traceError("tool-check-drug-interactions", error, { dataSource: "FDA-Interactions" });
     return {
       success: false,
       error: error instanceof Error ? error.message : "FDA drug interaction check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Check for FDA Black Box Warnings on medications
+ * Uses real FDA label data via OpenFDA API
+ */
+async function checkBoxedWarningsTool(input: Record<string, unknown>): Promise<ToolResult<BoxedWarningContext[]>> {
+  const startTime = Date.now();
+  const medications = input.medications as Patient["medications"];
+
+  try {
+    const warnings = await checkBoxedWarnings(
+      medications.map((m) => ({ name: m.name }))
+    );
+
+    console.log(`[Agent Tool] FDA boxed warnings: found ${warnings.length} for ${medications.length} medications`);
+
+    return {
+      success: true,
+      data: warnings.map((w) => ({
+        drug: w.drug,
+        warning: w.warning,
+      })),
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    traceError("tool-check-boxed-warnings", error, { dataSource: "FDA-BoxedWarnings" });
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "FDA boxed warning check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Check for recent FDA drug recalls
+ * Uses OpenFDA enforcement API
+ */
+async function checkDrugRecallsTool(input: Record<string, unknown>): Promise<ToolResult<DrugRecallContext[]>> {
+  const startTime = Date.now();
+  const drugName = input.drugName as string;
+
+  try {
+    const recalls = await checkDrugRecalls(drugName);
+
+    console.log(`[Agent Tool] FDA recalls: found ${recalls.length} for ${drugName}`);
+
+    return {
+      success: true,
+      data: recalls.map((r) => ({
+        drugName: r.drugName,
+        recallNumber: r.recallNumber,
+        reason: r.reason,
+        classification: r.classification,
+        status: r.status,
+        recallDate: r.recallDate,
+      })),
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    traceError("tool-check-drug-recalls", error, { dataSource: "FDA-Recalls" });
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "FDA recall check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Get comprehensive FDA safety profile for a drug
+ * Combines FAERS adverse event counts, boxed warnings, recalls, and risk level
+ */
+async function getComprehensiveDrugSafetyTool(input: Record<string, unknown>): Promise<ToolResult<ComprehensiveDrugSafetyContext>> {
+  const startTime = Date.now();
+  const drugName = input.drugName as string;
+
+  try {
+    const safety = await getComprehensiveDrugSafety(drugName);
+
+    console.log(`[Agent Tool] Comprehensive safety for ${drugName}: FAERS=${safety.faersReportCount}, boxedWarning=${safety.hasBoxedWarning}, recalls=${safety.recentRecalls.length}, risk=${safety.riskLevel}`);
+
+    return {
+      success: true,
+      data: {
+        drugName: safety.drugName,
+        faersReportCount: safety.faersReportCount,
+        hasBoxedWarning: safety.hasBoxedWarning,
+        boxedWarningSummary: safety.boxedWarningSummary,
+        recentRecalls: safety.recentRecalls.map((r) => ({
+          drugName: r.drugName,
+          recallNumber: r.recallNumber,
+          reason: r.reason,
+          classification: r.classification,
+          status: r.status,
+          recallDate: r.recallDate,
+        })),
+        topAdverseReactions: safety.topAdverseReactions,
+        riskLevel: safety.riskLevel,
+      },
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    traceError("tool-comprehensive-safety", error, { dataSource: "FDA" });
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Comprehensive safety check failed",
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Check for recent FDA drug recalls across ALL patient medications (batch)
+ * Uses OpenFDA enforcement API
+ */
+async function checkDrugRecallsBatchTool(input: Record<string, unknown>): Promise<ToolResult<DrugRecallContext[]>> {
+  const startTime = Date.now();
+  const medications = input.medications as Patient["medications"];
+
+  try {
+    const recallPromises = medications.map((m) => checkDrugRecalls(m.name));
+    const results = await Promise.all(recallPromises);
+    const allRecalls = results.flat();
+
+    console.log(`[Agent Tool] FDA recalls: found ${allRecalls.length} across ${medications.length} medications`);
+
+    return {
+      success: true,
+      data: allRecalls.map((r) => ({
+        drugName: r.drugName,
+        recallNumber: r.recallNumber,
+        reason: r.reason,
+        classification: r.classification,
+        status: r.status,
+        recallDate: r.recallDate,
+      })),
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    traceError("tool-batch-recall-check", error, { dataSource: "FDA-Recalls" });
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "FDA recall check failed",
       duration: Date.now() - startTime,
     };
   }
@@ -167,12 +344,29 @@ async function evaluateCareGapsTool(input: Record<string, unknown>): Promise<Too
 
   try {
     // Gather deterministic rule-based data to augment LLM reasoning
-    const ruleResults = ruleBasedCareGaps(patient);
-    const ruleBasedSummary = ruleResults
+    const [ruleResults, myhealthfinderGaps] = await Promise.all([
+      Promise.resolve(ruleBasedCareGaps(patient)),
+      getMyHealthfinderCareGaps(patient).catch((err) => {
+        traceError("tool-myhealthfinder", err, { dataSource: "MyHealthfinder" });
+        return [];
+      }),
+    ]);
+
+    // Merge rule-based + MyHealthfinder gaps (dedup by guideline name)
+    const combinedRuleGaps = [...ruleResults];
+    const seenNames = new Set(combinedRuleGaps.map((g) => g.guideline.toLowerCase()));
+    for (const mhfGap of myhealthfinderGaps) {
+      if (!seenNames.has(mhfGap.guideline.toLowerCase())) {
+        combinedRuleGaps.push(mhfGap);
+        seenNames.add(mhfGap.guideline.toLowerCase());
+      }
+    }
+
+    const ruleBasedSummary = combinedRuleGaps
       .map((r) => `- ${r.guideline} (${r.organization}, Grade ${r.grade}): ${r.status}${r.status === "unmet" ? ` — ${r.recommendation}` : ""}`)
       .join("\n");
 
-    console.log(`[Agent Tool] Rule-based pre-check found ${ruleResults.length} applicable guidelines (${ruleResults.filter((r) => r.status === "unmet").length} unmet)`);
+    console.log(`[Agent Tool] Rule-based: ${ruleResults.length} gaps, MyHealthfinder: ${myhealthfinderGaps.length} gaps, combined: ${combinedRuleGaps.length} (after dedup)`);
 
     // LLM performs primary analysis, augmented with rule-based data
     const { createLLMProvider } = await import("@/lib/integrations/llm-provider");
@@ -198,14 +392,21 @@ async function evaluateCareGapsTool(input: Record<string, unknown>): Promise<Too
         medication_count: patient.medications.length,
         rule_based_gap_count: ruleResults.length,
         rule_based_unmet_count: ruleResults.filter((r) => r.status === "unmet").length,
+        myhealthfinder_gap_count: myhealthfinderGaps.length,
+        myhealthfinder_unmet_count: myhealthfinderGaps.filter((g) => g.status === "unmet").length,
       },
     });
 
     // Parse LLM response (handles Qwen3 thinking tokens, trailing commas, etc.)
-    const llmGaps = extractJsonArray<CareGapContext[]>(response.content);
+    let llmGaps: CareGapContext[] = [];
+    try {
+      llmGaps = extractJsonArray<CareGapContext[]>(response.content);
+    } catch (parseError) {
+      traceError("tool-care-gap-parse", parseError, { dataSource: "Guidelines" });
+    }
 
-    // Merge rule-based + LLM results, deduplicating by guideline name
-    const mergedGaps: CareGapContext[] = ruleResults.map((r) => ({
+    // Merge rule-based + MyHealthfinder + LLM results, deduplicating by guideline name
+    const mergedGaps: CareGapContext[] = combinedRuleGaps.map((r) => ({
       guideline: r.guideline,
       status: r.status,
       grade: r.grade,
@@ -219,7 +420,7 @@ async function evaluateCareGapsTool(input: Record<string, unknown>): Promise<Too
       }
     }
 
-    console.log(`[Agent Tool] Care gap evaluation: ${ruleResults.length} rule-based + ${llmGaps.length} LLM = ${mergedGaps.length} total (after dedup)`);
+    console.log(`[Agent Tool] Care gap evaluation: ${ruleResults.length} rule-based + ${myhealthfinderGaps.length} MyHealthfinder + ${llmGaps.length} LLM = ${mergedGaps.length} total (after dedup)`);
 
     return {
       success: true,
@@ -227,12 +428,11 @@ async function evaluateCareGapsTool(input: Record<string, unknown>): Promise<Too
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] Care gap evaluation failed:", error);
+    traceError("tool-evaluate-care-gaps", error, { dataSource: "Guidelines" });
 
     // Fallback: return rule-based results if LLM fails
     try {
       const fallbackResults = ruleBasedCareGaps(patient);
-      console.warn("[Agent Tool] Using rule-based fallback for care gaps");
       return {
         success: true,
         data: fallbackResults.map((r) => ({
@@ -308,14 +508,13 @@ async function estimateCostsTool(input: Record<string, unknown>): Promise<ToolRe
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] LLM cost estimation failed, falling back to CMS data:", error);
+    traceError("tool-estimate-costs", error, { dataSource: "CMS" });
 
     // Fallback: use raw CMS data if LLM fails
     try {
       const fallbackEstimates = await estimateMedicationCosts(
         medications.map((m) => ({ name: m.name, dose: m.dose, frequency: m.frequency }))
       );
-      console.warn("[Agent Tool] Using CMS data fallback for costs");
       return {
         success: true,
         data: fallbackEstimates.map((e) => ({
@@ -458,7 +657,7 @@ async function retrieveKnowledgeTool(input: Record<string, unknown>): Promise<To
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] Knowledge retrieval failed, returning raw search results:", error);
+    traceError("tool-knowledge-retrieval", error, { dataSource: "Guidelines" });
 
     // Fallback: return raw search results without LLM synthesis
     try {
@@ -507,11 +706,14 @@ async function analyzeReadinessTool(input: Record<string, unknown>): Promise<Too
   const startTime = Date.now();
 
   const patient = input.patient as Patient;
-  const drugInteractions = input.drugInteractions as DrugInteractionContext[];
-  const careGaps = input.careGaps as CareGapContext[];
-  const costs = input.costs as CostContext[];
+  const drugInteractions = (input.drugInteractions || []) as DrugInteractionContext[];
+  const careGaps = (input.careGaps || []) as CareGapContext[];
+  const costs = (input.costs || []) as CostContext[];
+  const boxedWarnings = (input.boxedWarnings || []) as BoxedWarningContext[];
+  const drugRecalls = (input.recalls || []) as DrugRecallContext[];
 
   console.log(`[Agent Tool] analyze_readiness using model: ${getActiveModelId()}`);
+  console.log(`[Agent Tool] analyze_readiness inputs: ${drugInteractions.length} interactions, ${boxedWarnings.length} boxed warnings, ${drugRecalls.length} recalls, ${careGaps.length} care gaps, ${costs.length} costs`);
 
   try {
     // Convert tool context types to analysis types
@@ -535,12 +737,27 @@ async function analyzeReadinessTool(input: Record<string, unknown>): Promise<Too
       covered: c.covered,
     }));
 
-    // Use LLM-powered analysis with the selected model
+    // Format boxed warnings for analysis
+    const formattedWarnings = boxedWarnings.map((w) => ({
+      drug: w.drug,
+      warning: w.warning,
+    }));
+
+    // Format recalls for analysis
+    const formattedRecalls = drugRecalls.map((r) => ({
+      drugName: r.drugName,
+      reason: r.reason,
+      classification: r.classification,
+    }));
+
+    // Use LLM-powered analysis with the selected model, including FDA safety data
     const analysis = await llmAnalyzeReadiness(
       patient,
       formattedInteractions,
       formattedGaps,
-      formattedCosts
+      formattedCosts,
+      formattedWarnings.length > 0 ? formattedWarnings : undefined,
+      formattedRecalls.length > 0 ? formattedRecalls : undefined
     );
 
     return {
@@ -549,7 +766,7 @@ async function analyzeReadinessTool(input: Record<string, unknown>): Promise<Too
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] LLM analysis failed:", error);
+    traceError("tool-analyze-readiness", error);
     return {
       success: false,
       error: error instanceof Error ? error.message : "LLM analysis failed",
@@ -580,7 +797,7 @@ async function generatePlanTool(input: Record<string, unknown>): Promise<ToolRes
       duration: Date.now() - startTime,
     };
   } catch (error) {
-    console.error("[Agent Tool] LLM plan generation failed:", error);
+    traceError("tool-generate-plan", error);
     return {
       success: false,
       error: error instanceof Error ? error.message : "LLM plan generation failed",

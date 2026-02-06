@@ -85,7 +85,7 @@ export async function POST(request: NextRequest) {
             ? `Tool failures: ${failedTools.join("; ")}`
             : agentResponse.message || "Agent did not produce analysis results";
 
-          console.error(`[Analyze] Agent completed without analysis. ${errorDetail}`);
+          await traceError("api-analyze-agent-no-result", new Error(errorDetail), { patientId });
 
           return NextResponse.json(
             {
@@ -237,8 +237,6 @@ export async function POST(request: NextRequest) {
       agentFallbackReason: agentFallbackError,
     });
   } catch (error) {
-    console.error("Analysis error:", error);
-
     // Log error to Opik trace
     logErrorTrace(trace, error);
     await traceError("api-analyze", error);
@@ -347,15 +345,6 @@ async function handleStreamingAnalysis(
 
       const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
 
-      // Log safety findings
-      if (boxedWarnings.length > 0) {
-        console.log(`[Analyze-Stream] Found ${boxedWarnings.length} FDA Black Box Warnings:`,
-          boxedWarnings.map(w => w.drug).join(", "));
-      }
-      if (recalls.length > 0) {
-        console.log(`[Analyze-Stream] Found ${recalls.length} FDA recalls`);
-      }
-
       // Step 5: Estimate medication costs (CMS)
       const costEstimates = await withProgress(
         emitStep,
@@ -406,7 +395,7 @@ async function handleStreamingAnalysis(
       // Close stream
       complete();
     } catch (error) {
-      console.error("Streaming analysis error:", error);
+      traceError("api-analyze-stream", error);
       emitError(error instanceof Error ? error.message : "Analysis failed");
       complete();
     }

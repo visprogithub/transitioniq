@@ -5,6 +5,7 @@
 
 import { setActiveModel, resetLLMProvider } from "@/lib/integrations/llm-provider";
 import type { OpikTrace } from "@/lib/integrations/opik";
+import { traceError } from "@/lib/integrations/opik";
 
 /**
  * Error info structure for Opik tracing
@@ -59,7 +60,7 @@ export function pinModelForRequest(modelId: string | undefined, context: string)
     console.log(`[${context}] Model pinned to: ${modelId}`);
     return true;
   } catch (error) {
-    console.warn(`[${context}] Failed to set model ${modelId}, using current:`, error);
+    traceError("api-pin-model", error, { model: modelId });
     return false;
   }
 }

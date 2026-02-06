@@ -15,6 +15,7 @@ import { listPrompts } from "@/lib/agents/prompts";
 import { getPatient } from "@/lib/data/demo-patients";
 import { checkDrugInteractions } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
+import { traceError } from "@/lib/integrations/opik";
 import type { DischargeAnalysis, RiskFactor } from "@/lib/types/analysis";
 
 const EVALUATION_DISABLED = process.env.NEXT_PUBLIC_DISABLE_EVALUATION === "true";
@@ -71,7 +72,7 @@ export async function POST(request: NextRequest) {
       summary,
     });
   } catch (error) {
-    console.error("Experiment error:", error);
+    await traceError("api-experiments", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Experiment failed" },
       { status: 500 }

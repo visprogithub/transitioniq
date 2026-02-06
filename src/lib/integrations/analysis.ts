@@ -115,18 +115,19 @@ export async function analyzeDischargeReadiness(
   // Get prompt from Opik Prompt Library
   const { template, commit, fromOpik } = await getDischargeAnalysisPrompt();
 
-  // Build FDA safety warnings section
-  let fdaSafetySection = "";
+  // Build FDA Black Box Warnings section (dedicated prompt section)
+  let fdaBlackBoxSection = "No Black Box Warnings found for current medications";
   if (boxedWarnings && boxedWarnings.length > 0) {
-    fdaSafetySection += "\n\n**FDA BLACK BOX WARNINGS (Most Serious):**\n";
-    fdaSafetySection += boxedWarnings
-      .map((w) => `  - ${w.drug}: ${w.warning.substring(0, 200)}...`)
+    fdaBlackBoxSection = boxedWarnings
+      .map((w) => `- **${w.drug}**: ${w.warning.substring(0, 500)}`)
       .join("\n");
   }
+
+  // Build FDA Recalls section (dedicated prompt section)
+  let fdaRecallsSection = "No active recalls found for current medications";
   if (recalls && recalls.length > 0) {
-    fdaSafetySection += "\n\n**FDA RECALLS:**\n";
-    fdaSafetySection += recalls
-      .map((r) => `  - ${r.drugName} (${r.classification}): ${r.reason.substring(0, 150)}...`)
+    fdaRecallsSection = recalls
+      .map((r) => `- **${r.drugName}** (${r.classification}): ${r.reason.substring(0, 300)}`)
       .join("\n");
   }
 
@@ -140,7 +141,7 @@ export async function analyzeDischargeReadiness(
     medication_count: patient.medications.length,
     medications: patient.medications
       .map((m) => `  - ${m.name} ${m.dose} ${m.frequency}`)
-      .join("\n") + fdaSafetySection,
+      .join("\n"),
     allergies: patient.allergies.length > 0 ? patient.allergies.join(", ") : "None documented",
     drug_interactions:
       drugInteractions.length > 0
@@ -153,6 +154,8 @@ export async function analyzeDischargeReadiness(
             )
             .join("\n")
         : "No significant interactions detected",
+    fda_black_box_warnings: fdaBlackBoxSection,
+    fda_recalls: fdaRecallsSection,
     care_gaps:
       careGaps.filter((g) => g.status === "unmet").length > 0
         ? careGaps

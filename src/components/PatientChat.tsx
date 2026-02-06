@@ -24,6 +24,9 @@ import {
 } from "lucide-react";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
+import { ProgressSteps } from "@/components/ProgressSteps";
+import type { ProgressStep } from "@/components/ProgressSteps";
+import type { ProgressEvent } from "@/hooks/useProgressStream";
 
 // Web Speech API types (vendor-prefixed in most browsers)
 interface SpeechRecognitionEvent {
@@ -105,6 +108,11 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);
   const lastAutoPlayedRef = useRef<number>(-1);
+
+  // SSE streaming progress state
+  const [chatSteps, setChatSteps] = useState<ProgressStep[]>([]);
+  const [isChatStreaming, setIsChatStreaming] = useState(false);
+  const chatAbortRef = useRef<AbortController | null>(null);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -551,6 +559,10 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
     setIsLoading(true);
     setShowSuggestions(false);
 
+    // Reset streaming progress state
+    setChatSteps([]);
+    setIsChatStreaming(true);
+
     // Add loading message
     const loadingMessage: ChatMessage = {
       role: "assistant",
@@ -559,6 +571,10 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       isLoading: true,
     };
     setMessages((prev) => [...prev, loadingMessage]);
+
+    // Create abort controller for SSE stream
+    const abortController = new AbortController();
+    chatAbortRef.current = abortController;
 
     try {
       // Send the conversation history WITHOUT the current message
@@ -578,7 +594,9 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
           message: trimmedMessage,
           conversationHistory: historyForAPI,
           analysis,
+          stream: true,
         }),
+        signal: abortController.signal,
       });
 
       if (response.status === 429) {
@@ -591,6 +609,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
           // Remove the loading message without adding an error bubble
           setMessages((prev) => prev.filter((m) => !m.isLoading));
           setIsLoading(false);
+          setIsChatStreaming(false);
           return;
         }
 
@@ -602,27 +621,82 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         throw new Error("Failed to get response");
       }
 
-      const data = await response.json();
-
-      // Check for limit warning from API
-      if (data.limitWarning) {
-        setLimitWarning(data.limitWarning);
+      // Process SSE stream
+      if (!response.body) {
+        throw new Error("Response body is null");
       }
 
-      // Replace loading message with actual response
-      setMessages((prev) => {
-        const newMessages = prev.filter((m) => !m.isLoading);
-        return [
-          ...newMessages,
-          {
-            role: "assistant" as const,
-            content: data.response,
-            timestamp: new Date(),
-            toolsUsed: data.toolsUsed,
-          },
-        ];
-      });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim() || !line.startsWith("data: ")) continue;
+          const data = line.slice(6);
+          if (data === "[DONE]") break;
+
+          try {
+            const event: ProgressEvent = JSON.parse(data);
+
+            if (event.type === "step" && event.step) {
+              setChatSteps((prev) => {
+                const existingIndex = prev.findIndex((s) => s.id === event.step!.id);
+                if (existingIndex >= 0) {
+                  const updated = [...prev];
+                  updated[existingIndex] = event.step!;
+                  return updated;
+                }
+                return [...prev, event.step!];
+              });
+            } else if (event.type === "error") {
+              throw new Error(event.error || "Chat failed");
+            } else if (event.type === "result" && event.result) {
+              const result = event.result as { response: string; toolsUsed?: Array<{ name: string; result: unknown }>; limitWarning?: string };
+
+              if (result.limitWarning) {
+                setLimitWarning(result.limitWarning);
+              }
+
+              // Replace loading message with actual response
+              setMessages((prev) => {
+                const newMessages = prev.filter((m) => !m.isLoading);
+                return [
+                  ...newMessages,
+                  {
+                    role: "assistant" as const,
+                    content: result.response,
+                    timestamp: new Date(),
+                    toolsUsed: result.toolsUsed,
+                  },
+                ];
+              });
+            }
+          } catch (parseError) {
+            if (parseError instanceof Error && parseError.message !== "Chat failed") {
+              console.warn("[PatientChat] Failed to parse SSE event:", data);
+            } else {
+              throw parseError;
+            }
+          }
+        }
+      }
     } catch (error) {
+      // Ignore abort errors
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setMessages((prev) => prev.filter((m) => !m.isLoading));
+        setIsLoading(false);
+        setIsChatStreaming(false);
+        return;
+      }
+
       console.error("Chat error:", error);
       // Replace loading message with error
       setMessages((prev) => {
@@ -639,6 +713,8 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       });
     } finally {
       setIsLoading(false);
+      setIsChatStreaming(false);
+      chatAbortRef.current = null;
     }
   }
 
@@ -876,9 +952,19 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
                 } px-4 py-3`}
               >
                 {message.isLoading ? (
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span className="text-sm">Thinking...</span>
+                  <div className="space-y-2">
+                    {chatSteps.length > 0 ? (
+                      <ProgressSteps
+                        steps={chatSteps}
+                        isActive={isChatStreaming}
+                        title="Recovery Coach"
+                      />
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span className="text-sm">Thinking...</span>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <>

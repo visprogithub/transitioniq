@@ -166,6 +166,7 @@ export async function traceToolCall<T>(
     });
     span.end();
     trace.end();
+    await flushTraces();
     return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
@@ -180,6 +181,7 @@ export async function traceToolCall<T>(
     });
     span.end();
     trace.end();
+    await flushTraces();
     throw error;
   }
 }
@@ -224,6 +226,7 @@ export async function logToolCorrectness(
   });
   span.end();
   trace.end();
+  await flushTraces();
 }
 
 /**
@@ -284,6 +287,7 @@ export async function logAgentTrajectory(
   }
 
   trace.end();
+  await flushTraces();
 }
 
 /**
@@ -327,6 +331,7 @@ export async function logConversationMetrics(
   });
   span.end();
   trace.end();
+  await flushTraces();
 }
 
 /**
@@ -373,6 +378,7 @@ export async function logAgentGraph(
   }
 
   trace.end();
+  await flushTraces();
 }
 
 /**
@@ -442,6 +448,7 @@ export async function evaluateTaskCompletion(
   }
 
   trace.end();
+  await flushTraces();
 
   return { passed, score };
 }

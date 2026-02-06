@@ -1,6 +1,9 @@
 import { Opik, Trace, Span } from "opik";
 import type { DischargeAnalysis } from "../types/analysis";
 
+/** Re-export Trace type for use in other modules */
+export type OpikTrace = Trace;
+
 let opikClient: Opik | null = null;
 
 export function getOpikClient(): Opik | null {
@@ -161,7 +164,7 @@ function extractAnalysisMetrics(result: unknown): Record<string, number | string
  * Trace data source calls (FHIR, FDA, CMS, Guidelines)
  */
 export async function traceDataSourceCall<T>(
-  source: "FHIR" | "FDA" | "CMS" | "Guidelines",
+  source: "FHIR" | "FDA" | "FDA-Interactions" | "FDA-BoxedWarnings" | "FDA-Recalls" | "CMS" | "Guidelines" | "MyHealthfinder",
   patientId: string,
   fn: () => Promise<T>,
   options?: { threadId?: string }
@@ -369,6 +372,7 @@ export async function logEvaluationScore(
   });
   span.end();
   trace.end();
+  await flushTraces();
 }
 
 /**

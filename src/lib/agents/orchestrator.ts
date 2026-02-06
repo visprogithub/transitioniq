@@ -31,6 +31,8 @@ import type {
   AgentGraph,
   GraphNode,
   DrugInteractionContext,
+  BoxedWarningContext,
+  DrugRecallContext,
   CareGapContext,
   CostContext,
   ToolName,
@@ -189,6 +191,8 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
     state.status = "executing";
     let patient: Patient | undefined;
     let drugInteractions: unknown[] = [];
+    let boxedWarnings: unknown[] = [];
+    let recalls: unknown[] = [];
     let careGaps: unknown[] = [];
     let costs: unknown[] = [];
     let knowledgeContext: unknown = undefined;
@@ -232,6 +236,8 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
           patientId: state.patientId,
           patient,
           drugInteractions,
+          boxedWarnings,
+          recalls,
           careGaps,
           costs,
           knowledgeContext,
@@ -278,6 +284,12 @@ async function agentLoop(state: AgentState): Promise<AgentResponse> {
             case "check_drug_interactions":
               drugInteractions = toolCall.output as unknown[];
               state.context.drugInteractions = drugInteractions as DrugInteractionContext[];
+              break;
+            case "check_boxed_warnings":
+              boxedWarnings = toolCall.output as unknown[];
+              break;
+            case "check_drug_recalls":
+              recalls = toolCall.output as unknown[];
               break;
             case "evaluate_care_gaps":
               careGaps = toolCall.output as unknown[];
@@ -400,6 +412,22 @@ async function createPlan(state: AgentState): Promise<AgentPlan> {
 
     steps.push({
       order: 3,
+      tool: "check_boxed_warnings",
+      description: "Check FDA Black Box Warnings on medications",
+      dependsOn: [1],
+      required: false,
+    });
+
+    steps.push({
+      order: 4,
+      tool: "check_drug_recalls",
+      description: "Check FDA drug recalls on medications",
+      dependsOn: [1],
+      required: false,
+    });
+
+    steps.push({
+      order: 5,
       tool: "evaluate_care_gaps",
       description: "Evaluate clinical guideline compliance",
       dependsOn: [1],
@@ -407,7 +435,7 @@ async function createPlan(state: AgentState): Promise<AgentPlan> {
     });
 
     steps.push({
-      order: 4,
+      order: 6,
       tool: "estimate_costs",
       description: "Estimate medication costs via CMS",
       dependsOn: [1],
@@ -415,7 +443,7 @@ async function createPlan(state: AgentState): Promise<AgentPlan> {
     });
 
     steps.push({
-      order: 5,
+      order: 7,
       tool: "retrieve_knowledge",
       description: "Retrieve relevant clinical knowledge via TF-IDF RAG",
       dependsOn: [1],
@@ -423,17 +451,17 @@ async function createPlan(state: AgentState): Promise<AgentPlan> {
     });
 
     steps.push({
-      order: 6,
+      order: 8,
       tool: "analyze_readiness",
       description: "Compute discharge readiness score",
-      dependsOn: [2, 3, 4, 5],
+      dependsOn: [2, 3, 4, 5, 6, 7],
       required: true,
     });
 
     return {
       goal: state.currentGoal,
       steps,
-      reasoning: `Will assess patient ${state.patientId} by: 1) Fetching patient data, 2) Checking FDA drug interactions, 3) Evaluating care gaps, 4) Estimating costs, 5) Retrieving clinical knowledge via RAG, 6) Computing readiness score`,
+      reasoning: `Will assess patient ${state.patientId} by: 1) Fetching patient data, 2) Checking FDA drug interactions, 3) Checking FDA Black Box Warnings, 4) Checking FDA drug recalls, 5) Evaluating care gaps, 6) Estimating costs, 7) Retrieving clinical knowledge via RAG, 8) Computing readiness score`,
     };
   }
 
@@ -454,6 +482,8 @@ function buildToolInput(
     patientId?: string;
     patient?: Patient;
     drugInteractions?: unknown[];
+    boxedWarnings?: unknown[];
+    recalls?: unknown[];
     careGaps?: unknown[];
     costs?: unknown[];
     knowledgeContext?: unknown;
@@ -465,6 +495,10 @@ function buildToolInput(
       return { patientId: context.patientId };
     case "check_drug_interactions":
       return { medications: context.patient?.medications || [] };
+    case "check_boxed_warnings":
+      return { medications: context.patient?.medications || [] };
+    case "check_drug_recalls":
+      return { medications: context.patient?.medications || [] };
     case "evaluate_care_gaps":
       return { patient: context.patient };
     case "estimate_costs":
@@ -475,6 +509,8 @@ function buildToolInput(
       return {
         patient: context.patient,
         drugInteractions: context.drugInteractions,
+        boxedWarnings: context.boxedWarnings,
+        recalls: context.recalls,
         careGaps: context.careGaps,
         costs: context.costs,
         knowledgeContext: context.knowledgeContext,

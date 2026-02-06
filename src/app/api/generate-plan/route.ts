@@ -56,7 +56,6 @@ export async function POST(request: NextRequest) {
           tracingId: planResult.traceId,
         });
       } catch (geminiError) {
-        console.warn("Gemini plan generation failed, using fallback:", geminiError);
         await traceError("api-generate-plan-llm", geminiError, { patientId });
         // Fall through to computed plan
       }
@@ -71,8 +70,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ plan });
   } catch (error) {
-    console.error("Plan generation error:", error);
-
     // Log error to Opik trace
     logErrorTrace(trace, error);
     await traceError("api-generate-plan", error);

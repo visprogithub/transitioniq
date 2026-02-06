@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { logEvaluationScore } from "@/lib/integrations/opik";
+import { logEvaluationScore, traceError } from "@/lib/integrations/opik";
 import { getPatient } from "@/lib/data/demo-patients";
 import { checkDrugInteractions } from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
@@ -112,7 +112,7 @@ export async function POST(_request: NextRequest) {
       note: "Evaluation results logged to Opik dashboard",
     });
   } catch (error) {
-    console.error("Evaluation error:", error);
+    await traceError("api-evaluate", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Evaluation failed" },
       { status: 500 }
