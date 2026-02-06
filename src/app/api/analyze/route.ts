@@ -154,10 +154,7 @@ export async function POST(request: NextRequest) {
 
     // STREAMING PATH: Emit progress events
     if (shouldStream) {
-      const { stream, emitStep, emitResult, emitError, complete } = createProgressStream();
-
-      // Start async processing
-      (async () => {
+      const stream = createProgressStream(async (emitStep, emitResult, emitError) => {
         try {
           // Step 1: Check drug interactions
           const drugInteractions = await withProgress(
@@ -247,14 +244,12 @@ export async function POST(request: NextRequest) {
             agentFallbackUsed: agentFallbackOccurred,
             agentFallbackReason: agentFallbackError,
           });
-
-          complete();
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
           emitError(errorMsg);
-          complete();
+          throw error; // Re-throw to let createProgressStream handle cleanup
         }
-      })();
+      });
 
       return new Response(stream, {
         headers: {

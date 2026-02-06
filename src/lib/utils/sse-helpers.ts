@@ -7,61 +7,44 @@ import type { ProgressStep } from "@/components/ProgressSteps";
 
 /**
  * Create an SSE stream for emitting progress events
- * Returns a WritableStream and helper functions to emit events
+ * Takes an async executor function that does the work
  */
-export function createProgressStream() {
-  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+export function createProgressStream(
+  executor: (emitStep: (step: ProgressStep) => void, emitResult: (result: unknown) => void, emitError: (error: string) => void) => Promise<void>
+) {
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
-    start(ctrl) {
-      controller = ctrl;
+    async start(controller) {
+      const emitStep = (step: ProgressStep) => {
+        const data = `data: ${JSON.stringify({ type: "step", step })}\n\n`;
+        controller.enqueue(encoder.encode(data));
+      };
+
+      const emitError = (error: string) => {
+        const data = `data: ${JSON.stringify({ type: "error", error })}\n\n`;
+        controller.enqueue(encoder.encode(data));
+      };
+
+      const emitResult = (result: unknown) => {
+        const data = `data: ${JSON.stringify({ type: "result", result })}\n\n`;
+        controller.enqueue(encoder.encode(data));
+      };
+
+      try {
+        await executor(emitStep, emitResult, emitError);
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        emitError(errorMsg);
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      }
     },
   });
 
-  /**
-   * Emit a progress step event
-   */
-  const emitStep = (step: ProgressStep) => {
-    if (!controller) return;
-    const data = `data: ${JSON.stringify({ type: "step", step })}\n\n`;
-    controller.enqueue(encoder.encode(data));
-  };
-
-  /**
-   * Emit an error event
-   */
-  const emitError = (error: string) => {
-    if (!controller) return;
-    const data = `data: ${JSON.stringify({ type: "error", error })}\n\n`;
-    controller.enqueue(encoder.encode(data));
-  };
-
-  /**
-   * Emit a result event (with optional data)
-   */
-  const emitResult = (result?: unknown) => {
-    if (!controller) return;
-    const data = `data: ${JSON.stringify({ type: "result", result })}\n\n`;
-    controller.enqueue(encoder.encode(data));
-  };
-
-  /**
-   * Emit completion and close stream
-   */
-  const complete = () => {
-    if (!controller) return;
-    controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-    controller.close();
-  };
-
-  return {
-    stream,
-    emitStep,
-    emitError,
-    emitResult,
-    complete,
-  };
+  return stream;
 }
 
 /**

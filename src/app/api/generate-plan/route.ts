@@ -47,33 +47,23 @@ export async function POST(request: NextRequest) {
 
     // STREAMING PATH: Emit progress events
     if (shouldStream && process.env.GEMINI_API_KEY) {
-      const { stream, emitStep, emitResult, emitError, complete } = createProgressStream();
+      const stream = createProgressStream(async (emitStep, emitResult, emitError) => {
+        const plan = await withProgress(
+          emitStep,
+          "generate-plan",
+          "Generating discharge checklist",
+          "llm",
+          async () => {
+            const planResult = await traceAnalysis("generate-plan", { patientId, category: "plan_generation" }, async () => {
+              return await generateDischargePlan(patient, analysis);
+            });
+            return planResult.result;
+          },
+          `${getActiveModelId()} • ${analysis.riskFactors.length} risk factors`
+        );
 
-      // Start async processing
-      (async () => {
-        try {
-          const plan = await withProgress(
-            emitStep,
-            "generate-plan",
-            "Generating discharge checklist",
-            "llm",
-            async () => {
-              const planResult = await traceAnalysis("generate-plan", { patientId, category: "plan_generation" }, async () => {
-                return await generateDischargePlan(patient, analysis);
-              });
-              return planResult.result;
-            },
-            `${getActiveModelId()} • ${analysis.riskFactors.length} risk factors`
-          );
-
-          emitResult({ plan, tracingId: trace?.traceId });
-          complete();
-        } catch (error) {
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          emitError(errorMsg);
-          complete();
-        }
-      })();
+        emitResult({ plan, tracingId: trace?.traceId });
+      });
 
       return new Response(stream, {
         headers: {
