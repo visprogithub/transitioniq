@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
-import { checkDrugInteractions, type DrugInteraction } from "@/lib/integrations/fda-client";
+import {
+  checkDrugInteractions,
+  checkBoxedWarnings,
+  checkDrugRecalls,
+  type DrugInteraction
+} from "@/lib/integrations/fda-client";
 import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
@@ -143,9 +148,12 @@ export async function POST(request: NextRequest) {
     console.log("[Analyze] Using direct LLM (single-turn)");
 
     // Run data gathering in parallel with Opik tracing
-    const [drugInteractionsResult, careGapsResult] = await Promise.all([
-      traceDataSourceCall("FDA", patientId, async () => {
+    const [drugInteractionsResult, boxedWarningsResult, careGapsResult] = await Promise.all([
+      traceDataSourceCall("FDA-Interactions", patientId, async () => {
         return await checkDrugInteractions(patient.medications);
+      }),
+      traceDataSourceCall("FDA-BoxedWarnings", patientId, async () => {
+        return await checkBoxedWarnings(patient.medications.map(m => ({ name: m.name })));
       }),
       traceDataSourceCall("Guidelines", patientId, async () => {
         return evaluateCareGaps(patient);
@@ -153,7 +161,14 @@ export async function POST(request: NextRequest) {
     ]);
 
     const drugInteractions = drugInteractionsResult.result;
+    const boxedWarnings = boxedWarningsResult.result;
     const careGaps = careGapsResult.result;
+
+    // Log boxed warnings for visibility
+    if (boxedWarnings.length > 0) {
+      console.log(`[Analyze] Found ${boxedWarnings.length} FDA Black Box Warnings:`,
+        boxedWarnings.map(w => w.drug).join(", "));
+    }
 
     // Get unmet care gaps for analysis
     const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
@@ -285,7 +300,7 @@ async function handleStreamingAnalysis(
       // Step 1: Check drug interactions (FDA Drug Labels)
       const drugInteractions = await withProgress(
         emitStep,
-        "fda",
+        "fda-interactions",
         "Checking drug interactions (FDA)",
         "data_source",
         async () => {
@@ -293,7 +308,40 @@ async function handleStreamingAnalysis(
         }
       );
 
-      // Step 2: Evaluate care gaps
+      // Step 2: Check for FDA Black Box Warnings
+      const boxedWarnings = await withProgress(
+        emitStep,
+        "fda-boxed-warnings",
+        "Checking FDA Black Box Warnings",
+        "data_source",
+        async () => {
+          return await checkBoxedWarnings(patient.medications.map(m => ({ name: m.name })));
+        }
+      );
+
+      // Step 3: Check for drug recalls (for high-risk meds)
+      const highRiskMeds = patient.medications.filter(m =>
+        m.name.toLowerCase().includes("warfarin") ||
+        m.name.toLowerCase().includes("insulin") ||
+        m.name.toLowerCase().includes("digoxin")
+      );
+
+      let recalls: Awaited<ReturnType<typeof checkDrugRecalls>>[] = [];
+      if (highRiskMeds.length > 0) {
+        recalls = await withProgress(
+          emitStep,
+          "fda-recalls",
+          "Checking FDA recalls for high-risk medications",
+          "data_source",
+          async () => {
+            const recallPromises = highRiskMeds.map(m => checkDrugRecalls(m.name));
+            const results = await Promise.all(recallPromises);
+            return results.flat();
+          }
+        );
+      }
+
+      // Step 4: Evaluate care gaps
       const careGaps = await withProgress(
         emitStep,
         "guidelines",
@@ -306,7 +354,16 @@ async function handleStreamingAnalysis(
 
       const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
 
-      // Step 3: Estimate medication costs (CMS)
+      // Log safety findings
+      if (boxedWarnings.length > 0) {
+        console.log(`[Analyze-Stream] Found ${boxedWarnings.length} FDA Black Box Warnings:`,
+          boxedWarnings.map(w => w.drug).join(", "));
+      }
+      if (recalls.length > 0) {
+        console.log(`[Analyze-Stream] Found ${recalls.length} FDA recalls`);
+      }
+
+      // Step 5: Estimate medication costs (CMS)
       const costEstimates = await withProgress(
         emitStep,
         "cms",
@@ -322,7 +379,7 @@ async function handleStreamingAnalysis(
         }
       );
 
-      // Step 4: Run LLM analysis
+      // Step 6: Run LLM analysis
       const analysis = await withProgress(
         emitStep,
         "llm",
