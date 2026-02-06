@@ -5,9 +5,11 @@ import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
 import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
 import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
 import { getOpikClient, traceDataSourceCall, traceError, flushTraces } from "@/lib/integrations/opik";
-import { getActiveModelId, setActiveModel, resetLLMProvider, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
+import { getActiveModelId, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
 import { runAgent, getSession } from "@/lib/agents/orchestrator";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
+import { pinModelForRequest, logErrorTrace } from "@/lib/utils/api-helpers";
+import { createProgressStream, withProgress } from "@/lib/utils/sse-helpers";
 import type { Patient } from "@/lib/types/patient";
 
 export async function POST(request: NextRequest) {
@@ -29,15 +31,7 @@ export async function POST(request: NextRequest) {
     const { patientId, useAgent = true, sessionId, modelId } = body;
 
     // Pin the model for this request if explicitly provided
-    if (modelId) {
-      try {
-        setActiveModel(modelId);
-        resetLLMProvider();
-        console.log(`[Analyze] Model pinned to: ${modelId}`);
-      } catch (e) {
-        console.warn(`[Analyze] Failed to set model ${modelId}, using current:`, e);
-      }
-    }
+    pinModelForRequest(modelId, "Analyze");
 
     if (!patientId) {
       return NextResponse.json({ error: "patientId required" }, { status: 400 });
@@ -226,19 +220,8 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Analysis error:", error);
 
-    // Set errorInfo on the route-level trace so Opik dashboard counts this error
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const errorInfo = {
-      exceptionType: error instanceof Error ? error.name : "Error",
-      message: errorMessage,
-      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
-    };
-    trace?.update({
-      errorInfo,
-      output: { error: errorMessage },
-    });
-    trace?.end();
-
+    // Log error to Opik trace
+    logErrorTrace(trace, error);
     await traceError("api-analyze", error);
 
     // Check if this is a rate limit or usage limit error

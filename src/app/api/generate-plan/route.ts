@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 import { generateDischargePlan } from "@/lib/integrations/analysis";
 import { getOpikClient, traceAnalysis, traceError, flushTraces } from "@/lib/integrations/opik";
-import { setActiveModel, resetLLMProvider } from "@/lib/integrations/llm-provider";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
+import { pinModelForRequest, logErrorTrace } from "@/lib/utils/api-helpers";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 export async function POST(request: NextRequest) {
@@ -24,14 +24,7 @@ export async function POST(request: NextRequest) {
     const { patientId, analysis, modelId } = body as { patientId: string; analysis: DischargeAnalysis; modelId?: string };
 
     // Pin the model for this request if explicitly provided
-    if (modelId) {
-      try {
-        setActiveModel(modelId);
-        resetLLMProvider();
-      } catch (e) {
-        console.warn(`[Generate-Plan] Failed to set model ${modelId}:`, e);
-      }
-    }
+    pinModelForRequest(modelId, "Generate-Plan");
 
     if (!patientId) {
       return NextResponse.json({ error: "patientId required" }, { status: 400 });
@@ -80,19 +73,8 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Plan generation error:", error);
 
-    // Set errorInfo on the route-level trace so Opik dashboard counts this error
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const errorInfo = {
-      exceptionType: error instanceof Error ? error.name : "Error",
-      message: errorMessage,
-      traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
-    };
-    trace?.update({
-      errorInfo,
-      output: { error: errorMessage },
-    });
-    trace?.end();
-
+    // Log error to Opik trace
+    logErrorTrace(trace, error);
     await traceError("api-generate-plan", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Plan generation failed" },
