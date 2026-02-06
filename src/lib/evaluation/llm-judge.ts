@@ -6,8 +6,14 @@
  */
 
 import { createLLMProvider, getActiveModelId, getAvailableModels } from "@/lib/integrations/llm-provider";
-import { getOpikClient, traceError } from "@/lib/integrations/opik";
+import { getOpikClient, traceError, flushTraces } from "@/lib/integrations/opik";
+import { applyInputGuardrails, applyOutputGuardrails } from "@/lib/guardrails";
 import { getLLMJudgePrompt } from "@/lib/integrations/opik-prompts";
+import {
+  checkDrugInteractions,
+  checkBoxedWarnings,
+  type DrugInteraction,
+} from "@/lib/integrations/fda-client";
 import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import { extractJsonObject } from "@/lib/utils/llm-json";
@@ -49,7 +55,44 @@ export interface JudgeEvaluation {
 // Judge system prompt is now fetched from Opik Prompt Library via getLLMJudgePrompt()
 // This enables version control and A/B testing of the evaluation prompt
 
-function buildJudgePrompt(patient: Patient, analysis: DischargeAnalysis): string {
+/**
+ * Independently fetch FDA safety data for cross-verification.
+ * The judge calls the same APIs the pipeline uses, so it can compare
+ * what the assessment found vs what FDA actually reports.
+ */
+async function fetchFDAGroundTruth(patient: Patient): Promise<{
+  interactions: DrugInteraction[];
+  boxedWarnings: Array<{ drug: string; warning: string }>;
+  errors: string[];
+}> {
+  const errors: string[] = [];
+  let interactions: DrugInteraction[] = [];
+  let boxedWarnings: Array<{ drug: string; warning: string }> = [];
+
+  try {
+    interactions = await checkDrugInteractions(patient.medications);
+  } catch (e) {
+    errors.push(`Drug interactions check failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  try {
+    boxedWarnings = await checkBoxedWarnings(patient.medications.map(m => ({ name: m.name })));
+  } catch (e) {
+    errors.push(`Boxed warnings check failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  return { interactions, boxedWarnings, errors };
+}
+
+function buildJudgePrompt(
+  patient: Patient,
+  analysis: DischargeAnalysis,
+  fdaGroundTruth?: {
+    interactions: DrugInteraction[];
+    boxedWarnings: Array<{ drug: string; warning: string }>;
+    errors: string[];
+  }
+): string {
   const riskFactorsSummary = analysis.riskFactors
     .map(
       (rf) =>
@@ -110,7 +153,29 @@ ${analysis.recommendations.map((r, i) => `  ${i + 1}. ${r}`).join("\n") || "None
 
 ---
 
-Evaluate this assessment on the four dimensions described. Be critical but fair.`;
+${fdaGroundTruth ? `FDA CROSS-VERIFICATION DATA (independently fetched by judge):
+
+Drug Interactions Found by FDA (${fdaGroundTruth.interactions.length} total):
+${fdaGroundTruth.interactions.length > 0
+  ? fdaGroundTruth.interactions.map(i => `  - [${i.severity.toUpperCase()}] ${i.drug1} ↔ ${i.drug2}: ${i.description.substring(0, 200)}`).join("\n")
+  : "  None found"}
+
+FDA Black Box Warnings (${fdaGroundTruth.boxedWarnings.length} total):
+${fdaGroundTruth.boxedWarnings.length > 0
+  ? fdaGroundTruth.boxedWarnings.map(w => `  - ${w.drug}: ${w.warning.substring(0, 200)}`).join("\n")
+  : "  None found"}
+
+${fdaGroundTruth.errors.length > 0 ? `Note: Some FDA checks failed: ${fdaGroundTruth.errors.join("; ")}` : ""}
+
+IMPORTANT: Compare the assessment's risk factors against the FDA data above.
+- Did the assessment catch all drug interactions that FDA reports?
+- Did it flag all Black Box Warnings?
+- Are there interactions or warnings in the FDA data that the assessment MISSED?
+- Score SAFETY and ACCURACY lower if the assessment missed FDA-documented risks.
+
+---
+
+` : ""}Evaluate this assessment on the four dimensions described. Be critical but fair.`;
 }
 
 /**
@@ -151,22 +216,63 @@ export async function evaluateWithLLMJudge(
       },
     });
 
-    const prompt = buildJudgePrompt(patient, analysis);
+    // Independently fetch FDA data for cross-verification
+    const fdaSpan = trace?.span({
+      name: "fda-cross-verification",
+      type: "tool",
+      metadata: { purpose: "ground-truth-fetch", medication_count: patient.medications.length },
+    });
+
+    const fdaGroundTruth = await fetchFDAGroundTruth(patient);
+
+    fdaSpan?.update({
+      output: {
+        interactions_found: fdaGroundTruth.interactions.length,
+        boxed_warnings_found: fdaGroundTruth.boxedWarnings.length,
+        errors: fdaGroundTruth.errors,
+      },
+    });
+    fdaSpan?.end();
+
+    const prompt = buildJudgePrompt(patient, analysis, fdaGroundTruth);
     const provider = createLLMProvider(judgeModel);
+
+    const fullJudgePrompt = `${promptData.template}\n\n${prompt}`;
+
+    // Apply input guardrails before sending to LLM
+    const inputGuardrail = applyInputGuardrails(fullJudgePrompt, {
+      sanitizePII: true,
+      usePlaceholders: true,
+      blockCriticalPII: true,
+      logToOpik: true,
+      traceName: "guardrail-llm-judge-input",
+    });
+
+    const sanitizedJudgePrompt = inputGuardrail.wasSanitized ? inputGuardrail.output : fullJudgePrompt;
 
     const startTime = Date.now();
     const response = await provider.generate(
-      `${promptData.template}\n\n${prompt}`,
+      sanitizedJudgePrompt,
       {
         spanName: "llm-judge-call",
         metadata: {
           patient_id: patient.id,
           purpose: "evaluation",
           prompt_version: promptData.commit || "local",
+          pii_sanitized: inputGuardrail.wasSanitized,
         },
       }
     );
     const latencyMs = Date.now() - startTime;
+
+    // Apply output guardrails to catch any leaked PII
+    const outputGuardrail = applyOutputGuardrails(response.content, {
+      sanitizePII: true,
+      usePlaceholders: true,
+      logToOpik: true,
+      traceName: "guardrail-llm-judge-output",
+    });
+    const sanitizedContent = outputGuardrail.output;
 
     // Parse the judge response (handles Qwen3 thinking tokens, trailing commas, etc.)
     let judgeResult: {
@@ -177,7 +283,7 @@ export async function evaluateWithLLMJudge(
       summary: string;
     };
     try {
-      const parsed = extractJsonObject<Record<string, unknown>>(response.content);
+      const parsed = extractJsonObject<Record<string, unknown>>(sanitizedContent);
 
       // Validate expected structure and use 0.5 (50%) fallback for missing dimensions
       const safetyData = parsed.safety as JudgeScore | undefined;
@@ -187,7 +293,7 @@ export async function evaluateWithLLMJudge(
 
       if (!safetyData || !accuracyData || !actionabilityData || !completenessData) {
         console.warn(`[LLM Judge] Parsed JSON but missing expected dimensions. Keys: ${Object.keys(parsed).join(", ")}`);
-        console.warn(`[LLM Judge] Raw answer: ${response.content.slice(0, 500)}`);
+        console.warn(`[LLM Judge] Raw answer: ${sanitizedContent.slice(0, 500)}`);
       }
 
       judgeResult = {
@@ -261,12 +367,18 @@ export async function evaluateWithLLMJudge(
             actionability: evaluation.actionability.score,
             completeness: evaluation.completeness.score,
           },
+          fda_cross_verification: {
+            interactions_found: fdaGroundTruth.interactions.length,
+            boxed_warnings_found: fdaGroundTruth.boxedWarnings.length,
+            fda_errors: fdaGroundTruth.errors,
+          },
         },
       });
     }
 
     span?.end();
     trace?.end();
+    await flushTraces();
 
     return evaluation;
   } catch (error) {

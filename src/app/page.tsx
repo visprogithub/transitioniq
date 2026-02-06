@@ -60,6 +60,7 @@ const ANALYSIS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 interface CachedAnalysis {
   data: AnalysisWithModel;
   timestamp: number;
+  judgeEvaluation?: JudgeEvaluation | null;
 }
 
 function analysisCacheKey(patientId: string, modelId: string): string {
@@ -89,7 +90,7 @@ function cleanupAnalysisCache(): void {
   }
 }
 
-function getCachedAnalysis(patientId: string, modelId: string): AnalysisWithModel | null {
+function getCachedAnalysis(patientId: string, modelId: string): { data: AnalysisWithModel; judgeEvaluation?: JudgeEvaluation | null } | null {
   try {
     const raw = sessionStorage.getItem(analysisCacheKey(patientId, modelId));
     if (!raw) return null;
@@ -98,7 +99,7 @@ function getCachedAnalysis(patientId: string, modelId: string): AnalysisWithMode
       sessionStorage.removeItem(analysisCacheKey(patientId, modelId));
       return null;
     }
-    return entry.data;
+    return { data: entry.data, judgeEvaluation: entry.judgeEvaluation };
   } catch {
     return null;
   }
@@ -110,6 +111,18 @@ function cacheAnalysis(patientId: string, modelId: string, data: AnalysisWithMod
     sessionStorage.setItem(analysisCacheKey(patientId, modelId), JSON.stringify(entry));
   } catch {
     // quota exceeded or unavailable — silently skip
+  }
+}
+
+function cacheJudgeEvaluation(patientId: string, modelId: string, judgeEvaluation: JudgeEvaluation): void {
+  try {
+    const raw = sessionStorage.getItem(analysisCacheKey(patientId, modelId));
+    if (!raw) return;
+    const entry = JSON.parse(raw) as CachedAnalysis;
+    entry.judgeEvaluation = judgeEvaluation;
+    sessionStorage.setItem(analysisCacheKey(patientId, modelId), JSON.stringify(entry));
+  } catch {
+    // silently skip
   }
 }
 
@@ -241,6 +254,7 @@ export default function DashboardPage() {
       setJudgeEvaluation(null);
       setJudgeError(null);
       setPatientSummary(null); // Clear cached summary when patient changes
+      progressStream.reset(); // Clear previous patient's analysis steps
 
       try {
         const response = await fetch(`/api/patient/${selectedPatientId}`);
@@ -274,16 +288,19 @@ export default function DashboardPage() {
     // Check sessionStorage cache for same patient + model
     const cached = getCachedAnalysis(patient.id, currentModel);
     if (cached) {
-      setAnalysis(cached);
+      setAnalysis(cached.data);
       setPatientSummary(null);
       const highRiskIds = new Set<string>(
-        cached.riskFactors
+        cached.data.riskFactors
           .filter((rf: RiskFactor) => rf.severity === "high")
           .map((rf: RiskFactor) => rf.id)
       );
       setExpandedRiskFactors(highRiskIds);
       setIsAnalyzing(false);
-      // Don't run judge for cached results - it was already run when fresh
+      // Restore cached judge evaluation if available
+      if (cached.judgeEvaluation) {
+        setJudgeEvaluation(cached.judgeEvaluation);
+      }
       return;
     }
 
@@ -318,6 +335,10 @@ export default function DashboardPage() {
 
       const data = await response.json();
       setJudgeEvaluation(data.evaluation);
+      // Cache judge result alongside the analysis
+      if (patient) {
+        cacheJudgeEvaluation(patientId, currentModel, data.evaluation);
+      }
     } catch (err) {
       setJudgeError(err instanceof Error ? err.message : "Judge evaluation failed");
     } finally {

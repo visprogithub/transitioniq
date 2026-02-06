@@ -107,12 +107,14 @@ export async function analyzeDischargeReadiness(
 ): Promise<DischargeAnalysis> {
   // Note: API key validation is handled by LLMProvider for the active model
 
-  // Warm all prompts in parallel on first use (fire-and-forget after first call)
+  // Warm all prompts in parallel on first use
   // This fetches prompts from Opik without storing/creating new ones
   // Prompts are cached for 30min to avoid repeated Opik API calls
-  warmAllPrompts().catch(() => {});
+  // Awaited to prevent race condition where getDischargeAnalysisPrompt()
+  // fetches the same prompt simultaneously
+  await warmAllPrompts().catch(() => {});
 
-  // Get prompt from Opik Prompt Library
+  // Get prompt from Opik Prompt Library (should be cached from warmup above)
   const { template, commit, fromOpik } = await getDischargeAnalysisPrompt();
 
   // Build FDA Black Box Warnings section (dedicated prompt section)

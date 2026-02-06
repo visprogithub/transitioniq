@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createLLMProvider } from "@/lib/integrations/llm-provider";
-import { getOpikClient, traceError } from "@/lib/integrations/opik";
+import { getOpikClient, traceError, flushTraces } from "@/lib/integrations/opik";
+import { applyInputGuardrails, applyOutputGuardrails } from "@/lib/guardrails";
 import { getPatientSummaryPrompt, formatPatientSummaryPrompt } from "@/lib/integrations/opik-prompts";
 import { getPatient } from "@/lib/data/demo-patients";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
@@ -90,10 +91,37 @@ export async function POST(request: NextRequest) {
     const startTime = Date.now();
     const provider = createLLMProvider();
     const fullPrompt = `You are a patient communication specialist who converts medical information into simple, friendly language.\n\n${prompt}`;
-    const response = await provider.generate(fullPrompt, {
-      spanName: "patient-summary-generation",
-      metadata: { purpose: "patient-summary" },
+
+    // Apply input guardrails before sending to LLM
+    const inputGuardrail = applyInputGuardrails(fullPrompt, {
+      sanitizePII: true,
+      usePlaceholders: true,
+      blockCriticalPII: true,
+      logToOpik: true,
+      traceName: "guardrail-patient-summary-input",
     });
+
+    if (inputGuardrail.wasBlocked) {
+      trace?.update({ output: { blocked: true, reason: "critical_pii" } });
+      trace?.end();
+      return NextResponse.json({ error: "Request blocked: critical PII detected" }, { status: 400 });
+    }
+
+    const sanitizedPrompt = inputGuardrail.wasSanitized ? inputGuardrail.output : fullPrompt;
+
+    const response = await provider.generate(sanitizedPrompt, {
+      spanName: "patient-summary-generation",
+      metadata: { purpose: "patient-summary", pii_sanitized: inputGuardrail.wasSanitized },
+    });
+
+    // Apply output guardrails to catch any leaked PII
+    const outputGuardrail = applyOutputGuardrails(response.content, {
+      sanitizePII: true,
+      usePlaceholders: true,
+      logToOpik: true,
+      traceName: "guardrail-patient-summary-output",
+    });
+    const sanitizedContent = outputGuardrail.output;
 
     const latencyMs = Date.now() - startTime;
 
@@ -106,7 +134,7 @@ export async function POST(request: NextRequest) {
     // Parse the response (handles Qwen3 thinking tokens, trailing commas, etc.)
     let summary: PatientSummary;
     try {
-      summary = extractJsonObject<PatientSummary>(response.content);
+      summary = extractJsonObject<PatientSummary>(sanitizedContent);
     } catch (parseError) {
       traceError("api-patient-summary-parse", parseError);
       // Generate fallback summary
@@ -128,6 +156,7 @@ export async function POST(request: NextRequest) {
       },
     });
     trace?.end();
+    await flushTraces();
 
     return NextResponse.json({
       summary,
@@ -213,7 +242,7 @@ function sanitizeSummary(
   summary.whatYouNeedToKnow = (summary.whatYouNeedToKnow || []).slice(0, 4);
   summary.questionsForDoctor = (summary.questionsForDoctor || []).slice(0, 5);
   summary.nextSteps = (summary.nextSteps || []).slice(0, 6);
-
+  
   // Backfill any medications the LLM missed — every patient medication must appear
   const llmMedNames = new Set(
     (summary.medicationReminders || []).map((m) => m.medication.toLowerCase())

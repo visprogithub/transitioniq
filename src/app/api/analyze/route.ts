@@ -110,6 +110,7 @@ export async function POST(request: NextRequest) {
           },
         });
         trace?.end();
+        await flushTraces();
 
         // Return agent response with full context
         return NextResponse.json({
@@ -392,6 +393,9 @@ async function handleStreamingAnalysis(
         agentUsed: false,
       });
 
+      // Flush Opik traces before closing stream
+      await flushTraces();
+
       // Close stream
       complete();
     } catch (error) {
@@ -410,4 +414,3 @@ async function handleStreamingAnalysis(
     },
   });
 }
-

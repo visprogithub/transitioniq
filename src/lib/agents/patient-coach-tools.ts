@@ -14,6 +14,7 @@ import type { Patient } from "@/lib/types/patient";
 import type { DischargeAnalysis } from "@/lib/types/analysis";
 import { createLLMProvider } from "@/lib/integrations/llm-provider";
 import { traceError } from "@/lib/integrations/opik";
+import { applyInputGuardrails, applyOutputGuardrails } from "@/lib/guardrails";
 import { executeWithFallback, type ToolCallResult, type FallbackStrategy } from "@/lib/utils/tool-helpers";
 
 // Import knowledge base modules
@@ -312,9 +313,18 @@ Respond ONLY with a valid JSON object (no other text):
 Use simple, patient-friendly language. If this is not a real medication, respond with:
 {"error": "unknown medication"}`;
 
-        const response = await provider.generate(prompt, {
+        const inputGuardrail = applyInputGuardrails(prompt, {
+          sanitizePII: true, usePlaceholders: true, blockCriticalPII: true,
+        });
+        if (inputGuardrail.wasBlocked) return null;
+
+        const response = await provider.generate(inputGuardrail.output, {
           spanName: "medication-lookup-llm",
-          metadata: { medication: medicationName, fallback: true },
+          metadata: { medication: medicationName, fallback: true, pii_sanitized: inputGuardrail.wasSanitized },
+        });
+
+        const outputGuardrail = applyOutputGuardrails(response.content, {
+          sanitizePII: true, usePlaceholders: true,
         });
 
         const parsed = extractJsonObject<{
@@ -323,7 +333,7 @@ Use simple, patient-friendly language. If this is not a real medication, respond
           sideEffects?: string[];
           warnings?: string[];
           patientTips?: string[];
-        }>(response.content);
+        }>(outputGuardrail.output);
 
         if (parsed.error) return null; // Will trigger final fallback
 
@@ -509,9 +519,17 @@ Rules:
 
 Respond ONLY with the JSON object.`;
 
-    const response = await provider.generate(prompt, {
+    const inputGuardrail = applyInputGuardrails(prompt, {
+      sanitizePII: true, usePlaceholders: true, blockCriticalPII: true,
+    });
+
+    const response = await provider.generate(inputGuardrail.output, {
       spanName: "symptom-check-llm",
-      metadata: { symptom, severity, fallback: true },
+      metadata: { symptom, severity, fallback: true, pii_sanitized: inputGuardrail.wasSanitized },
+    });
+
+    const outputGuardrail = applyOutputGuardrails(response.content, {
+      sanitizePII: true, usePlaceholders: true,
     });
 
     const parsed = extractJsonObject<{
@@ -520,7 +538,7 @@ Respond ONLY with the JSON object.`;
       actions?: string[];
       selfCare?: string;
       possibleMedicationRelated?: boolean;
-    }>(response.content);
+    }>(outputGuardrail.output);
     return {
       toolName: "checkSymptom",
       result: {
@@ -608,16 +626,24 @@ If this is not a medical term or you're not sure what it means, say "I'm not sur
 
 Respond with ONLY the explanation, no other text.`;
 
-    const response = await provider.generate(prompt, {
+    const inputGuardrail = applyInputGuardrails(prompt, {
+      sanitizePII: true, usePlaceholders: true, blockCriticalPII: true,
+    });
+
+    const response = await provider.generate(inputGuardrail.output, {
       spanName: "medical-term-llm",
-      metadata: { term, fallback: true },
+      metadata: { term, fallback: true, pii_sanitized: inputGuardrail.wasSanitized },
+    });
+
+    const outputGuardrail = applyOutputGuardrails(response.content, {
+      sanitizePII: true, usePlaceholders: true,
     });
 
     return {
       toolName: "explainMedicalTerm",
       result: {
         term,
-        explanation: response.content.trim(),
+        explanation: outputGuardrail.output.trim(),
         source: "LLM_GENERATED",
       },
       success: true,

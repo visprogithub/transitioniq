@@ -968,7 +968,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
                   </div>
                 ) : (
                   <>
-                    <div className="text-sm">{renderMarkdown(message.content)}</div>
+                    <div className="text-sm">{renderMarkdown(message.content || "")}</div>
 
                     {/* Tool indicators + voice playback */}
                     <div className="mt-2 pt-2 border-t border-gray-200/50 flex items-center justify-between gap-2">
@@ -988,7 +988,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
                       {/* TTS play button for assistant messages (hidden when voice not configured) */}
                       {message.role === "assistant" && voiceEnabled && (
                         <button
-                          onClick={() => playTTS(message.content, index)}
+                          onClick={() => playTTS(message.content || "", index)}
                           disabled={ttsLoading === index || isVoiceRateLimited}
                           className="flex-shrink-0 p-1 rounded-full text-gray-400 hover:text-indigo-600 hover:bg-white/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           title={playingMessageIndex === index ? "Stop" : "Listen"}
