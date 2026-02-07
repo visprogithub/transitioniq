@@ -243,13 +243,54 @@ function sanitizeSummary(
   summary.questionsForDoctor = (summary.questionsForDoctor || []).slice(0, 5);
   summary.nextSteps = (summary.nextSteps || []).slice(0, 6);
   
-  // Backfill any medications the LLM missed — every patient medication must appear
-  const llmMedNames = new Set(
-    (summary.medicationReminders || []).map((m) => m.medication.toLowerCase())
-  );
+  // Backfill any medications the LLM missed — every patient medication must appear.
+  // Use fuzzy matching to avoid duplicates when the LLM uses a slightly different name
+  // (e.g., "Warfarin Sodium" vs "Warfarin", "Metformin HCl" vs "Metformin").
+  summary.medicationReminders = summary.medicationReminders || [];
   const importantDrugs = ["warfarin", "insulin", "eliquis", "metformin", "digoxin", "lithium"];
-  for (const med of patient.medications) {
-    if (!llmMedNames.has(med.name.toLowerCase())) {
+
+  // Normalize a medication name for fuzzy comparison: lowercase, strip dosages,
+  // parenthetical info, and common suffixes like "sodium", "hcl", "er", "xr"
+  const normalizeMedName = (name: string): string =>
+    name
+      .toLowerCase()
+      .replace(/\s*\(.*?\)\s*/g, " ")            // Remove parenthetical info
+      .replace(/\d+\s*(mg|mcg|meq|ml|units?)\b/gi, "") // Remove dosages
+      .replace(/\b(sodium|hcl|hydrochloride|er|xr|sr|cr|tartrate|succinate|besylate|maleate)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  // Check if two medication names refer to the same drug (fuzzy substring match)
+  const isSameMed = (patientMed: string, llmMed: string): boolean => {
+    const pNorm = normalizeMedName(patientMed);
+    const lNorm = normalizeMedName(llmMed);
+    if (!pNorm || !lNorm) return false;
+    // Exact match after normalization
+    if (pNorm === lNorm) return true;
+    // Either contains the other (handles "Warfarin" matching "Warfarin Sodium 5mg")
+    if (pNorm.includes(lNorm) || lNorm.includes(pNorm)) return true;
+    // First word match (handles "Potassium Chloride" vs "Potassium")
+    const pFirst = pNorm.split(" ")[0];
+    const lFirst = lNorm.split(" ")[0];
+    if (pFirst.length >= 4 && pFirst === lFirst) return true;
+    return false;
+  };
+
+  // Count how many patient meds are already accounted for in the LLM response
+  const llmMeds = summary.medicationReminders.map((m) => m.medication);
+  const accountedFor = patient.medications.filter((med) =>
+    llmMeds.some((llmName) => isSameMed(med.name, llmName))
+  );
+  const missingMeds = patient.medications.filter((med) =>
+    !llmMeds.some((llmName) => isSameMed(med.name, llmName))
+  );
+
+  if (missingMeds.length > 0) {
+    console.log(
+      `[Patient Summary] LLM covered ${accountedFor.length}/${patient.medications.length} meds. ` +
+      `Backfilling ${missingMeds.length} missing: ${missingMeds.map((m) => m.name).join(", ")}`
+    );
+    for (const med of missingMeds) {
       summary.medicationReminders.push({
         medication: med.name,
         instruction: `Take ${med.dose} ${med.frequency}`,

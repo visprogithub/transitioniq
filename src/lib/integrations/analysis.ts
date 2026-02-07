@@ -37,12 +37,18 @@ function estimateTokenCost(
   usage: { promptTokens: number; completionTokens: number; totalTokens: number },
   modelId: string
 ): number {
+  // Pricing per 1K tokens (as of mid-2025)
+  // Keys match getActiveModelId() config keys, NOT raw API model IDs
   const pricing: Record<string, { input: number; output: number }> = {
-    "gemini-2.5-flash": { input: 0.00015, output: 0.00060 },
-    "gemini-2.5-flash-lite": { input: 0.000075, output: 0.00030 },
+    // Gemini 2.5 ($0.30/M input, $2.50/M output)
+    "gemini-2.5-flash": { input: 0.00030, output: 0.00250 },
+    // Gemini 2.5 Flash-Lite ($0.10/M input, $0.40/M output)
+    "gemini-2.5-flash-lite": { input: 0.00010, output: 0.00040 },
+    // OpenAI ($0.15/M input, $0.60/M output)
     "openai-gpt-4o-mini": { input: 0.00015, output: 0.00060 },
-    "hf-qwen3-8b": { input: 0.0001, output: 0.0002 },
-    "hf-qwen3-30b-a3b": { input: 0.0001, output: 0.0002 },
+    // HuggingFace (nominal costs — time-based billing)
+    "hf-qwen3-8b": { input: 0.00005, output: 0.00010 },
+    "hf-qwen3-30b-a3b": { input: 0.00006, output: 0.00012 },
   };
   const p = pricing[modelId];
   if (!p) {

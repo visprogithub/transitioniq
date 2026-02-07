@@ -396,12 +396,17 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
 
       const url = URL.createObjectURL(blob);
       const audio = new Audio();
+      audio.preload = "auto";
 
-      // Wait for enough audio to be buffered before playing (prevents clipping)
+      // Wait for the entire audio to be buffered before playing.
+      // This prevents the browser from starting playback before the
+      // MP3 header/frame sync is complete, which causes the first
+      // syllable to be clipped on some browsers.
       await new Promise<void>((resolve, reject) => {
         audio.oncanplaythrough = () => resolve();
         audio.onerror = () => reject(new Error("Audio failed to load"));
         audio.src = url;
+        audio.load(); // Explicitly start loading (some browsers wait for play())
       });
 
       // Check if aborted while buffering
@@ -416,12 +421,16 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
         audioRef.current = null;
       };
 
+      // Force seek to the very start — MP3 ID3 tags can offset the playhead
+      audio.currentTime = 0;
+
       audioRef.current = audio;
       setPlayingMessageIndex(messageIndex);
       setTtsLoading(null);
 
-      // Small delay after setting currentTime to ensure seek completes
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Wait for the seek to complete and a paint frame to pass,
+      // ensuring the audio element is fully ready before play()
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Check if aborted during delay
       if (abortController.signal.aborted) {

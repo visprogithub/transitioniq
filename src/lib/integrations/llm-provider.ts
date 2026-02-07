@@ -258,11 +258,13 @@ export class LLMProvider {
 
     // Create an LLM span for proper token/cost tracking
     // Opik requires type: "llm", model, and provider for cost calculation
+    // Set totalEstimatedCostVersion at creation to prevent server-side cost override
     const llmSpan = trace?.span({
       name: `${this.config.provider}-${this.config.modelId}`,
       type: "llm",
       model: this.config.modelId,
       provider: this.mapProviderToOpik(this.config.provider),
+      totalEstimatedCostVersion: "manual",
       input: {
         prompt: prompt.slice(0, 1000), // Truncate for display
       },
@@ -496,16 +498,17 @@ export class LLMProvider {
    * Note: HuggingFace free tier has nominal costs for tracking purposes
    */
   private estimateCost(usage: NonNullable<LLMResponse["tokenUsage"]>): number {
-    // Pricing per 1K tokens (approximate, as of early 2025)
-    // HuggingFace uses nominal pricing for Opik dashboard visibility
+    // Pricing per 1K tokens (as of mid-2025)
+    // Sources: ai.google.dev/gemini-api/docs/pricing, openai.com/api/pricing
     const pricing: Record<string, { input: number; output: number }> = {
-      // Gemini 2.5
-      "gemini-2.5-flash": { input: 0.00015, output: 0.00060 },
-      "gemini-2.5-flash-lite": { input: 0.000075, output: 0.00030 },
-      // HuggingFace (nominal costs for Opik tracking)
+      // Gemini 2.5 ($0.30/M input, $2.50/M output)
+      "gemini-2.5-flash": { input: 0.00030, output: 0.00250 },
+      // Gemini 2.5 Flash-Lite ($0.10/M input, $0.40/M output)
+      "gemini-2.5-flash-lite": { input: 0.00010, output: 0.00040 },
+      // HuggingFace (nominal costs for Opik tracking — time-based billing)
       "Qwen/Qwen3-8B": { input: 0.00005, output: 0.00010 },
       "Qwen/Qwen3-30B-A3B": { input: 0.00006, output: 0.00012 },
-      // OpenAI
+      // OpenAI ($0.15/M input, $0.60/M output)
       "gpt-4o-mini": { input: 0.00015, output: 0.00060 },
       // Anthropic
       "claude-3-haiku-20240307": { input: 0.00025, output: 0.00125 },

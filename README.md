@@ -96,7 +96,7 @@ This ensures production reliability — tracing is valuable but never critical p
 - **Orchestration**: Deterministic clinical pipeline with dependency-aware parallel execution and LLM synthesis — no agentic loops
 - **Streaming**: SSE (Server-Sent Events) for real-time pipeline progress visualization
 - **Observability**: Opik (Comet) for tracing, prompt versioning, evaluation, error tracking, and cost tracking
-- **Guardrails**: PII/PHI detection on all LLM-calling endpoints (input sanitization + output sanitization), off-topic filtering (patient chat), post-LLM score calibration
+- **Guardrails**: PII/PHI detection on all LLM-calling endpoints (input sanitization + output sanitization), LLM-as-a-judge off-topic classifier with multi-model fallback (patient chat), post-LLM score calibration
 - **Knowledge Base**: Zero-dependency TF-IDF vector search with medical NLP (synonym expansion, stemming) — production would use a knowledge graph (Neo4j) for relational clinical queries + vector embeddings for semantic search
 - **External APIs**: FDA RxNorm, OpenFDA (FAERS, Labels, Enforcement), CMS, DailyMed, MedlinePlus - with caching
 - **Memory**: In-memory session management with conversation history compaction
@@ -216,7 +216,9 @@ The Recovery Coach is a **tool-augmented conversational AI** with a hybrid routi
 
 **Adaptive communication**: The coach automatically adjusts its language and tone based on patient age — simple words and encouragement for children, clear professional language for adults, patient-focused explanations with caregiver involvement prompts for elderly patients. This is driven by the system prompt, not separate models.
 
-**Why not native function calling for all routing?** The models used in this prototype (GPT-4o Mini, Qwen3, Gemini Flash) have varying levels of function-calling reliability, especially at the free/cheap tier. Proactive keyword detection eliminates the most common failure mode (malformed JSON from the LLM) for the most common queries. In production, native function calling with a validated model (GPT-4o, Claude Sonnet) and structured output guarantees would replace the keyword layer. The clinical tools could be exposed as MCP (Model Context Protocol) servers — standardized endpoints that any MCP-compatible model can discover and invoke, decoupling tool implementation from the routing layer and making it trivial to add new data sources without changing coach code. The local knowledge base (TF-IDF over ~400 documents) would be replaced with a knowledge graph (Neo4j) for relational clinical queries (drug-condition-symptom relationships) and vector embeddings for semantic retrieval.
+**Off-topic guardrail (two-layer classification)**: Before any LLM chat tokens are spent, every patient message passes through a two-layer classifier. **Layer 1 (regex)**: A set of deterministic regex patterns instantly blocks obvious off-topic messages — cooking instructions ("how do I make a grilled cheese"), ticket/shopping requests ("where can I get concert tickets"), math, coding, trivia, etc. This is free, instant, and 100% reliable. **Layer 2 (LLM-as-a-Judge)**: Messages that pass the regex check go to a lightweight LLM binary classifier with a **multi-model fallback chain** (GPT-4o Mini → HF Qwen3-8B → Gemini Flash Lite) that returns ALLOWED or BLOCKED. The classifier prompt uses few-shot examples to distinguish health-related food/activity questions from off-topic ones (e.g., "What can I eat?" → ALLOWED vs "How do I make a grilled cheese?" → BLOCKED). If all LLM classifiers fail, the message is allowed through since the system prompt still constrains the coach's behavior. Every classification decision is traced to Opik with the model used, method (regex vs LLM), latency, and result. The classifier prompt is versioned in Opik's Prompt Library for A/B testing.
+
+**Why not native function calling for all routing?** The models used in this prototype (GPT-4o Mini, Qwen3, Gemini Flash) have varying levels of function-calling reliability, especially at the free/cheap tier. Proactive keyword detection eliminates the most common failure mode (malformed JSON from the LLM) for the most common queries. In production, native function calling with a validated model (GPT 5+, Claude Sonnet/Opus, Gemini) and structured output guarantees would replace the keyword layer. The clinical tools could be exposed as MCP (Model Context Protocol) servers — standardized endpoints that any MCP-compatible model can discover and invoke, decoupling tool implementation from the routing layer and making it trivial to add new data sources without changing coach code. The local knowledge base (TF-IDF over ~400 documents) would be replaced with a knowledge graph (Neo4j) for relational clinical queries (drug-condition-symptom relationships) and vector embeddings for semantic retrieval.
 
 ### Clinical Assessment Tools
 
@@ -256,6 +258,7 @@ The Recovery Coach is a **tool-augmented conversational AI** with a hybrid routi
 - **Data Source Fallback Chains**: Patient Coach tools try local knowledge base first (fast, offline), then external APIs (FDA DailyMed, MedlinePlus), then LLM generation as a last resort — prioritizing verified data over generated text.
 - **FDA Caching**: API results cached (RxCUI: 7d, interactions: 24h, labels: 24h, recalls: 12h) to reduce latency and API calls.
 - **PII/PHI Guardrails**: Input sanitization before LLM calls and output sanitization after, with critical PII (SSN, credit cards) blocking the request entirely. Applied to all LLM-calling endpoints: discharge analysis, plan generation, patient chat, patient summary, patient coach tool fallbacks, and LLM-as-Judge evaluation.
+- **Off-Topic Guardrail (Two-Layer)**: The Recovery Coach uses a two-layer classifier *before* the main LLM call, so off-topic messages never consume expensive chat tokens. Layer 1 (regex) instantly blocks obvious off-topic patterns (cooking requests, shopping, coding, trivia). Layer 2 (LLM-as-a-Judge) classifies ambiguous messages via GPT-4o Mini → Qwen3-8B → Flash Lite fallback chain. The classifier prompt is versioned in Opik's Prompt Library. Every classification is traced to Opik with the method, model used, latency, and result.
 - **Prompt Versioning**: All prompts stored in Opik Prompt Library with local fallbacks for offline/testing.
 - **Error Resilience**: Tool failures are traced to Opik with full context. Non-required tool failures degrade gracefully; required tool failures return clear error messages.
 
@@ -598,21 +601,12 @@ All prompts are stored and versioned in Opik's Prompt Library with local fallbac
 
 The Evaluation tab provides three evaluation capabilities:
 
-**1. LLM-as-Judge with FDA Cross-Verification** (automatic after every assessment):
-- Independently fetches FDA drug interaction and Black Box Warning data for the patient's medications
-- Compares what the assessment found vs what FDA actually reports — catches missed risks
-- Scores on 4 weighted criteria: Safety (40%), Accuracy (25%), Actionability (20%), Completeness (15%)
-- Pass threshold: >= 0.7 overall. Below 0.7 flags for review.
-- The judge is grounded in real data: if the pipeline missed a drug interaction that FDA reports, the Safety and Accuracy scores are penalized
-- FDA cross-verification call is traced separately in Opik (interaction count, warning count, any API errors)
-- Requires `OPENAI_API_KEY` (always uses OpenAI regardless of active model)
-
-**2. Model Comparison** (manual):
+**1. Model Comparison** (manual):
 - Runs all demo patients through selected LLM providers
 - Measures per-model: latency, discharge score accuracy vs expected range, status match, risk factor coverage
 - Determines winner by weighted scoring: success rate (40%) + confidence (30%) + speed (30%)
 
-**3. Opik Experiments** (manual):
+**2. Opik Experiments** (manual):
 - Runs predefined test cases through Opik SDK experiment framework
 - Tracks score consistency, status correctness, and risk coverage across prompt versions
 - Results stored in Opik for regression tracking
@@ -621,7 +615,7 @@ The Evaluation tab provides three evaluation capabilities:
 
 These are gaps in the current prototype that would need to be addressed before production:
 
-- **Demo data**: All 5 patients are synthetic FHIR data. FDA API calls are real but patient data is not.
+- **Demo data**: All 12 patients are synthetic FHIR data. FDA API calls are real but patient data is not.
 
 ## Source Code Viewer (Was hoping to bypass public github repo requirement this is depreciated and wouldn't ship with actual product)
 
@@ -641,6 +635,250 @@ Navigate to [`/source`](/source) to access the built-in source code viewer for h
 - **Kill switch**: Set `CODE_VIEWER_ENABLED=false` in Vercel to instantly disable access
 - **Auto-expiry**: Access automatically expires February 19, 2026
 - **No indexing**: `/source` is blocked from search engines via `robots.txt` and `noindex` meta tags
+
+## Production Architecture: EMR-to-Patient-App Pipeline
+
+In the current hackathon prototype, the clinical view, patient view, and evaluation tab all live in the same Next.js app with in-memory state. In production, these would be three separate systems connected by a shared database layer. This section describes what that architecture looks like and what would need to change.
+
+### System Separation
+
+```
+┌─────────────────────────────────┐     ┌──────────────────────────────────┐
+│      CLINICAL SYSTEM            │     │       PATIENT SYSTEM             │
+│    (EHR Integration)            │     │     (Mobile App / Portal)        │
+│                                 │     │                                  │
+│  Deployed as:                   │     │  Deployed as:                    │
+│  • Epic SMART on FHIR App       │     │  • MyChart module                │
+│  • Cerner CDS Hooks module      │     │  • Standalone iOS/Android app    │
+│  • Oracle Health plugin         │     │  • Patient portal web app        │
+│                                 │     │                                  │
+│  Users: Nurses, Physicians,     │     │  Users: Patients, Caregivers     │
+│         Discharge Planners      │     │                                  │
+│                                 │     │                                  │
+│  Features:                      │     │  Features:                       │
+│  • Run discharge assessment     │     │  • View going-home prep guide    │
+│  • Review/edit risk factors     │     │  • Recovery Coach chat           │
+│  • Modify discharge checklist   │     │  • Medication reminders          │
+│  • Override AI score with       │     │  • Symptom check-in             │
+│    clinical judgment            │     │  • Voice interaction (TTS/STT)   │
+│  • Sign off on discharge plan   │     │  • Caregiver access              │
+│  • Add clinical notes           │     │                                  │
+└──────────────┬──────────────────┘     └───────────────┬──────────────────┘
+               │                                        │
+               │  Writes assessments,                   │  Reads published
+               │  clinician edits,                      │  assessments,
+               │  sign-offs                             │  patient-safe content
+               │                                        │
+               ▼                                        ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    SHARED DATABASE LAYER                                 │
+│                                                                          │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────────────┐  │
+│  │  Assessments DB  │  │  Audit Log       │  │  Conversation Store    │  │
+│  │  (PostgreSQL)    │  │  (append-only)   │  │  (Redis + PostgreSQL)  │  │
+│  │                  │  │                  │  │                        │  │
+│  │  • patient_id    │  │  • who changed   │  │  • session history     │  │
+│  │  • score (0-100) │  │    what, when    │  │  • tool call logs      │  │
+│  │  • status        │  │  • original vs   │  │  • coach responses     │  │
+│  │  • risk_factors  │  │    modified vals │  │  • patient questions   │  │
+│  │  • checklist     │  │  • clinical      │  │                        │  │
+│  │  • clinician_    │  │    rationale     │  │                        │  │
+│  │    modifications │  │  • sign-off      │  │                        │  │
+│  │  • ai_version    │  │    attestation   │  │                        │  │
+│  │  • published_at  │  │                  │  │                        │  │
+│  │  • signed_off_by │  │                  │  │                        │  │
+│  └─────────────────┘  └──────────────────┘  └────────────────────────┘  │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  Patient-Safe View (Materialized / Read Replica)                    │ │
+│  │                                                                     │ │
+│  │  Only exposes data after:                                           │ │
+│  │  1. Clinician has reviewed and signed off                           │ │
+│  │  2. Language has been converted to patient-friendly framing         │ │
+│  │  3. Clinical jargon replaced with plain language                    │ │
+│  │  4. Risk factors re-framed as "things to prepare for"              │ │
+│  │  5. Checklist items marked as clinician-approved                   │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    INTERNAL SYSTEM                                        │
+│                  (Ops Dashboard)                                          │
+│                                                                          │
+│  • Opik traces, experiments, prompt versioning                           │
+│  • Model performance monitoring                                          │
+│  • Cost tracking                                                         │
+│  • A/B testing prompt versions                                           │
+│  • Regression detection                                                  │
+│  • Not visible to clinicians or patients                                 │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### Assessment Database Schema
+
+The core table that connects the clinical and patient systems:
+
+```sql
+CREATE TABLE discharge_assessments (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id          VARCHAR(64) NOT NULL,       -- FHIR patient ID
+    encounter_id        VARCHAR(64),                -- Hospital encounter/visit ID
+
+    -- AI-generated assessment (immutable after creation)
+    ai_score            INTEGER NOT NULL,            -- 0-100 discharge readiness
+    ai_status           VARCHAR(20) NOT NULL,        -- 'ready', 'caution', 'not_ready'
+    ai_risk_factors     JSONB NOT NULL,              -- Array of { severity, title, description, source }
+    ai_recommendations  JSONB,                       -- Array of recommendation strings
+    ai_checklist        JSONB NOT NULL,              -- Array of { text, priority, category }
+    ai_model_id         VARCHAR(64) NOT NULL,        -- e.g. 'openai-gpt-4o-mini'
+    ai_prompt_version   VARCHAR(64),                 -- Opik prompt commit hash
+    ai_latency_ms       INTEGER,
+    ai_token_usage      JSONB,                       -- { promptTokens, completionTokens, totalTokens }
+    ai_cost_usd         DECIMAL(10,6),
+
+    -- Clinician modifications (mutable)
+    clinician_score     INTEGER,                     -- Override score (NULL = accept AI score)
+    clinician_status    VARCHAR(20),                 -- Override status (NULL = accept AI status)
+    clinician_notes     TEXT,                        -- Free-text clinical rationale
+    checklist_additions JSONB DEFAULT '[]',          -- Items added by clinician
+    checklist_removals  JSONB DEFAULT '[]',          -- Item IDs removed by clinician
+    risk_factor_edits   JSONB DEFAULT '[]',          -- { action: 'add'|'remove'|'modify', ... }
+
+    -- Workflow state
+    status              VARCHAR(20) NOT NULL DEFAULT 'draft',
+                                                     -- 'draft', 'reviewed', 'signed_off', 'published'
+    reviewed_by         VARCHAR(128),                -- Clinician who reviewed
+    reviewed_at         TIMESTAMPTZ,
+    signed_off_by       VARCHAR(128),                -- Clinician who signed off
+    signed_off_at       TIMESTAMPTZ,
+    published_at        TIMESTAMPTZ,                 -- When made visible to patient
+
+    -- Metadata
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    facility_id         VARCHAR(64),                 -- Hospital/facility identifier
+    department          VARCHAR(64)                  -- e.g. 'cardiology', 'general_surgery'
+);
+
+-- Immutable audit log — every change to an assessment is recorded
+CREATE TABLE assessment_audit_log (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    assessment_id       UUID NOT NULL REFERENCES discharge_assessments(id),
+    action              VARCHAR(32) NOT NULL,        -- 'created', 'score_override', 'checklist_add',
+                                                     -- 'checklist_remove', 'risk_edit', 'signed_off',
+                                                     -- 'published', 'note_added'
+    field_changed       VARCHAR(64),                 -- Which field was modified
+    old_value           JSONB,                       -- Previous value
+    new_value           JSONB,                       -- New value
+    changed_by          VARCHAR(128) NOT NULL,       -- Clinician ID
+    changed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    rationale           TEXT                         -- Why the change was made
+);
+
+-- Patient-safe materialized view (what the patient app reads)
+CREATE MATERIALIZED VIEW patient_discharge_view AS
+SELECT
+    da.id,
+    da.patient_id,
+    da.encounter_id,
+    COALESCE(da.clinician_score, da.ai_score) AS final_score,
+    COALESCE(da.clinician_status, da.ai_status) AS final_status,
+    da.ai_risk_factors,
+    da.risk_factor_edits,
+    da.ai_checklist,
+    da.checklist_additions,
+    da.checklist_removals,
+    da.signed_off_by,
+    da.published_at
+FROM discharge_assessments da
+WHERE da.status = 'published'                        -- Only signed-off assessments
+  AND da.published_at IS NOT NULL;
+```
+
+### What Changes From the Prototype
+
+| Prototype (Current) | Production | Why |
+|---------------------|------------|-----|
+| In-memory `Map` for assessments | PostgreSQL `discharge_assessments` table | Persistence across restarts, HIPAA-compliant storage, multi-instance support |
+| No clinician edit tracking | `assessment_audit_log` table (append-only) | Every score override, checklist change, and sign-off is recorded with who/when/why — required for clinical liability and regulatory compliance |
+| Patient sees same data as clinician | `patient_discharge_view` (materialized view) | Patients only see **published** assessments after clinician sign-off. Risk factors are re-framed from clinical severity language to patient-friendly preparation language |
+| Single Next.js app serves both views | Separate deployments: EHR plugin + mobile app | Clinical view lives inside the EHR (SMART on FHIR), patient view lives in MyChart or standalone app. Different auth, different networks, different compliance requirements |
+| Cookie-based session | OAuth2/SMART on FHIR auth (clinical), MyChart SSO or biometric auth (patient) | HIPAA requires proper identity verification, role-based access, and audit trails |
+| In-memory conversation history | Redis (hot) + PostgreSQL (cold) | Recovery Coach conversations need to persist across app restarts and be available for clinical review if needed |
+| `flushTraces()` to Opik cloud | Opik self-hosted or collector sidecar | PHI cannot leave the hospital network — Opik traces must stay on-premises or use a HIPAA BAA-covered deployment |
+| No workflow states | `draft → reviewed → signed_off → published` | The AI assessment is a **draft** until a clinician reviews it. Nothing reaches the patient without human sign-off |
+
+### Clinical → Patient Data Flow
+
+The critical design constraint is that **AI-generated content never reaches the patient without clinician approval**:
+
+```
+1. CLINICAL SYSTEM generates assessment
+   └── AI produces: score=42, status="not_ready", 5 risk factors, 8 checklist items
+   └── Saved to DB as status='draft'
+
+2. CLINICIAN reviews assessment
+   └── Agrees with 4 of 5 risk factors, removes 1 (irrelevant to this patient)
+   └── Adds 2 checklist items specific to this patient's home situation
+   └── Overrides score from 42 → 38 (clinical judgment: more concerning than AI estimated)
+   └── Each change → audit_log entry with rationale
+   └── Signs off → status='signed_off'
+
+3. SYSTEM publishes to patient view
+   └── status='signed_off' → 'published', published_at=NOW()
+   └── patient_discharge_view refreshes
+   └── Risk factors re-written: "High risk: Warfarin-Aspirin interaction"
+       → "Important: Two of your medicines need extra care together"
+   └── Checklist re-ordered: clinician-added items marked as priority
+
+4. PATIENT APP reads published assessment
+   └── Queries patient_discharge_view (only published, signed-off data)
+   └── Shows going-home preparation score, not "discharge readiness"
+   └── Recovery Coach has access to the published checklist for conversation context
+   └── Patient can mark checklist items as complete (tracked in separate table)
+```
+
+### EHR Integration Options
+
+| EHR System | Integration Method | Patient Portal |
+|------------|-------------------|----------------|
+| **Epic** | SMART on FHIR app (launched from Hyperspace), CDS Hooks for automated triggers | MyChart module or MyChart API |
+| **Cerner (Oracle Health)** | SMART on FHIR app, CDS Hooks, Millennium Open API | HealtheLife patient portal |
+| **MEDITECH** | SMART on FHIR (Expanse), RESTful API (6.x) | Patient and Consumer Health Portal |
+| **Standalone** | FHIR R4 server integration, HL7v2 ADT feeds for admission/discharge events | Custom mobile app (React Native / Flutter) |
+
+### Environment Changes for Production
+
+```env
+# --- Database (replaces in-memory Maps) ---
+DATABASE_URL=postgresql://user:pass@host:5432/transitioniq
+REDIS_URL=redis://host:6379/0
+
+# --- Auth (replaces cookie-based sessions) ---
+SMART_FHIR_CLIENT_ID=your_registered_app_id
+SMART_FHIR_CLIENT_SECRET=your_secret
+SMART_FHIR_REDIRECT_URI=https://your-hospital.com/callback
+MYCHART_API_KEY=your_mychart_integration_key
+
+# --- Opik (self-hosted for HIPAA) ---
+OPIK_URL_OVERRIDE=https://opik.internal.hospital.com
+OPIK_API_KEY=your_self_hosted_key
+
+# --- LLM (single validated model, not multi-model) ---
+LLM_MODEL=openai-gpt-4o-mini
+OPENAI_API_KEY=your_enterprise_key
+
+# --- FHIR (real EHR, not sandbox) ---
+FHIR_BASE_URL=https://epic.hospital.com/fhir/r4
+```
+
+### Regulatory Considerations
+
+- **HIPAA**: All PHI must stay within the hospital's network boundary. LLM calls to cloud providers require a BAA (Business Associate Agreement) with OpenAI/Google. Opik traces containing patient context must use self-hosted Opik or a HIPAA-covered cloud deployment.
+- **FDA**: If TransitionIQ's AI score is used as a factor in clinical discharge decisions, it may qualify as a Clinical Decision Support (CDS) tool under FDA's 2022 final guidance. The key question is whether the tool makes recommendations that clinicians are expected to independently evaluate (exempt) or whether it drives the decision (regulated as Software as a Medical Device / SaMD).
+- **Clinical Liability**: The audit log is non-negotiable. If a patient is discharged and readmitted within 30 days, the hospital needs to show: (a) what the AI recommended, (b) what the clinician changed, (c) why they changed it, and (d) that they signed off. This is why the `assessment_audit_log` table is append-only.
+- **21 CFR Part 11**: For electronic signatures on clinical documents, the sign-off workflow needs to meet FDA's electronic records/signatures requirements — meaning the `signed_off_by` field needs to be backed by a validated authentication system, not just a username string.
 
 ## Hackathon
 
