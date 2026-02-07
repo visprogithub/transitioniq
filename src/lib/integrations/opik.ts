@@ -252,11 +252,13 @@ export async function traceLLMCall<T>(
     });
 
     // Create LLM-type span for proper token tracking
+    // Set totalEstimatedCostVersion to prevent server-side cost override
     span = trace.span({
       name: `${llmOptions.provider}-${llmOptions.model}`,
       type: "llm",
       model: llmOptions.model,
       provider: providerMap[llmOptions.provider] || llmOptions.provider,
+      totalEstimatedCostVersion: "manual",
       metadata: {
         patientId,
         operation,

@@ -78,6 +78,7 @@ export async function POST(request: NextRequest) {
       type: "llm",
       model: TTS_MODEL,
       provider: "openai",
+      totalEstimatedCostVersion: "manual",
       metadata: {
         voice: TTS_VOICE,
         char_count: charCount,

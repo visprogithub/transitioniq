@@ -90,6 +90,7 @@ export async function POST(request: NextRequest) {
       type: "llm",
       model: WHISPER_MODEL,
       provider: "openai",
+      totalEstimatedCostVersion: "manual",
       metadata: {
         audio_size_bytes: audioFile.size,
         audio_type: audioFile.type,
