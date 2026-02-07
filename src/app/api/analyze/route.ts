@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
 // FDA client functions now called via executeTool() from tools.ts
-import { getOpikClient, traceError, flushTraces } from "@/lib/integrations/opik";
+import { getOpikClient, traceError, traceDataSourceCall, flushTraces } from "@/lib/integrations/opik";
 import { getActiveModelId, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
 import { executeTool } from "@/lib/agents/tools";
 import { runAgent, getSession } from "@/lib/agents/orchestrator";
@@ -241,6 +241,20 @@ async function handleStreamingAnalysis(
 ) {
   const { stream, emitStep, emitResult, emitError, complete } = createProgressStream();
 
+  // Create route-level Opik trace for the streaming analysis
+  const opik = getOpikClient();
+  const threadId = `analyze-${patientId}`;
+  const trace = opik?.trace({
+    name: "discharge-analysis-stream",
+    threadId,
+    metadata: {
+      model: getActiveModelId(),
+      category: "analysis",
+      streaming: true,
+      patientId,
+    },
+  });
+
   // Start async work that emits progress events
   (async () => {
     try {
@@ -264,7 +278,11 @@ async function handleStreamingAnalysis(
         "Checking drug interactions (FDA)",
         "data_source",
         async () => {
-          return await executeTool("check_drug_interactions", { medications: patient.medications });
+          const { result } = await traceDataSourceCall("FDA-Interactions", patientId,
+            () => executeTool("check_drug_interactions", { medications: patient.medications }),
+            { threadId }
+          );
+          return result;
         }
       );
       const drugInteractions = (interactionsResult.success ? interactionsResult.data : []) as unknown[];
@@ -276,7 +294,11 @@ async function handleStreamingAnalysis(
         "Checking FDA Black Box Warnings",
         "data_source",
         async () => {
-          return await executeTool("check_boxed_warnings", { medications: patient.medications });
+          const { result } = await traceDataSourceCall("FDA-BoxedWarnings", patientId,
+            () => executeTool("check_boxed_warnings", { medications: patient.medications }),
+            { threadId }
+          );
+          return result;
         }
       );
       const boxedWarnings = (warningsResult.success ? warningsResult.data : []) as unknown[];
@@ -288,7 +310,11 @@ async function handleStreamingAnalysis(
         `Checking FDA recalls for ${patient.medications.length} medications`,
         "data_source",
         async () => {
-          return await executeTool("check_drug_recalls", { medications: patient.medications });
+          const { result } = await traceDataSourceCall("FDA-Recalls", patientId,
+            () => executeTool("check_drug_recalls", { medications: patient.medications }),
+            { threadId }
+          );
+          return result;
         }
       );
       const recalls = (recallsResult.success ? recallsResult.data : []) as unknown[];
@@ -300,7 +326,11 @@ async function handleStreamingAnalysis(
         "Evaluating care gaps (Guidelines + MyHealthfinder + LLM)",
         "data_source",
         async () => {
-          return await executeTool("evaluate_care_gaps", { patient });
+          const { result } = await traceDataSourceCall("Guidelines", patientId,
+            () => executeTool("evaluate_care_gaps", { patient }),
+            { threadId }
+          );
+          return result;
         }
       );
       const careGaps = (careGapsResult.success ? careGapsResult.data : []) as Array<{
@@ -316,7 +346,11 @@ async function handleStreamingAnalysis(
         "Estimating medication costs (CMS + LLM)",
         "data_source",
         async () => {
-          return await executeTool("estimate_costs", { medications: patient.medications });
+          const { result } = await traceDataSourceCall("CMS", patientId,
+            () => executeTool("estimate_costs", { medications: patient.medications }),
+            { threadId }
+          );
+          return result;
         }
       );
       const costEstimates = (costsResult.success ? costsResult.data : []) as Array<{
@@ -332,7 +366,11 @@ async function handleStreamingAnalysis(
         "Retrieving clinical knowledge (TF-IDF RAG)",
         "tool",
         async () => {
-          return await executeTool("retrieve_knowledge", { patient });
+          const { result } = await traceDataSourceCall("Guidelines", patientId,
+            () => executeTool("retrieve_knowledge", { patient }),
+            { threadId }
+          );
+          return result;
         }
       );
       const knowledgeContext = knowledgeResult.success ? knowledgeResult.data : undefined;
@@ -365,6 +403,18 @@ async function handleStreamingAnalysis(
 
       const analysis = analysisResult.data as DischargeAnalysis;
 
+      // End route-level Opik trace on success
+      trace?.update({
+        output: {
+          success: true,
+          score: analysis.score,
+          status: analysis.status,
+          riskFactorCount: analysis.riskFactors?.length || 0,
+          streaming: true,
+        },
+      });
+      trace?.end();
+
       // Send final result
       emitResult({
         ...analysis,
@@ -379,6 +429,18 @@ async function handleStreamingAnalysis(
       // Close stream
       complete();
     } catch (error) {
+      // End route-level trace on error
+      if (trace) {
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+        trace.update({
+          errorInfo: {
+            exceptionType: error instanceof Error ? error.name : "Error",
+            message: errorMessage,
+            traceback: error instanceof Error ? (error.stack ?? errorMessage) : errorMessage,
+          },
+        });
+        trace.end();
+      }
       traceError("api-analyze-stream", error);
       emitError(error instanceof Error ? error.message : "Analysis failed");
       complete();
