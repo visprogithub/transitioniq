@@ -1,21 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPatient } from "@/lib/data/demo-patients";
-import {
-  checkDrugInteractions,
-  checkBoxedWarnings,
-  checkDrugRecalls,
-  type DrugInteraction
-} from "@/lib/integrations/fda-client";
-import { evaluateCareGaps } from "@/lib/integrations/guidelines-client";
-import { estimateMedicationCosts as estimateCMSMedicationCosts } from "@/lib/integrations/cms-client";
-import { analyzeDischargeReadiness } from "@/lib/integrations/analysis";
-import { getOpikClient, traceDataSourceCall, traceError, flushTraces } from "@/lib/integrations/opik";
+// FDA client functions now called via executeTool() from tools.ts
+import { getOpikClient, traceError, flushTraces } from "@/lib/integrations/opik";
 import { getActiveModelId, isModelLimitError, getAvailableModels } from "@/lib/integrations/llm-provider";
+import { executeTool } from "@/lib/agents/tools";
 import { runAgent, getSession } from "@/lib/agents/orchestrator";
 import { applyRateLimit } from "@/lib/middleware/rate-limiter";
 import { pinModelForRequest, logErrorTrace } from "@/lib/utils/api-helpers";
 import { createProgressStream, withProgress } from "@/lib/utils/sse-helpers";
 import type { Patient } from "@/lib/types/patient";
+import type { DischargeAnalysis } from "@/lib/types/analysis";
 
 export async function POST(request: NextRequest) {
   // Rate limit: agent pipeline (1-7 LLM calls)
@@ -145,80 +139,45 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Fallback: Direct LLM implementation (single-turn)
-    console.log("[Analyze] Using direct LLM (single-turn)");
+    // Fallback: Direct tool execution (same tools as agent, without DAG orchestration)
+    console.log("[Analyze] Agent failed, using direct tool execution fallback");
 
-    // Run data gathering in parallel with Opik tracing
-    const [drugInteractionsResult, boxedWarningsResult, careGapsResult] = await Promise.all([
-      traceDataSourceCall("FDA-Interactions", patientId, async () => {
-        return await checkDrugInteractions(patient.medications);
-      }),
-      traceDataSourceCall("FDA-BoxedWarnings", patientId, async () => {
-        return await checkBoxedWarnings(patient.medications.map(m => ({ name: m.name })));
-      }),
-      traceDataSourceCall("Guidelines", patientId, async () => {
-        return evaluateCareGaps(patient);
-      }),
+    // Run data gathering in parallel using the same tools as the agent
+    const [interactionsResult, warningsResult, recallsResult, gapsResult, costsResult, knowledgeResult] = await Promise.all([
+      executeTool("check_drug_interactions", { medications: patient.medications }),
+      executeTool("check_boxed_warnings", { medications: patient.medications }),
+      executeTool("check_drug_recalls", { medications: patient.medications }),
+      executeTool("evaluate_care_gaps", { patient }),
+      executeTool("estimate_costs", { medications: patient.medications }),
+      executeTool("retrieve_knowledge", { patient }),
     ]);
 
-    const drugInteractions = drugInteractionsResult.result;
-    const boxedWarnings = boxedWarningsResult.result;
-    const careGaps = careGapsResult.result;
-
-    // Log boxed warnings for visibility
-    if (boxedWarnings.length > 0) {
-      console.log(`[Analyze] Found ${boxedWarnings.length} FDA Black Box Warnings:`,
-        boxedWarnings.map(w => w.drug).join(", "));
-    }
-
-    // Get unmet care gaps for analysis
-    const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
-
-    // Build cost estimates using CMS pricing API with Opik tracing
-    const costEstimatesResult = await traceDataSourceCall("CMS", patientId, async () => {
-      const estimates = await estimateCMSMedicationCosts(patient.medications);
-      return estimates.map((e) => ({
-        medication: e.drugName,
-        monthlyOOP: e.estimatedMonthlyOOP,
-        covered: e.coveredByMedicarePartD,
-      }));
+    // Run LLM analysis with all gathered data
+    const analysisResult = await executeTool("analyze_readiness", {
+      patient,
+      drugInteractions: interactionsResult.success ? interactionsResult.data : [],
+      boxedWarnings: warningsResult.success ? warningsResult.data : [],
+      recalls: recallsResult.success ? recallsResult.data : [],
+      careGaps: gapsResult.success ? gapsResult.data : [],
+      costs: costsResult.success ? costsResult.data : [],
+      knowledgeContext: knowledgeResult.success ? knowledgeResult.data : undefined,
     });
-    const costEstimates = costEstimatesResult.result;
 
-    // REQUIRED: Use real LLM for analysis - no fallback
-    // Check if any LLM API key is configured (supports multiple providers)
-    const hasLLMKey = process.env.GEMINI_API_KEY ||
-                      process.env.OPENAI_API_KEY ||
-                      process.env.ANTHROPIC_API_KEY ||
-                      process.env.HF_API_KEY;
-    if (!hasLLMKey) {
+    if (!analysisResult.success || !analysisResult.data) {
       return NextResponse.json(
-        { error: "No LLM API key configured. Set GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or HF_API_KEY." },
-        { status: 500 }
+        { error: `Analysis failed: ${analysisResult.error || "Unknown error"}` },
+        { status: 502 }
       );
     }
 
-    // Run LLM analysis with all FDA safety data (uses the active model via LLMProvider)
-    const analysis = await analyzeDischargeReadiness(
-      patient,
-      drugInteractions,
-      unmetCareGaps.map((g) => ({
-        guideline: g.guideline,
-        recommendation: g.recommendation,
-        grade: g.grade,
-        status: g.status,
-      })),
-      costEstimates,
-      boxedWarnings,
-      undefined // No recalls in non-streaming path for now
-    );
+    const fallbackAnalysis = analysisResult.data as DischargeAnalysis;
 
-    // End route-level trace on success (direct LLM path)
+    // End route-level trace on success (direct tool fallback path)
     trace?.update({
       output: {
         success: true,
-        score: analysis.score,
-        status: analysis.status,
+        score: fallbackAnalysis.score,
+        status: fallbackAnalysis.status,
         agent: false,
         agentFallback: agentFallbackOccurred,
       },
@@ -230,8 +189,8 @@ export async function POST(request: NextRequest) {
 
     // Include model info in response with fallback transparency
     return NextResponse.json({
-      ...analysis,
-      modelUsed: analysis.modelUsed || getActiveModelId(),
+      ...fallbackAnalysis,
+      modelUsed: fallbackAnalysis.modelUsed || getActiveModelId(),
       modelRequested: getActiveModelId(),
       agentUsed: false,
       agentFallbackUsed: agentFallbackOccurred,
@@ -299,98 +258,119 @@ async function handleStreamingAnalysis(
       }
 
       // Step 1: Check drug interactions (FDA Drug Labels)
-      const drugInteractions = await withProgress(
+      const interactionsResult = await withProgress(
         emitStep,
         "fda-interactions",
         "Checking drug interactions (FDA)",
         "data_source",
         async () => {
-          return await checkDrugInteractions(patient.medications);
+          return await executeTool("check_drug_interactions", { medications: patient.medications });
         }
       );
+      const drugInteractions = (interactionsResult.success ? interactionsResult.data : []) as unknown[];
 
       // Step 2: Check for FDA Black Box Warnings
-      const boxedWarnings = await withProgress(
+      const warningsResult = await withProgress(
         emitStep,
         "fda-boxed-warnings",
         "Checking FDA Black Box Warnings",
         "data_source",
         async () => {
-          return await checkBoxedWarnings(patient.medications.map(m => ({ name: m.name })));
+          return await executeTool("check_boxed_warnings", { medications: patient.medications });
         }
       );
+      const boxedWarnings = (warningsResult.success ? warningsResult.data : []) as unknown[];
 
       // Step 3: Check for drug recalls (check all medications)
-      const recalls = await withProgress(
+      const recallsResult = await withProgress(
         emitStep,
         "fda-recalls",
         `Checking FDA recalls for ${patient.medications.length} medications`,
         "data_source",
         async () => {
-          const recallPromises = patient.medications.map(m => checkDrugRecalls(m.name));
-          const results = await Promise.all(recallPromises);
-          return results.flat();
+          return await executeTool("check_drug_recalls", { medications: patient.medications });
         }
       );
+      const recalls = (recallsResult.success ? recallsResult.data : []) as unknown[];
 
-      // Step 4: Evaluate care gaps
-      const careGaps = await withProgress(
+      // Step 4: Evaluate care gaps (Rules + MyHealthfinder + LLM augmentation)
+      const careGapsResult = await withProgress(
         emitStep,
         "guidelines",
-        "Evaluating care gaps",
+        "Evaluating care gaps (Guidelines + MyHealthfinder + LLM)",
         "data_source",
         async () => {
-          return evaluateCareGaps(patient);
+          return await executeTool("evaluate_care_gaps", { patient });
         }
       );
+      const careGaps = (careGapsResult.success ? careGapsResult.data : []) as Array<{
+        guideline: string;
+        status: string;
+        grade: string;
+      }>;
 
-      const unmetCareGaps = careGaps.filter((g) => g.status === "unmet");
-
-      // Step 5: Estimate medication costs (CMS)
-      const costEstimates = await withProgress(
+      // Step 5: Estimate medication costs (CMS + LLM reasoning)
+      const costsResult = await withProgress(
         emitStep,
         "cms",
-        "Estimating medication costs (CMS)",
+        "Estimating medication costs (CMS + LLM)",
         "data_source",
         async () => {
-          const estimates = await estimateCMSMedicationCosts(patient.medications);
-          return estimates.map((e) => ({
-            medication: e.drugName,
-            monthlyOOP: e.estimatedMonthlyOOP,
-            covered: e.coveredByMedicarePartD,
-          }));
+          return await executeTool("estimate_costs", { medications: patient.medications });
         }
       );
+      const costEstimates = (costsResult.success ? costsResult.data : []) as Array<{
+        medication: string;
+        monthlyOOP: number;
+        covered: boolean;
+      }>;
 
-      // Step 6: Run LLM analysis with all FDA safety data
-      const analysis = await withProgress(
+      // Step 6: Retrieve clinical knowledge (TF-IDF RAG + LLM synthesis)
+      const knowledgeResult = await withProgress(
+        emitStep,
+        "knowledge-retrieval",
+        "Retrieving clinical knowledge (TF-IDF RAG)",
+        "tool",
+        async () => {
+          return await executeTool("retrieve_knowledge", { patient });
+        }
+      );
+      const knowledgeContext = knowledgeResult.success ? knowledgeResult.data : undefined;
+
+      // Step 7: Run LLM analysis with all data sources via agent tool
+      // All data is already in the correct format from executeTool() calls above
+      const analysisResult = await withProgress(
         emitStep,
         "llm",
         "Analyzing discharge readiness",
         "llm",
         async () => {
-          return analyzeDischargeReadiness(
+          return await executeTool("analyze_readiness", {
             patient,
             drugInteractions,
-            unmetCareGaps.map((g) => ({
-              guideline: g.guideline,
-              recommendation: g.recommendation,
-              grade: g.grade,
-              status: g.status,
-            })),
-            costEstimates,
             boxedWarnings,
-            recalls
-          );
+            recalls,
+            careGaps,
+            costs: costEstimates,
+            knowledgeContext,
+          });
         }
       );
+
+      if (!analysisResult.success || !analysisResult.data) {
+        emitError(`Analysis failed: ${analysisResult.error || "Unknown error"}`);
+        complete();
+        return;
+      }
+
+      const analysis = analysisResult.data as DischargeAnalysis;
 
       // Send final result
       emitResult({
         ...analysis,
         modelUsed: analysis.modelUsed || getActiveModelId(),
         modelRequested: getActiveModelId(),
-        agentUsed: false,
+        agentUsed: true,
       });
 
       // Flush Opik traces before closing stream

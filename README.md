@@ -60,6 +60,7 @@ The following external APIs are used with their respective rate limits:
 | **MyHealthfinder** (preventive care recommendations) | No key required | N/A | 24h | Custom USPSTF implementation, Epic/Cerner care gaps |
 | **DailyMed** (drug labels, package inserts) | No key required | N/A | 24h | FDB, Lexicomp, Micromedex |
 | **MedlinePlus** (health topics, patient education) | No key required | N/A | Session | Licensed patient education content (Healthwise, Krames) |
+| **USDA FoodData Central** (nutrition data) | 1,000 req/hr per IP | Higher with key | 24h | Licensed nutrition databases, dietitian-curated content |
 | **CMS** (Medicare Part D pricing) | No key required | N/A | Static tier lookup | GoodRx API, Surescripts, real-time pharmacy benefit check |
 
 > **Note**: OpenFDA keys are free to obtain at [open.fda.gov/apis/authentication](https://open.fda.gov/apis/authentication). Without a key, you're limited to 1,000 requests/day which is sufficient for development and demos. For production, a free key increases this to 120,000 requests/day.
@@ -74,7 +75,7 @@ For a production clinical deployment, these free APIs would be replaced with val
 | **Rule-based guidelines** | UpToDate, DynaMed, or AHRQ | Hand-coded guideline rules may become outdated. Subscription services provide continuously updated, peer-reviewed recommendations. |
 | **Keyword-based knowledge base** | Knowledge graph (Neo4j) + vector DB with medical embeddings | Current TF-IDF/keyword search works for exact matches but misses both semantic similarity and *relational reasoning*. A **knowledge graph** (Neo4j, Amazon Neptune) would model drugs, conditions, symptoms, and guidelines as interconnected nodes — enabling queries like "what are all the downstream risks for a patient on warfarin with a new AFib diagnosis and a recent fall?" that flat document retrieval fundamentally cannot answer. Drug-drug interactions, contraindications, guideline applicability, and care pathway dependencies are inherently graph problems. Vector databases (Pinecone, Weaviate, pgvector) with medical-trained embeddings (PubMedBERT, MedCPT, BioGPT-Large) would handle semantic similarity for unstructured clinical text. The ideal production architecture is **hybrid: knowledge graph for structured relational queries + vector search for unstructured retrieval**, with the deterministic pipeline querying both. |
 | **CMS static tier lookup** | Real-time pharmacy benefit check | Static pricing estimates miss actual insurance coverage. Production would integrate with PBMs via Surescripts or NCPDP for real-time copay information. |
-| **In-memory food-drug database** | FDB or Lexicomp food interactions | Our ~50 food-drug pairs cover common cases but commercial databases have thousands of validated interactions with clinical significance ratings. |
+| **In-memory food-drug database** | FDB or Lexicomp food interactions | Our 350+ food-drug interaction pairs cover common cases (anticoagulants, statins, antibiotics, MAOIs, opioids, etc.) but commercial databases have thousands of validated interactions with clinical significance ratings and more granular severity grading. |
 | **Local symptom triage KB** | ApiMedic, Infermedica, or Isabel | Our Schmitt-Thompson style triage covers ~10 critical symptoms. Commercial symptom checkers provide AI-powered differential diagnosis, structured intake, and evidence-based triage across thousands of conditions. Free tiers: ApiMedic (100 tx/mo), EndlessMedical (developer access). |
 | **Demo patient data** | FHIR R4 from Epic/Cerner | Synthetic patients for demos; production would use SMART on FHIR with real EHR integration. |
 
@@ -146,7 +147,7 @@ Open [http://localhost:3000](http://localhost:3000) — select a patient from th
 - **SSE Streaming** - Real-time progress streaming as tools execute and the LLM synthesizes responses
 - **Prioritized Checklist** - Separated into "Must Do Before Leaving" and "Helpful For Your Recovery" sections
 - **Suggested Questions** - Pre-built question cards for common patient concerns
-- **Data Source Fallbacks** - Local KB → External API → LLM fallback chain for reliability
+- **Data Source Fallbacks** - Local KB → TF-IDF RAG → External APIs → LLM fallback chain for reliability
 
 ### Voice Features
 - **Text-to-Speech** - Any coach response can be read aloud via OpenAI `tts-1` (nova voice). Audio is streamed from the API for fast playback with buffered start to prevent clipping.
@@ -212,7 +213,7 @@ The Recovery Coach is a **tool-augmented conversational AI** with a hybrid routi
 
 **Layer 2 — LLM Tool Selection** (fallback path): When keywords don't match, the LLM decides whether to respond directly or request a tool via JSON. This is genuine agentic behavior — the model is making a routing decision based on its understanding of the patient's question. It handles edge cases where the patient phrases something unexpectedly.
 
-**Data source fallback chains**: Each tool tries local knowledge base first (instant, offline), then external APIs (FDA DailyMed, MedlinePlus), then LLM generation as a last resort — prioritizing verified data over generated text.
+**Data source fallback chains**: Each tool tries local knowledge base first (instant, offline), then TF-IDF RAG for fuzzy matching and synonym expansion (catches "water pill" → furosemide, "chest tightness" → chest pain triage protocol), then external APIs (FDA DailyMed, MedlinePlus, USDA FoodData Central), then LLM generation as a last resort — prioritizing verified data over generated text. The dietary guidance tool has the deepest chain: hardcoded topics → food-drug interactions database (350+ entries) → TF-IDF RAG → USDA nutrition API → LLM.
 
 **Adaptive communication**: The coach automatically adjusts its language and tone based on patient age — simple words and encouragement for children, clear professional language for adults, patient-focused explanations with caregiver involvement prompts for elderly patients. This is driven by the system prompt, not separate models.
 
@@ -228,34 +229,32 @@ The Recovery Coach is a **tool-augmented conversational AI** with a hybrid routi
 | `check_drug_interactions` | Find drug-drug interactions | FDA RxNorm API (cached 24h) | No |
 | `check_boxed_warnings` | Get FDA Black Box Warnings | FDA OpenFDA Label API (cached 24h) | No |
 | `check_drug_recalls` | Get recall info | FDA Enforcement API (cached 12h) | No |
-| `get_comprehensive_drug_safety` | Combined FAERS/warnings/recalls | FDA APIs (cached) | No |
-| `evaluate_care_gaps` | Check guideline compliance | Rule-based (ACC/AHA, ADA, GOLD) | No |
-| `estimate_costs` | Medication pricing | CMS data | No |
-| `retrieve_knowledge` | Clinical guidance search | Keyword-based knowledge base | No |
-| `check_preventive_care_gaps` | USPSTF preventive care gaps | MyHealthfinder API (cached 24h) | No |
-| `analyze_readiness` | Final synthesis | LLM | Yes |
-| `generate_plan` | Discharge plan creation | LLM | Yes |
+| `evaluate_care_gaps` | Check guideline compliance | Rule-based (ACC/AHA, ADA, GOLD) + MyHealthfinder API + LLM | Yes |
+| `estimate_costs` | Medication pricing | CMS data + LLM reasoning | Yes |
+| `retrieve_knowledge` | Clinical knowledge retrieval and synthesis | TF-IDF RAG over ~400 clinical documents + LLM synthesis | Yes |
+| `analyze_readiness` | Final synthesis | All gathered data + LLM | Yes |
+| `generate_plan` | Discharge plan creation | Analysis results + LLM | Yes |
 
 ### Patient Coach Tools
 
 | Tool | Purpose | Data Sources (fallback order) |
 |------|---------|-------------------------------|
-| `lookupMedication` | Drug info in patient-friendly language | 1. Local KB → 2. FDA DailyMed API → 3. LLM |
-| `checkSymptom` | Symptom triage and urgency | 1. Local KB → 2. MedlinePlus API → 3. LLM |
-| `explainMedicalTerm` | Simple explanations of jargon | 1. Local KB → 2. LLM |
+| `lookupMedication` | Drug info in patient-friendly language | 1. Local KB → 2. TF-IDF RAG → 3. FDA DailyMed API → 4. LLM |
+| `checkSymptom` | Symptom triage and urgency | 1. Local KB → 2. TF-IDF RAG → 3. MedlinePlus API → 4. LLM |
+| `explainMedicalTerm` | Simple explanations of jargon | 1. Local KB → 2. TF-IDF RAG → 3. LLM |
 | `getFollowUpGuidance` | Appointment scheduling guidance | Rule-based with patient context |
-| `getDietaryGuidance` | Diet recommendations | Rule-based with condition/medication awareness |
+| `getDietaryGuidance` | Diet recommendations | 1. Hardcoded topics → 2. Food-drug interactions DB → 3. TF-IDF RAG → 4. USDA FoodData Central API → 5. LLM |
 | `getActivityGuidance` | Activity restrictions | Rule-based with risk awareness |
 | `getPreventiveCare` | USPSTF preventive care recommendations | 1. MyHealthfinder API → 2. Default USPSTF recommendations |
 
 ### Design Philosophy
 
 - **Deterministic Data Gathering, AI-Powered Synthesis**: All clinical data sources are always consulted. The LLM's job is synthesis and reasoning over complete data — not deciding what data to look at.
-- **Dependency-Aware Parallel Execution**: Steps 2-7 fan out in parallel after Step 1 completes, with Step 8 waiting for all to finish. `Promise.allSettled()` provides ~2-3x speedup over sequential execution.
+- **Dependency-Aware Parallel Execution**: The agent orchestrator's DAG fans steps 2-7 out in parallel after Step 1, with Step 8 waiting for all to finish (`Promise.allSettled()`). The SSE streaming path executes the same tools sequentially so progress events render in order. Both paths call the same `executeTool()` implementations.
 - **Post-LLM Calibration**: Deterministic rules constrain the LLM's output (score capping based on high-risk factor count) to prevent the model from underweighting critical safety signals.
 - **Graceful Degradation**: Non-required tools (warnings, recalls, costs, knowledge) can fail without blocking the assessment. Required tools (patient data, drug interactions, care gaps, final analysis) must succeed.
 - **Proactive Tool Detection**: The Patient Coach uses keyword-based tool detection rather than LLM-decided tool calling, eliminating JSON parsing failures as a failure mode.
-- **Data Source Fallback Chains**: Patient Coach tools try local knowledge base first (fast, offline), then external APIs (FDA DailyMed, MedlinePlus), then LLM generation as a last resort — prioritizing verified data over generated text.
+- **Data Source Fallback Chains**: Patient Coach tools try local knowledge base first (fast, offline), then TF-IDF RAG for fuzzy/synonym matching (e.g. "blood thinner" → warfarin, "faint" → dizziness protocol), then external APIs (FDA DailyMed, MedlinePlus, USDA FoodData Central), then LLM generation as a last resort — prioritizing verified data over generated text. Dietary guidance additionally queries a 350+ entry food-drug interactions database (grapefruit, alcohol, caffeine, dairy, etc.) before falling back to the USDA nutrition API.
 - **FDA Caching**: API results cached (RxCUI: 7d, interactions: 24h, labels: 24h, recalls: 12h) to reduce latency and API calls.
 - **PII/PHI Guardrails**: Input sanitization before LLM calls and output sanitization after, with critical PII (SSN, credit cards) blocking the request entirely. Applied to all LLM-calling endpoints: discharge analysis, plan generation, patient chat, patient summary, patient coach tool fallbacks, and LLM-as-Judge evaluation.
 - **Off-Topic Guardrail (Two-Layer)**: The Recovery Coach uses a two-layer classifier *before* the main LLM call, so off-topic messages never consume expensive chat tokens. Layer 1 (regex) instantly blocks obvious off-topic patterns (cooking requests, shopping, coding, trivia). Layer 2 (LLM-as-a-Judge) classifies ambiguous messages via GPT-4o Mini → Qwen3-8B → Flash Lite fallback chain. The classifier prompt is versioned in Opik's Prompt Library. Every classification is traced to Opik with the method, model used, latency, and result.
@@ -505,7 +504,7 @@ POST /api/patient-chat { patientId, message }
     Example: "side effects of lisinopril" → lookupMedication("lisinopril")
          ↓
   If tool detected:
-    Execute tool directly (KB → API → LLM fallback chain)
+    Execute tool directly (KB → TF-IDF RAG → API → LLM fallback chain)
     → LLM call: generate response using tool results
          ↓
   If no tool detected (Layer 2 — LLM Fallback):
@@ -543,7 +542,8 @@ POST /api/patient-chat { patientId, message }
 | `src/lib/integrations/dailymed-client.ts` | FDA DailyMed drug label API |
 | `src/lib/integrations/medlineplus-client.ts` | MedlinePlus health topic API |
 | `src/lib/integrations/myhealthfinder-client.ts` | ODPHP MyHealthfinder API for USPSTF preventive care |
-| `src/lib/integrations/food-drug-interactions.ts` | Food-drug interaction database (grapefruit, tyramine, etc.) |
+| `src/lib/integrations/food-drug-interactions.ts` | Food-drug interaction database (350+ interactions — grapefruit, tyramine, dairy, alcohol, etc.) |
+| `src/lib/integrations/usda-nutrition-client.ts` | USDA FoodData Central API client (380K+ foods, condition-aware evaluation) |
 
 ### LLM & Observability
 

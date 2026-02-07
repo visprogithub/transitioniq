@@ -834,6 +834,8 @@ export default function DashboardPage() {
                               const sourceMap: Record<string, string> = {
                                 fetch_patient: "FHIR",
                                 check_drug_interactions: "FDA",
+                                check_boxed_warnings: "FDA",
+                                check_drug_recalls: "FDA",
                                 evaluate_care_gaps: "Guidelines",
                                 estimate_costs: "CMS",
                                 retrieve_knowledge: "RAG",

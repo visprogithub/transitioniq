@@ -373,8 +373,11 @@ BLOCKED — NOT health-related:
 KEY DISTINCTION — food questions:
 - "What can I eat?" → ALLOWED (dietary restriction question)
 - "Can I eat cheese with warfarin?" → ALLOWED (medication interaction)
-- "How do I make a grilled cheese sandwich?" → BLOCKED (cooking instructions)
+- "Can I eat cake?" or "Can I eat a whole cake?" → ALLOWED (asking about dietary limits/portions)
+- "Is pizza okay for me?" or "Can I have ice cream?" → ALLOWED (asking if a food is safe for their condition)
+- "How do I make a grilled cheese sandwich?" → BLOCKED (cooking instructions, asking HOW TO PREPARE food)
 - "What's a good recipe for dinner?" → BLOCKED (recipe request)
+- RULE: "Can I eat X?" is ALWAYS about dietary restrictions → ALLOWED. "How do I make/cook/bake X?" is about food preparation → BLOCKED.
 
 KEY DISTINCTION — activity questions:
 - "Can I go to a concert after surgery?" → ALLOWED (recovery/activity restriction)

@@ -29,9 +29,14 @@ import {
   getPatientFriendlyExplanation,
 } from "@/lib/knowledge-base";
 
+// Import TF-IDF RAG search for fuzzy fallback
+import { searchKnowledgeBase } from "@/lib/knowledge-base/knowledge-index";
+
 // Import external API clients
 import { getPatientFriendlyDrugInfo as getDailyMedDrugInfo } from "@/lib/integrations/dailymed-client";
 import { getPatientSymptomAssessment } from "@/lib/integrations/medlineplus-client";
+import { checkFoodDrugInteractions, getFoodGuidanceForPatient } from "@/lib/integrations/food-drug-interactions";
+import { evaluateFoodChoice, getConditionBasedFoodSuggestions } from "@/lib/integrations/usda-nutrition-client";
 import { extractJsonObject } from "@/lib/utils/llm-json";
 
 export interface PatientCoachToolDefinition {
@@ -283,6 +288,59 @@ async function executeLookupMedication(
       },
     },
     {
+      name: "TFIDF_RAG",
+      execute: async () => {
+        // TF-IDF fuzzy search catches synonyms (e.g. "blood thinner" → warfarin)
+        const ragResults = searchKnowledgeBase(normalizedName, {
+          topK: 3,
+          minScore: 0.1,
+          typeFilter: ["drug_monograph"],
+        });
+
+        if (ragResults.length === 0) return null;
+
+        const topResult = ragResults[0];
+        const metadata = topResult.document.metadata as Record<string, unknown>;
+        const genericName = (metadata.genericName as string) || normalizedName;
+
+        // Try to get the full monograph using the matched drug name
+        const matchedInfo = getPatientDrugInfo(genericName.toLowerCase());
+        if (matchedInfo) {
+          console.log(
+            `[Patient Coach] TF-IDF matched "${normalizedName}" → "${genericName}" (score: ${topResult.score.toFixed(3)})`
+          );
+
+          const allMeds = [genericName.toLowerCase(), ...patient.medications.filter((m) => m.name.toLowerCase() !== genericName.toLowerCase()).map((m) => m.name)];
+          const interactions = checkMultipleDrugInteractions(allMeds);
+          const interactionWarnings = interactions.map((i) => getPatientFriendlyInteraction(i));
+
+          return buildMedResult({
+            purpose: matchedInfo.purpose,
+            sideEffects: matchedInfo.sideEffects,
+            warnings: [...matchedInfo.warnings, ...interactionWarnings.map((iw) => `${iw.severity}: ${iw.message}`)],
+            patientTips: matchedInfo.patientTips,
+            interactions: interactionWarnings.length > 0 ? interactionWarnings : undefined,
+          });
+        }
+
+        // Even without a full monograph, extract what we can from the RAG content
+        const content = topResult.document.content;
+        const purposeMatch = content.match(/Category:\s*(.+)/);
+        const warningMatch = content.match(/Warnings:\s*(.+)/);
+
+        return buildMedResult({
+          purpose: purposeMatch
+            ? `This medication belongs to the ${purposeMatch[1].trim()} category.`
+            : `This medication is related to ${topResult.document.title}.`,
+          sideEffects: ["Ask your pharmacist about common side effects"],
+          warnings: warningMatch
+            ? [`⚠️ ${warningMatch[1].trim().slice(0, 200)}`]
+            : ["⚠️ Take exactly as prescribed"],
+          patientTips: ["Follow your doctor's instructions carefully"],
+        });
+      },
+    },
+    {
       name: "FDA_DAILYMED",
       execute: async () => {
         const fdaInfo = await getDailyMedDrugInfo(medicationName);
@@ -457,7 +515,69 @@ async function executeCheckSymptom(
     };
   }
 
-  // STEP 2: Try MedlinePlus API
+  // STEP 2: Try TF-IDF RAG search (catches "faint" → dizziness, "chest tightness" → chest pain, etc.)
+  try {
+    const ragResults = searchKnowledgeBase(normalizedSymptom, {
+      topK: 3,
+      minScore: 0.08,
+      typeFilter: ["symptom_triage"],
+    });
+
+    if (ragResults.length > 0) {
+      const topMatch = ragResults[0];
+      const matchedMeta = topMatch.document.metadata as Record<string, unknown>;
+      const matchedSymptom = (matchedMeta.symptom as string)?.toLowerCase();
+
+      // Try to get the full triage protocol using the matched symptom name
+      if (matchedSymptom) {
+        const matchedProtocol = getSymptomTriage(matchedSymptom);
+        if (matchedProtocol) {
+          console.log(
+            `[Patient Coach] TF-IDF matched symptom "${normalizedSymptom}" → "${matchedSymptom}" (score: ${topMatch.score.toFixed(3)})`
+          );
+
+          // Re-assess urgency with the matched protocol's symptom key
+          const ragAssessment = assessSymptomUrgency(
+            matchedSymptom,
+            severity as "mild" | "moderate" | "severe",
+            {
+              medications: patientMeds,
+              conditions: patientConditions,
+            }
+          );
+
+          return {
+            toolName: "checkSymptom",
+            result: {
+              symptom,
+              matchedAs: matchedSymptom,
+              severity,
+              urgencyLevel: urgencyMap[ragAssessment.urgencyLevel] || "call_doctor_soon",
+              message: ragAssessment.message,
+              actions: ragAssessment.actions,
+              seekCareIf: ragAssessment.seekCareIf,
+              selfCare: ragAssessment.selfCare,
+              possibleMedicationRelated: possibleMedicationCause?.name || null,
+              relatedRiskFactors:
+                analysis?.riskFactors
+                  .filter(
+                    (rf) =>
+                      rf.description.toLowerCase().includes(normalizedSymptom) ||
+                      normalizedSymptom.includes(rf.title.toLowerCase())
+                  )
+                  .map((rf) => rf.title) || [],
+              source: "TFIDF_RAG",
+            },
+            success: true,
+          };
+        }
+      }
+    }
+  } catch (error) {
+    traceError("patient-coach-tfidf-symptom", error, { dataSource: "TF-IDF RAG" });
+  }
+
+  // STEP 3: Try MedlinePlus API
   try {
     console.log(`[Patient Coach] Trying MedlinePlus for ${symptom}`);
     const medlinePlusInfo = await getPatientSymptomAssessment(symptom, severity as "mild" | "moderate" | "severe");
@@ -489,7 +609,7 @@ async function executeCheckSymptom(
     traceError("patient-coach-medlineplus", error, { dataSource: "MedlinePlus" });
   }
 
-  // STEP 3: Use LLM as final fallback
+  // STEP 4: Use LLM as final fallback
   try {
     console.log(`[Patient Coach] Using LLM fallback for ${symptom}`);
     const provider = createLLMProvider();
@@ -614,7 +734,66 @@ async function executeExplainMedicalTerm(term: string): Promise<ToolCallResult> 
     };
   }
 
-  // STEP 2: Use LLM as fallback
+  // STEP 2: Try TF-IDF RAG search (catches abbreviations, related terms, synonyms)
+  try {
+    const ragResults = searchKnowledgeBase(normalizedTerm, {
+      topK: 3,
+      minScore: 0.08,
+      typeFilter: ["medical_term"],
+    });
+
+    if (ragResults.length > 0) {
+      const topMatch = ragResults[0];
+      const matchedMeta = topMatch.document.metadata as Record<string, unknown>;
+
+      // Try the matched term name in the direct lookup
+      const matchedTermName = (matchedMeta.term as string)?.toLowerCase();
+      if (matchedTermName) {
+        const matchedExplanation = getPatientFriendlyExplanation(matchedTermName);
+        if (matchedExplanation) {
+          console.log(
+            `[Patient Coach] TF-IDF matched term "${normalizedTerm}" → "${matchedTermName}" (score: ${topMatch.score.toFixed(3)})`
+          );
+
+          const matchedDef = getMedicalTermDefinition(matchedTermName);
+          return {
+            toolName: "explainMedicalTerm",
+            result: {
+              term,
+              matchedAs: matchedTermName,
+              explanation: matchedExplanation,
+              category: matchedDef?.category,
+              relatedTerms: matchedDef?.relatedTerms,
+              source: "TFIDF_RAG",
+            },
+            success: true,
+          };
+        }
+      }
+
+      // Even without a direct lookup match, extract explanation from RAG content
+      const content = topMatch.document.content;
+      const friendlyMatch = content.match(/Patient-friendly:\s*(.+)/);
+      if (friendlyMatch) {
+        console.log(
+          `[Patient Coach] TF-IDF partial match for term "${normalizedTerm}" from ${topMatch.document.title} (score: ${topMatch.score.toFixed(3)})`
+        );
+        return {
+          toolName: "explainMedicalTerm",
+          result: {
+            term,
+            explanation: friendlyMatch[1].trim(),
+            source: "TFIDF_RAG",
+          },
+          success: true,
+        };
+      }
+    }
+  } catch (error) {
+    traceError("patient-coach-tfidf-term", error, { dataSource: "TF-IDF RAG" });
+  }
+
+  // STEP 3: Use LLM as fallback
   try {
     console.log(`[Patient Coach] Using LLM fallback for medical term: ${term}`);
     const provider = createLLMProvider();
@@ -743,6 +922,12 @@ async function executeGetFollowUpGuidance(
 
 /**
  * Get dietary guidance
+ * Priority order:
+ * 1. Hardcoded topics (sodium, warfarin, sugar, fluids, protein, general)
+ * 2. Food-drug interactions database (350+ interactions — grapefruit, alcohol, caffeine, etc.)
+ * 3. TF-IDF RAG search (drug monograph food interaction fields)
+ * 4. USDA FoodData Central API (real nutrition data for specific foods)
+ * 5. LLM fallback (for anything else)
  */
 async function executeGetDietaryGuidance(
   topic: string,
@@ -750,7 +935,7 @@ async function executeGetDietaryGuidance(
 ): Promise<ToolCallResult> {
   const normalizedTopic = topic.toLowerCase().trim();
 
-  // Check patient's conditions and medications for relevant dietary info
+  // Detect patient context
   const hasWarfarin = patient.medications.some(
     (m) => m.name.toLowerCase().includes("warfarin")
   );
@@ -762,7 +947,21 @@ async function executeGetDietaryGuidance(
       d.display.toLowerCase().includes("diabetes") ||
       patient.medications.some((m) => m.name.toLowerCase().includes("metformin") || m.name.toLowerCase().includes("insulin"))
   );
+  const hasKidneyDisease = patient.diagnoses.some(
+    (d) => d.display.toLowerCase().includes("kidney") || d.display.toLowerCase().includes("renal")
+  );
 
+  const relevantConditions = patient.diagnoses
+    .filter(
+      (d) =>
+        d.display.toLowerCase().includes("heart") ||
+        d.display.toLowerCase().includes("diabetes") ||
+        d.display.toLowerCase().includes("kidney") ||
+        d.display.toLowerCase().includes("renal")
+    )
+    .map((d) => d.display);
+
+  // STEP 1: Hardcoded topics (fast path for common dietary categories)
   const dietaryInfo: Record<string, { recommendation: string; tips: string[]; cautions: string[] }> = {
     sodium: {
       recommendation: hasHeartFailure
@@ -851,9 +1050,7 @@ async function executeGetDietaryGuidance(
     },
   };
 
-  // Find matching dietary info
   let info = dietaryInfo[normalizedTopic];
-
   if (!info) {
     for (const [key, value] of Object.entries(dietaryInfo)) {
       if (normalizedTopic.includes(key) || key.includes(normalizedTopic)) {
@@ -862,38 +1059,248 @@ async function executeGetDietaryGuidance(
       }
     }
   }
-
-  // Add warfarin-specific info if patient is on warfarin and asking about greens/vegetables
-  if (
-    hasWarfarin &&
-    (normalizedTopic.includes("green") ||
-      normalizedTopic.includes("vegetable") ||
-      normalizedTopic.includes("salad"))
-  ) {
+  if (hasWarfarin && (normalizedTopic.includes("green") || normalizedTopic.includes("vegetable") || normalizedTopic.includes("salad"))) {
     info = dietaryInfo.warfarin;
   }
 
   if (info) {
+    // Enrich hardcoded result with food-drug interactions if relevant
+    const foodInteractions = checkFoodDrugInteractions(patient.medications, normalizedTopic);
+    const interactionWarnings = foodInteractions.map(
+      (fi) => `⚠️ ${fi.drug} + ${fi.food}: ${fi.recommendation}`
+    );
+
     return {
       toolName: "getDietaryGuidance",
       result: {
         topic,
         ...info,
-        relevantConditions: patient.diagnoses
-          .filter(
-            (d) =>
-              d.display.toLowerCase().includes("heart") ||
-              d.display.toLowerCase().includes("diabetes") ||
-              d.display.toLowerCase().includes("kidney")
-          )
-          .map((d) => d.display),
+        cautions: [...info.cautions, ...interactionWarnings],
+        relevantConditions,
         relevantMedications: hasWarfarin ? ["Warfarin"] : [],
+        source: "KNOWLEDGE_BASE",
       },
       success: true,
     };
   }
 
-  // Generic response
+  // STEP 2: Food-drug interactions database (catches grapefruit, alcohol, caffeine, dairy, etc.)
+  const foodInteractions = checkFoodDrugInteractions(patient.medications, normalizedTopic);
+  if (foodInteractions.length > 0) {
+    console.log(`[Patient Coach] Food-drug interaction found for "${normalizedTopic}" with ${foodInteractions.length} interaction(s)`);
+
+    const majorInteractions = foodInteractions.filter((fi) => fi.severity === "major");
+    const otherInteractions = foodInteractions.filter((fi) => fi.severity !== "major");
+
+    const recommendation = majorInteractions.length > 0
+      ? `⚠️ Important: ${normalizedTopic} has a significant interaction with your medication${majorInteractions.length > 1 ? "s" : ""} (${majorInteractions.map((fi) => fi.drug).join(", ")}).`
+      : `${normalizedTopic} may interact with your medication${otherInteractions.length > 1 ? "s" : ""} (${otherInteractions.map((fi) => fi.drug).join(", ")}).`;
+
+    return {
+      toolName: "getDietaryGuidance",
+      result: {
+        topic,
+        recommendation,
+        tips: foodInteractions.map((fi) => fi.recommendation),
+        cautions: foodInteractions
+          .filter((fi) => fi.timing)
+          .map((fi) => `⏰ ${fi.drug}: ${fi.timing}`),
+        interactions: foodInteractions.map((fi) => ({
+          drug: fi.drug,
+          food: fi.food,
+          severity: fi.severity,
+          mechanism: fi.mechanism,
+          recommendation: fi.recommendation,
+        })),
+        relevantConditions,
+        source: "FOOD_DRUG_DB",
+      },
+      success: true,
+    };
+  }
+
+  // STEP 3: TF-IDF RAG search (matches drug monograph food interaction fields)
+  try {
+    const ragResults = searchKnowledgeBase(normalizedTopic, {
+      topK: 3,
+      minScore: 0.05,
+      typeFilter: ["drug_monograph"],
+    });
+
+    // Check if any matched drug is one the patient takes
+    const relevantRagResults = ragResults.filter((r) => {
+      const meta = r.document.metadata as Record<string, unknown>;
+      const genericName = (meta.genericName as string)?.toLowerCase();
+      return patient.medications.some(
+        (m) => m.name.toLowerCase().includes(genericName || "") || (genericName || "").includes(m.name.toLowerCase())
+      );
+    });
+
+    if (relevantRagResults.length > 0) {
+      const topMatch = relevantRagResults[0];
+      const content = topMatch.document.content;
+      const foodInteractionMatch = content.match(/Food interactions:\s*(.+)/);
+
+      if (foodInteractionMatch) {
+        const meta = topMatch.document.metadata as Record<string, unknown>;
+        const drugName = (meta.genericName as string) || topMatch.document.title;
+
+        console.log(
+          `[Patient Coach] TF-IDF matched dietary query "${normalizedTopic}" to ${drugName} food interactions (score: ${topMatch.score.toFixed(3)})`
+        );
+
+        return {
+          toolName: "getDietaryGuidance",
+          result: {
+            topic,
+            recommendation: `Here's dietary information related to your medication ${drugName}:`,
+            tips: foodInteractionMatch[1]
+              .split(";")
+              .map((tip) => tip.trim())
+              .filter(Boolean),
+            cautions: ["Always check with your pharmacist about food interactions with your specific medications"],
+            relevantConditions,
+            source: "TFIDF_RAG",
+          },
+          success: true,
+        };
+      }
+    }
+  } catch (error) {
+    traceError("patient-coach-tfidf-dietary", error, { dataSource: "TF-IDF RAG" });
+  }
+
+  // STEP 4: USDA FoodData Central API (real nutrition data for specific foods)
+  try {
+    console.log(`[Patient Coach] Trying USDA nutrition lookup for "${normalizedTopic}"`);
+    const evaluation = await evaluateFoodChoice(normalizedTopic, {
+      hasHeartFailure,
+      hasDiabetes,
+      hasKidneyDisease,
+      takesWarfarin: hasWarfarin,
+    });
+
+    if (evaluation) {
+      console.log(`[Patient Coach] USDA found nutrition data for "${evaluation.food}"`);
+
+      // Also get condition-specific food suggestions if patient has relevant conditions
+      let conditionSuggestions: { goodChoices: string[]; avoid: string[]; tips: string[] } | null = null;
+      if (hasHeartFailure) conditionSuggestions = await getConditionBasedFoodSuggestions("heart_failure");
+      else if (hasDiabetes) conditionSuggestions = await getConditionBasedFoodSuggestions("diabetes");
+      else if (hasKidneyDisease) conditionSuggestions = await getConditionBasedFoodSuggestions("kidney_disease");
+      else if (hasWarfarin) conditionSuggestions = await getConditionBasedFoodSuggestions("warfarin");
+
+      const recommendation = evaluation.isGoodChoice
+        ? `${evaluation.food} is generally a good choice for your diet.`
+        : `${evaluation.food} may need to be limited based on your health conditions.`;
+
+      return {
+        toolName: "getDietaryGuidance",
+        result: {
+          topic,
+          recommendation,
+          tips: [
+            ...evaluation.reasons,
+            ...(conditionSuggestions?.tips.slice(0, 2) || []),
+          ],
+          cautions: [
+            ...evaluation.nutrientConcerns.map((c) => `⚠️ ${c}`),
+            ...(conditionSuggestions?.avoid.slice(0, 2).map((a) => `Avoid: ${a}`) || []),
+          ],
+          nutritionData: {
+            food: evaluation.food,
+            isGoodChoice: evaluation.isGoodChoice,
+          },
+          relevantConditions,
+          source: "USDA_NUTRITION",
+        },
+        success: true,
+      };
+    }
+  } catch (error) {
+    traceError("patient-coach-usda-dietary", error, { dataSource: "USDA" });
+  }
+
+  // STEP 5: LLM fallback
+  try {
+    console.log(`[Patient Coach] Using LLM fallback for dietary topic: ${topic}`);
+    const provider = createLLMProvider();
+
+    const conditionContext = [
+      hasHeartFailure && "heart failure",
+      hasDiabetes && "diabetes",
+      hasKidneyDisease && "kidney disease",
+      hasWarfarin && "taking warfarin (blood thinner)",
+    ].filter(Boolean).join(", ");
+
+    const medContext = patient.medications.length > 0
+      ? patient.medications.map((m) => m.name).join(", ")
+      : "none documented";
+
+    // Get the patient's full food guidance to include in context
+    const foodGuidance = getFoodGuidanceForPatient(patient.medications);
+    const avoidFoods = foodGuidance.mustAvoid.length > 0
+      ? `Must avoid: ${foodGuidance.mustAvoid.map((f) => `${f.food} (with ${f.drug})`).join(", ")}`
+      : "";
+
+    const prompt = `A patient is asking about dietary guidance related to: "${topic}"
+
+Patient context:
+- Conditions: ${conditionContext || "none documented"}
+- Medications: ${medContext}
+${avoidFoods ? `- Known food-drug interactions: ${avoidFoods}` : ""}
+
+Provide dietary guidance in JSON format:
+{
+  "recommendation": "A clear 1-2 sentence recommendation about this dietary topic for this patient",
+  "tips": ["Practical tip 1", "Practical tip 2", "Practical tip 3"],
+  "cautions": ["Any relevant warnings based on patient's conditions/medications"]
+}
+
+Rules:
+- Use simple, patient-friendly language
+- Be specific to the patient's conditions when relevant
+- Include food-drug interaction warnings if applicable
+- If the topic isn't food-related, say so clearly
+
+Respond ONLY with the JSON object.`;
+
+    const inputGuardrail = applyInputGuardrails(prompt, {
+      sanitizePII: true, usePlaceholders: true, blockCriticalPII: true,
+    });
+
+    const response = await provider.generate(inputGuardrail.output, {
+      spanName: "dietary-guidance-llm",
+      metadata: { topic, fallback: true, pii_sanitized: inputGuardrail.wasSanitized },
+    });
+
+    const outputGuardrail = applyOutputGuardrails(response.content, {
+      sanitizePII: true, usePlaceholders: true,
+    });
+
+    const parsed = extractJsonObject<{
+      recommendation?: string;
+      tips?: string[];
+      cautions?: string[];
+    }>(outputGuardrail.output);
+
+    return {
+      toolName: "getDietaryGuidance",
+      result: {
+        topic,
+        recommendation: parsed.recommendation || "Here's some dietary guidance for your question.",
+        tips: parsed.tips || ["Ask your doctor or a dietitian for personalized advice"],
+        cautions: parsed.cautions || [],
+        relevantConditions,
+        source: "LLM_GENERATED",
+      },
+      success: true,
+    };
+  } catch (error) {
+    traceError("patient-coach-dietary-llm", error);
+  }
+
+  // Final fallback if everything fails
   return {
     toolName: "getDietaryGuidance",
     result: {
@@ -905,6 +1312,8 @@ async function executeGetDietaryGuidance(
         "Ask your doctor if you have any dietary restrictions based on your conditions",
       ],
       cautions: [],
+      relevantConditions,
+      source: "FALLBACK",
     },
     success: true,
   };
