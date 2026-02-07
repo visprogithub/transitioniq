@@ -517,12 +517,12 @@ export function PatientRecoveryCoach({
   const progress = totalSteps > 0 ? (completedCount / totalSteps) * 100 : 0;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6 overflow-x-hidden">
       {/* Header - Going-Home Preparation Tracker */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className={`${colors.light} rounded-2xl p-6 border-2 ${
+        className={`${colors.light} rounded-2xl p-4 sm:p-6 border-2 ${
           patientSummary.readinessLevel === "good"
             ? "border-emerald-200"
             : patientSummary.readinessLevel === "caution"
@@ -530,21 +530,21 @@ export function PatientRecoveryCoach({
             : "border-red-200"
         }`}
       >
-        <div className="flex items-center gap-6">
+        <div className="flex flex-col sm:flex-row items-center gap-4 sm:gap-6">
           {/* Simple Traffic Light Gauge */}
-          <div className="flex flex-col items-center gap-2">
+          <div className="flex flex-col items-center gap-2 flex-shrink-0">
             <div
-              className={`w-20 h-20 rounded-full ${colors.bg} flex items-center justify-center shadow-lg`}
+              className={`w-16 h-16 sm:w-20 sm:h-20 rounded-full ${colors.bg} flex items-center justify-center shadow-lg`}
             >
               {patientSummary.readinessLevel === "good" ? (
-                <ThumbsUp className="w-10 h-10 text-white" />
+                <ThumbsUp className="w-8 h-8 sm:w-10 sm:h-10 text-white" />
               ) : patientSummary.readinessLevel === "caution" ? (
-                <Clock className="w-10 h-10 text-white" />
+                <Clock className="w-8 h-8 sm:w-10 sm:h-10 text-white" />
               ) : (
-                <AlertCircle className="w-10 h-10 text-white" />
+                <AlertCircle className="w-8 h-8 sm:w-10 sm:h-10 text-white" />
               )}
             </div>
-            <span className={`text-sm font-semibold ${colors.text} uppercase tracking-wide`}>
+            <span className={`text-xs sm:text-sm font-semibold ${colors.text} uppercase tracking-wide`}>
               {patientSummary.readinessLevel === "good"
                 ? "You're All Set"
                 : patientSummary.readinessLevel === "caution"
@@ -554,11 +554,11 @@ export function PatientRecoveryCoach({
           </div>
 
           {/* Message */}
-          <div className="flex-1">
-            <h2 className="text-2xl font-bold text-gray-900 mb-2">
+          <div className="flex-1 text-center sm:text-left min-w-0">
+            <h2 className="text-xl sm:text-2xl font-bold text-gray-900 mb-2">
               Hi {patient.name.split(" ")[0]}!
             </h2>
-            <p className="text-lg text-gray-700">{patientSummary.readinessMessage}</p>
+            <p className="text-base sm:text-lg text-gray-700">{patientSummary.readinessMessage}</p>
           </div>
         </div>
 
@@ -590,7 +590,7 @@ export function PatientRecoveryCoach({
       >
         <button
           onClick={() => toggleSection("whatYouNeedToKnow")}
-          className="w-full flex items-center justify-between p-5 hover:bg-gray-50 transition-colors"
+          className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-gray-50 transition-colors"
         >
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
@@ -613,7 +613,7 @@ export function PatientRecoveryCoach({
               exit={{ height: 0, opacity: 0 }}
               className="border-t border-gray-100"
             >
-              <div className="p-5 space-y-4">
+              <div className="p-3 sm:p-5 space-y-3 sm:space-y-4">
                 {patientSummary.whatYouNeedToKnow.map((item, i) => {
                   const Icon = iconMap[item.icon];
                   return (
@@ -622,9 +622,9 @@ export function PatientRecoveryCoach({
                       initial={{ opacity: 0, x: -10 }}
                       animate={{ opacity: 1, x: 0 }}
                       transition={{ delay: i * 0.1 }}
-                      className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg"
+                      className="flex items-start gap-3 sm:gap-4 p-3 sm:p-4 bg-gray-50 rounded-lg"
                     >
-                      <div className="w-10 h-10 bg-white rounded-lg flex items-center justify-center shadow-sm">
+                      <div className="w-8 h-8 sm:w-10 sm:h-10 bg-white rounded-lg flex items-center justify-center shadow-sm flex-shrink-0">
                         <Icon className="w-5 h-5 text-blue-600" />
                       </div>
                       <div>
@@ -649,7 +649,7 @@ export function PatientRecoveryCoach({
       >
         <button
           onClick={() => toggleSection("medications")}
-          className="w-full flex items-center justify-between p-5 hover:bg-gray-50 transition-colors"
+          className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-gray-50 transition-colors"
         >
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
@@ -672,14 +672,14 @@ export function PatientRecoveryCoach({
               exit={{ height: 0, opacity: 0 }}
               className="border-t border-gray-100"
             >
-              <div className="p-5 space-y-3">
+              <div className="p-3 sm:p-5 space-y-3">
                 {patientSummary.medicationReminders.map((med, i) => (
                   <motion.div
                     key={i}
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: i * 0.05 }}
-                    className={`flex items-center justify-between p-4 rounded-lg ${
+                    className={`flex items-center justify-between p-3 sm:p-4 rounded-lg gap-2 ${
                       med.important ? "bg-amber-50 border border-amber-200" : "bg-gray-50"
                     }`}
                   >
@@ -714,7 +714,7 @@ export function PatientRecoveryCoach({
       >
         <button
           onClick={() => toggleSection("questions")}
-          className="w-full flex items-center justify-between p-5 hover:bg-gray-50 transition-colors"
+          className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-gray-50 transition-colors"
         >
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
@@ -737,7 +737,7 @@ export function PatientRecoveryCoach({
               exit={{ height: 0, opacity: 0 }}
               className="border-t border-gray-100"
             >
-              <div className="p-5 space-y-3">
+              <div className="p-3 sm:p-5 space-y-3">
                 {patientSummary.questionsForDoctor.map((question, i) => (
                   <motion.div
                     key={i}
@@ -765,7 +765,7 @@ export function PatientRecoveryCoach({
       >
         <button
           onClick={() => toggleSection("nextSteps")}
-          className="w-full flex items-center justify-between p-5 hover:bg-gray-50 transition-colors"
+          className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-gray-50 transition-colors"
         >
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
@@ -788,7 +788,7 @@ export function PatientRecoveryCoach({
               exit={{ height: 0, opacity: 0 }}
               className="border-t border-gray-100"
             >
-              <div className="p-5 space-y-5">
+              <div className="p-3 sm:p-5 space-y-4 sm:space-y-5">
                 {/* Must Do Before Leaving — high priority items */}
                 {displaySteps.some((s) => s.priority === "high") && (
                   <div>
@@ -909,7 +909,7 @@ export function PatientRecoveryCoach({
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.6 }}
-        className="bg-gradient-to-r from-blue-500 to-blue-600 rounded-xl p-6 text-white"
+        className="bg-gradient-to-r from-blue-500 to-blue-600 rounded-xl p-4 sm:p-6 text-white"
       >
         <div className="flex items-center gap-4">
           <div className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center">

@@ -480,7 +480,7 @@ export default function DashboardPage() {
               <Tooltip content="Test and compare AI models" position="bottom">
                 <button
                   onClick={() => setActiveTab("evaluation")}
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors flex-1 sm:flex-none justify-center ${
+                  className={`hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors flex-1 sm:flex-none justify-center ${
                     activeTab === "evaluation"
                       ? "bg-white text-gray-900 shadow-sm"
                       : "text-gray-600 hover:text-gray-900"
@@ -585,7 +585,7 @@ export default function DashboardPage() {
       )}
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 overflow-x-hidden">
         {/* Demo Context Note */}
         <AnimatePresence>
           {showDemoNote && (

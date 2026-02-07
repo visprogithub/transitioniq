@@ -13,7 +13,7 @@ Live data from the Opik dashboard for `transitioniq`, spanning January 26 – Fe
 | Evaluation dataset | 3 core patients × 12 total demo patients |
 | LLM providers tested | 4 (OpenAI, Google AI, HuggingFace, Groq) |
 | Models tested | 6 (GPT-4o Mini, Gemini 2.5 Flash, Gemini 2.5 Flash Lite, Qwen3-8B, Qwen3-30B-A3B, Llama 3.3 70B) |
-| Evaluation metrics | 7 (score_accuracy, status_correctness, risk_coverage, AnswerRelevance, Correct, LevenshteinRatio) |
+| Evaluation metrics | 4 (score_accuracy, status_correctness, risk_coverage, AnswerRelevance) |
 | Active development days | 12 |
 
 ---
@@ -24,7 +24,7 @@ Live data from the Opik dashboard for `transitioniq`, spanning January 26 – Fe
 
 | Date | Experiments | What Happened |
 |------|-------------|---------------|
-| Jan 26 | 13 | Initial evaluation framework setup, early generic metrics (LevenshteinRatio, AnswerRelevance) |
+| Jan 26 | 13 | Initial evaluation framework setup |
 | Jan 27 | 1 | LLM judge prompt authoring |
 | Jan 31 | **36** | Model comparison sprint — all 6 models, 14 GPT-4o Mini runs alone to establish baseline |
 | Feb 1 | 4 | Specialized prompt extraction (knowledge-retrieval, cost-estimation, care-gap) |
@@ -33,7 +33,7 @@ Live data from the Opik dashboard for `transitioniq`, spanning January 26 – Fe
 | Feb 4 | 5 | Flash Lite evaluation, cross-model comparison |
 | Feb 6 | 3 | Final multi-model evaluation (GPT-4o Mini, Gemini Flash, Qwen3-8B) |
 
-**Key insight**: The evaluation framework itself evolved. Early experiments (Jan 26) used generic NLP metrics like LevenshteinRatio. By Feb 2, the team had designed domain-specific clinical metrics (score_accuracy, status_correctness, risk_coverage) that directly measure discharge safety. This evolution from generic → clinical metrics is visible in the Opik experiment history.
+**Key insight**: The evaluation framework itself evolved. Early experiments (Jan 26) established the evaluation pipeline. By Feb 2, domain-specific clinical metrics (score_accuracy, status_correctness, risk_coverage) were designed to directly measure discharge safety. This evolution is visible in the Opik experiment history.
 
 ---
 
@@ -57,7 +57,7 @@ Live data from the Opik dashboard for `transitioniq`, spanning January 26 – Fe
 
 | Phase | Date Range | Score Accuracy | Status Correctness | Risk Coverage | What Changed |
 |-------|-----------|:-:|:-:|:-:|:---|
-| Early (no metrics) | Jan 31 | — | — | — | Generic metrics only (LevenshteinRatio) |
+| Early (no metrics) | Jan 31 | — | — | — | Evaluation pipeline setup, no clinical metrics yet |
 | First clinical eval | Feb 2 03:45 | 0.933 | 0.767 | 0.942 | Baseline with domain-specific metrics |
 | Prompt refinement | Feb 2 03:51 | **1.000** | **1.000** | **1.000** | Improved scoring prompt, structured output |
 | Sustained peak | Feb 2–Feb 2 | 1.000 | 1.000 | 1.000 | 5 consecutive perfect runs |
@@ -193,4 +193,4 @@ Recent trace sampling shows how every clinical operation generates a traceable a
 
 ### Evaluation Maturity
 
-- The shift from generic metrics (LevenshteinRatio, AnswerRelevance) to clinical metrics (score_accuracy, status_correctness, risk_coverage) reflects the project's evolution from "does the LLM produce reasonable text?" to "does the LLM make safe clinical decisions?" — a necessary maturation for any healthcare AI tool.
+- The shift to domain-specific clinical metrics (score_accuracy, status_correctness, risk_coverage) reflects the project's evolution from "does the LLM produce reasonable text?" to "does the LLM make safe clinical decisions?" — a necessary maturation for any healthcare AI tool.

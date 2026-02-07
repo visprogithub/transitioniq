@@ -815,19 +815,19 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
   }
 
   return (
-    <div className="flex flex-col h-[600px] bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div className="flex flex-col h-[500px] sm:h-[600px] bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden min-w-0">
       {/* Header */}
-      <div className="flex items-center gap-3 p-4 border-b border-gray-100 bg-gradient-to-r from-blue-50 to-indigo-50">
-        <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center">
-          <Bot className="w-5 h-5 text-white" />
+      <div className="flex items-center gap-2 sm:gap-3 p-3 sm:p-4 border-b border-gray-100 bg-gradient-to-r from-blue-50 to-indigo-50">
+        <div className="w-8 h-8 sm:w-10 sm:h-10 bg-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
+          <Bot className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
         </div>
-        <div className="flex-1">
-          <h3 className="font-semibold text-gray-900">Recovery Coach</h3>
-          <p className="text-xs text-gray-500">
+        <div className="flex-1 min-w-0">
+          <h3 className="font-semibold text-gray-900 text-sm sm:text-base">Recovery Coach</h3>
+          <p className="text-xs text-gray-500 hidden sm:block">
             Ask me anything about your recovery
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
           {/* Turn counter */}
           <span className={`text-xs px-2 py-1 rounded-full ${
             isAtLimit ? "bg-red-100 text-red-700" :
@@ -924,7 +924,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       )}
 
       {/* Messages */}
-      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 sm:space-y-4">
         <AnimatePresence initial={false}>
           {messages.map((message, index) => (
             <motion.div
@@ -1073,7 +1073,7 @@ export function PatientChat({ patient, analysis }: PatientChatProps) {
       {/* Input */}
       <form
         onSubmit={handleSubmit}
-        className="p-4 border-t border-gray-100 bg-gray-50"
+        className="p-3 sm:p-4 border-t border-gray-100 bg-gray-50"
       >
         <div className="flex gap-2">
           {/* Mic button (STT) — visible only when voice is configured */}
