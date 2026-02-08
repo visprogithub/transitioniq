@@ -85,6 +85,12 @@ export async function warmAllPrompts(): Promise<void> {
 
   warmupPromise = (async () => {
     try {
+      // Push local prompt templates to Opik (creates new version only if content changed)
+      // This ensures Opik always has the latest prompt templates from the codebase
+      await initializeOpikPrompts().catch((err) =>
+        console.warn("[Opik] Prompt push failed (will use local):", err)
+      );
+
       const results = await Promise.allSettled(
         names.map((name) => opik.getPrompt({ name }))
       );
@@ -507,6 +513,9 @@ const DISCHARGE_ANALYSIS_PROMPT = `You are a clinical decision support system an
 
 ## Recent Lab Results
 {{lab_results}}
+
+## Clinical Knowledge Base Findings (TF-IDF RAG)
+{{knowledge_context}}
 
 ## Task
 Analyze this patient's transition readiness and provide:
@@ -1248,6 +1257,7 @@ export function formatDischargePrompt(
     care_gaps: string;
     cost_barriers: string;
     lab_results: string;
+    knowledge_context: string;
   }
 ): string {
   let formatted = template;

@@ -711,9 +711,10 @@ async function analyzeReadinessTool(input: Record<string, unknown>): Promise<Too
   const costs = (input.costs || []) as CostContext[];
   const boxedWarnings = (input.boxedWarnings || []) as BoxedWarningContext[];
   const drugRecalls = (input.recalls || []) as DrugRecallContext[];
+  const knowledgeContext = input.knowledgeContext as { summary: string; relevantFindings?: Array<{ category: string; finding: string; importance: string }>; redFlags?: string[]; monitoringNeeded?: string[] } | undefined;
 
   console.log(`[Agent Tool] analyze_readiness using model: ${getActiveModelId()}`);
-  console.log(`[Agent Tool] analyze_readiness inputs: ${drugInteractions.length} interactions, ${boxedWarnings.length} boxed warnings, ${drugRecalls.length} recalls, ${careGaps.length} care gaps, ${costs.length} costs`);
+  console.log(`[Agent Tool] analyze_readiness inputs: ${drugInteractions.length} interactions, ${boxedWarnings.length} boxed warnings, ${drugRecalls.length} recalls, ${careGaps.length} care gaps, ${costs.length} costs, knowledge: ${knowledgeContext ? 'yes' : 'no'}`);
 
   try {
     // Convert tool context types to analysis types
@@ -750,14 +751,15 @@ async function analyzeReadinessTool(input: Record<string, unknown>): Promise<Too
       classification: r.classification,
     }));
 
-    // Use LLM-powered analysis with the selected model, including FDA safety data
+    // Use LLM-powered analysis with the selected model, including FDA safety data and knowledge context
     const analysis = await llmAnalyzeReadiness(
       patient,
       formattedInteractions,
       formattedGaps,
       formattedCosts,
       formattedWarnings.length > 0 ? formattedWarnings : undefined,
-      formattedRecalls.length > 0 ? formattedRecalls : undefined
+      formattedRecalls.length > 0 ? formattedRecalls : undefined,
+      knowledgeContext
     );
 
     return {

@@ -109,7 +109,8 @@ export async function analyzeDischargeReadiness(
   careGaps: CareGap[],
   costEstimates: CostEstimate[],
   boxedWarnings?: Array<{ drug: string; warning: string }>,
-  recalls?: Array<{ drugName: string; reason: string; classification: string }>
+  recalls?: Array<{ drugName: string; reason: string; classification: string }>,
+  knowledgeContext?: { summary: string; relevantFindings?: Array<{ category: string; finding: string; importance: string }>; redFlags?: string[]; monitoringNeeded?: string[] }
 ): Promise<DischargeAnalysis> {
   // Note: API key validation is handled by LLMProvider for the active model
 
@@ -137,6 +138,29 @@ export async function analyzeDischargeReadiness(
     fdaRecallsSection = recalls
       .map((r) => `- **${r.drugName}** (${r.classification}): ${r.reason.substring(0, 300)}`)
       .join("\n");
+  }
+
+  // Build clinical knowledge context section from RAG retrieval
+  let knowledgeSection = "No additional clinical knowledge retrieved";
+  if (knowledgeContext) {
+    const parts: string[] = [];
+    if (knowledgeContext.summary) {
+      parts.push(knowledgeContext.summary);
+    }
+    if (knowledgeContext.relevantFindings && knowledgeContext.relevantFindings.length > 0) {
+      parts.push("Key findings:\n" + knowledgeContext.relevantFindings
+        .map((f) => `- [${f.category}] ${f.finding} (${f.importance})`)
+        .join("\n"));
+    }
+    if (knowledgeContext.redFlags && knowledgeContext.redFlags.length > 0) {
+      parts.push("⚠️ Red flags: " + knowledgeContext.redFlags.join("; "));
+    }
+    if (knowledgeContext.monitoringNeeded && knowledgeContext.monitoringNeeded.length > 0) {
+      parts.push("Monitoring needed: " + knowledgeContext.monitoringNeeded.join("; "));
+    }
+    if (parts.length > 0) {
+      knowledgeSection = parts.join("\n\n");
+    }
   }
 
   // Format prompt with patient data
@@ -192,6 +216,7 @@ export async function analyzeDischargeReadiness(
             )
             .join("\n")
         : "No recent labs available",
+    knowledge_context: knowledgeSection,
   });
 
   // Apply input guardrails - check for PII in prompt before sending to LLM
